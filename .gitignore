@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Logs & scratch
+*.log
+
+# Local env & secrets
+.env
+
+# OS / editor cruft
+.DS_Store

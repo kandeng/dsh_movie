@@ -1,0 +1,33 @@
+# Home-level patch for every profile under this DSH_HOME (movie, headless, ...).
+# Layer order: bundle layers -> profile cordis.patch.yml -> this file -> --patch overlays.
+
+# Route model traffic through Alibaba Bailian (Token-Plan dedicated endpoint,
+# OpenAI-compatible). The API key itself lives in server/.env as BAILIAN_API_KEY
+# and is resolved through the credentials seam (apiKeyEnv is a reference, never a value).
+- id: llm-pi-ai
+  config:
+    providers:
+      bailian:
+        displayName: Alibaba Bailian (Token Plan)
+        apiKeyEnv: BAILIAN_API_KEY
+        api: openai-completions
+        baseURL: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+        models:
+          - id: qwen3.8-max
+            name: Qwen3.8 Max
+            contextWindow: 262144
+            maxTokens: 32768
+          - id: qwen3.7-plus
+            name: Qwen3.7 Plus
+            contextWindow: 262144
+            maxTokens: 32768
+
+# Default agent model: vidsay parity (qwen3.8-max, multimodal).
+- id: agent-default-model
+  config:
+    provider: bailian
+    model: qwen3.8-max
+
+# Never upload session logs to DeepSeek from this deployment.
+- id: session-log-deepseek
+  disabled: true

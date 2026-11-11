@@ -1,0 +1,17 @@
+node_modules/
+*.tsbuildinfo
+plugins/*/lib/
+
+# Local env & secrets — never commit
+.env
+.dsh/.credentials.yaml
+.dsh/.anonymous-user-id
+
+# DSH runtime state (regenerated locally on each host boot)
+.dsh/logs/
+.dsh/sessions/
+.dsh/storages/
+.dsh/profiles/*/node_modules/
+
+# Scratch logs
+*.log

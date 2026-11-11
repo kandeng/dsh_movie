@@ -1,0 +1,26 @@
+{
+  "name": "dsh-matrix-identity",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH plugin: Synapse-backed identity provider (provisioning, token brokering, whoami introspection, principal mapping) for dsh_movie",
+  "type": "module",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3"
+  }
+}

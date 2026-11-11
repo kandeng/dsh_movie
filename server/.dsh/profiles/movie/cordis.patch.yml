@@ -1,0 +1,28 @@
+# Movie-profile patch layer, applied after every bundle layer.
+# This inserts the out-of-tree dsh_movie plugins by source path (relative to
+# this file), run through the CLI's tsx loader without a profile install.
+#
+# Non-secret endpoint coordinates live here; the Synapse admin token is a
+# credential *reference* (adminTokenRef) resolved at runtime from the
+# credentials seam (server/.env -> SYNAPSE_ADMIN_TOKEN).
+
+- insert:
+    - id: matrix-identity
+      name: '../../../plugins/dsh-matrix-identity/src/index.ts'
+      config:
+        homeserverUrl: http://127.0.0.1:8008
+        serverName: localhost
+        adminTokenRef: SYNAPSE_ADMIN_TOKEN
+        botUserId: '@vidsay_bot:localhost'
+        whoamiCacheMs: 60000
+        principalListenerPort: 8787
+    - id: matrix-chat
+      name: '../../../plugins/dsh-matrix-chat/src/index.ts'
+      inject: [matrixIdentity, agents, agentDefaultModel, sessions]
+      config:
+        botUserId: '@vidsay_bot:localhost'
+        autoJoinRooms: []
+        initialSyncLimit: 30
+        agentEnabled: true
+        replyWithMentions: true
+        maxReconnectDelayMs: 30000

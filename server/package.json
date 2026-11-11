@@ -1,0 +1,30 @@
+{
+  "name": "dsh-movie-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "scripts": {
+    "dsh": "dsh",
+    "dump:config": "DSH_HOME=$PWD/.dsh dsh --profile movie --dump-config",
+    "start:web": "DSH_HOME=$PWD/.dsh dsh --profile movie --no-open",
+    "start:headless": "DSH_HOME=$PWD/.dsh dsh --profile headless",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:matrix": "node plugins/dsh-matrix-identity/test/smoke.ts",
+    "test:matrix-rotation": "node plugins/dsh-matrix-identity/test/rotation.ts",
+    "test:matrix-chat": "node plugins/dsh-matrix-chat/test/smoke.ts",
+    "seed:demo": "node scripts/seed-demo.ts",
+    "verify:principal": "node scripts/verify-principal.ts",
+    "verify:two-user": "node scripts/verify-two-user.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3"
+  }
+}
