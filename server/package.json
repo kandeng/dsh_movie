@@ -18,10 +18,12 @@
     "test:matrix-chat": "node plugins/dsh-matrix-chat/test/smoke.ts",
     "seed:demo": "node scripts/seed-demo.ts",
     "verify:principal": "node scripts/verify-principal.ts",
-    "verify:two-user": "node scripts/verify-two-user.ts"
+    "verify:two-user": "node scripts/verify-two-user.ts",
+    "verify:gateway": "node scripts/verify-gateway.ts"
   },
   "dependencies": {
-    "@deepseek-ai/dsh": "0.2.2-rc.1"
+    "@deepseek-ai/dsh": "0.2.2-rc.1",
+    "@dsh-movie/protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

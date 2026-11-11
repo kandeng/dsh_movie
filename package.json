@@ -1,0 +1,29 @@
+{
+  "name": "dsh-movie",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "dsh_movie monorepo: DSH movie-making server (Synapse identity + chat + gateway plugins), shared protocol contract, and browser client (SDK + web).",
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck",
+    "start:web": "pnpm --filter dsh-movie-server start:web",
+    "start:headless": "pnpm --filter dsh-movie-server start:headless",
+    "dump:config": "pnpm --filter dsh-movie-server dump:config",
+    "dev:web": "pnpm --filter @dsh-movie/web dev",
+    "build:web": "pnpm --filter @dsh-movie/web build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "node-pty",
+      "koffi",
+      "protobufjs",
+      "@google/genai",
+      "@deepseek-ai/dsh-subprocess-local"
+    ]
+  }
+}

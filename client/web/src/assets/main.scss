@@ -1,0 +1,44 @@
+html:root {
+  --ui-radius: 8px;
+  --ui-radius-small: calc(var(--ui-radius) * 0.5);
+  --ui-radius-large: calc(var(--ui-radius) * 1.5);
+  --el-border-radius-base: var(--ui-radius);
+  --el-border-radius-small: var(--ui-radius-small);
+
+  .el-card {
+    --el-card-border-radius: var(--ui-radius-large);
+  }
+
+  .el-dialog {
+    --el-dialog-border-radius: var(--ui-radius-large);
+  }
+
+  .el-tag {
+    --el-tag-border-radius: var(--ui-radius-small);
+  }
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--el-border-color);
+  border-radius: 4px;
+  &:hover {
+    background-color: var(--el-border-color-darker);
+  }
+}
+*::-webkit-scrollbar-track {
+  background-color: transparent;
+}

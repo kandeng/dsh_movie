@@ -1,0 +1,29 @@
+{
+  "name": "dsh-movie-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH plugin: loopback Leg B/C gateway for dsh_movie. Serves the ComfyUI-subset Leg B endpoints + execution-lifecycle WS and the Leg C JSON-RPC dispatcher, mapping a Matrix token to a principal via ctx.matrixIdentity.",
+  "type": "module",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@dsh-movie/protocol": "workspace:*",
+    "dsh-matrix-identity": "workspace:*",
+    "ws": "^8.22.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,11 @@
+# Root pnpm workspace for dsh_movie (Phase 2).
+# Unifies the shared contract package, the browser client packages, and the
+# DSH server + its out-of-tree plugins so `@dsh-movie/protocol` resolves
+# everywhere from source (tsx on the server, Vite in the browser).
+packages:
+  - protocol
+  - client/sdk
+  - client/web
+  - client/i18n
+  - server
+  - server/plugins/*

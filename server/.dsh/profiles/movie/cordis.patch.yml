@@ -26,3 +26,8 @@
         agentEnabled: true
         replyWithMentions: true
         maxReconnectDelayMs: 30000
+    - id: movie-gateway
+      name: '../../../plugins/dsh-movie-gateway/src/index.ts'
+      inject: [matrixIdentity]
+      config:
+        port: 8788

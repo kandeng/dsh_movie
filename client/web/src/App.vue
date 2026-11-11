@@ -1,212 +1,143 @@
-<script setup>
-import { ref } from 'vue'
-import * as sdk from 'matrix-js-sdk'
-import { config } from './config.js'
+<script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watchEffect } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { elementLocales } from "@dsh-movie/i18n/elementPlus";
+import { locale } from "@dsh-movie/i18n/vue";
+import { uiSettings } from "@/stores/settings";
+import { useAuthStore } from "@/stores/auth";
 
-// The live matrix-js-sdk client is intentionally non-reactive: it is a large,
-// self-referential object that Vue should not proxy.
-let matrixClient = null
-const seenEventIds = new Set()
+const route = useRoute();
+const router = useRouter();
+const auth = useAuthStore();
 
-const user = ref('')
-const password = ref('')
-const busy = ref(false)
-const error = ref('')
+// Element Plus locale follows the active app locale.
+const elementLocale = computed(() => elementLocales[locale.value]);
 
-const loggedIn = ref(false)
-const userId = ref('')
-const principal = ref(null)
-const principalId = ref('')
-const principalError = ref('')
-const roomId = ref('')
-const messages = ref([])
-const draft = ref('')
-
-/** Classify a sender relative to the logged-in user and the bot. */
-function kindOf(sender) {
-  if (sender === userId.value) return 'me'
-  if (sender === config.botUserId) return 'bot'
-  return 'other'
+// Track the OS color-scheme so `theme: "system"` reacts live.
+const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+const systemDark = ref(systemTheme.matches);
+function updateSystemTheme(event: MediaQueryListEvent) {
+  systemDark.value = event.matches;
 }
+systemTheme.addEventListener("change", updateSystemTheme);
+onBeforeUnmount(() => systemTheme.removeEventListener("change", updateSystemTheme));
 
-/** Push one timeline event into the message list, de-duplicated by event id. */
-function ingest(event) {
-  if (event.getType() !== 'm.room.message') return
-  const id = event.getId()
-  if (id && seenEventIds.has(id)) return
-  if (id) seenEventIds.add(id)
-  const content = event.getContent() ?? {}
-  if (content.msgtype !== 'm.text') return
-  const sender = event.getSender() ?? ''
-  messages.value.push({
-    id: id ?? `${messages.value.length}`,
-    sender,
-    name: event.sender?.name ?? sender,
-    body: content.body ?? '',
-    kind: kindOf(sender),
-  })
-}
-
-/** Load the room's existing timeline after the initial sync completes. */
-function loadRoom() {
-  const room = matrixClient?.getRoom(roomId.value)
-  if (!room) return
-  for (const event of room.timeline) ingest(event)
-}
-
-/** Prove the browser->host principal path via the identity plugin's /auth listener. */
-async function provePrincipal(accessToken) {
-  try {
-    const resp = await fetch(`${config.authUrl}/auth/principal`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: accessToken }),
-    })
-    const data = await resp.json()
-    if (resp.ok && data.ok) {
-      principal.value = data.principal
-      principalId.value = data.principalId
-      principalError.value = ''
-    } else {
-      principalError.value = data.error ?? `host responded ${resp.status}`
-    }
-  } catch (err) {
-    principalError.value = `unreachable: ${String(err)}`
+// Apply theme, primary color, font scale, and radius to the document root.
+watchEffect(() => {
+  const { theme, primaryColor, fontScale, radius } = uiSettings.value;
+  const dark = theme === "system" ? systemDark.value : theme === "dark";
+  const root = document.documentElement;
+  root.classList.toggle("dark", dark);
+  root.style.colorScheme = dark ? "dark" : "light";
+  root.style.fontSize = `${(16 * fontScale) / 100}px`;
+  root.style.setProperty("--ui-radius", `${radius}px`);
+  root.style.setProperty("--el-color-primary", primaryColor);
+  for (let level = 1; level <= 9; level++) {
+    root.style.setProperty(
+      `--el-color-primary-light-${level}`,
+      `color-mix(in srgb, ${primaryColor} ${100 - level * 10}%, ${dark ? "#141414" : "#fff"})`,
+    );
   }
-}
+  root.style.setProperty("--el-color-primary-dark-2", `color-mix(in srgb, ${primaryColor} 80%, ${dark ? "#fff" : "#000"})`);
+});
 
-async function onLogin() {
-  busy.value = true
-  error.value = ''
-  try {
-    matrixClient = sdk.createClient({ baseUrl: config.homeserverUrl })
-    const res = await matrixClient.loginWithPassword(user.value.trim(), password.value)
-    const accessToken = res.access_token ?? matrixClient.getAccessToken()
-    userId.value = res.user_id
-
-    // Mode-B trust anchor: hand the Synapse token to the DSH host, which
-    // introspects it and maps it back to a principal.
-    await provePrincipal(accessToken)
-
-    // Resolve the one room: a pre-seeded id, or a fresh room inviting the bot.
-    if (config.demoRoomId) {
-      roomId.value = config.demoRoomId
-      await matrixClient.joinRoom(roomId.value)
-    } else {
-      const created = await matrixClient.createRoom({
-        name: 'Movie Room',
-        preset: 'private_chat',
-        invite: [config.botUserId],
-      })
-      roomId.value = created.room_id
-    }
-
-    matrixClient.on(sdk.RoomEvent.Timeline, (event, room, toStartOfTimeline) => {
-      if (toStartOfTimeline) return
-      if (room && room.roomId !== roomId.value) return
-      ingest(event)
-    })
-    matrixClient.on(sdk.ClientEvent.Sync, (state) => {
-      if (state === sdk.SyncState.Prepared) loadRoom()
-    })
-
-    await matrixClient.startClient({ initialSyncLimit: 50 })
-    loggedIn.value = true
-  } catch (err) {
-    error.value = String(err?.message ?? err)
-  } finally {
-    busy.value = false
-  }
-}
-
-async function sendMessage() {
-  const text = draft.value.trim()
-  if (text === '' || !matrixClient) return
-  draft.value = ''
-  try {
-    await matrixClient.sendTextMessage(roomId.value, text)
-  } catch (err) {
-    error.value = String(err?.message ?? err)
-  }
-}
-
-function logout() {
-  try {
-    matrixClient?.stopClient()
-    matrixClient?.removeAllListeners()
-  } catch {
-    // best-effort teardown
-  }
-  matrixClient = null
-  seenEventIds.clear()
-  loggedIn.value = false
-  userId.value = ''
-  principal.value = null
-  principalId.value = ''
-  principalError.value = ''
-  roomId.value = ''
-  messages.value = []
-  draft.value = ''
-  error.value = ''
+async function onLogout() {
+  await auth.logout();
+  void router.push({ path: "/account", query: { login: "1" } });
 }
 </script>
 
 <template>
-  <main>
-    <section v-if="!loggedIn" class="card">
-      <h1>DSH Movie — Matrix client</h1>
-      <p class="sub">Phase-1 minimal client: Synapse login (Mode B) + one room with the agent bot.</p>
-
-      <label for="user">Matrix user (localpart or full mxid)</label>
-      <input id="user" v-model="user" autocomplete="username" placeholder="movie_demo" />
-
-      <label for="password">Password</label>
-      <input id="password" v-model="password" type="password" autocomplete="current-password" placeholder="••••••••" />
-
-      <button :disabled="busy" @click="onLogin">{{ busy ? 'Signing in…' : 'Sign in' }}</button>
-
-      <p v-if="error" class="error">{{ error }}</p>
-
-      <div class="hint">
-        <div>homeserver: <span class="badge">{{ config.homeserverUrl }}</span></div>
-        <div>host /auth: <span class="badge">{{ config.authUrl }}</span></div>
-        <div>bot: <span class="badge">{{ config.botUserId }}</span></div>
-      </div>
-    </section>
-
-    <section v-else class="card">
-      <header class="room-head">
-        <div>
-          <h1>{{ userId }}</h1>
-          <p class="sub">room <span class="badge">{{ roomId }}</span></p>
+  <el-config-provider :locale="elementLocale">
+    <div class="appRoot">
+      <header class="appBar">
+        <div class="brand" @click="router.push('/chat')">DSH Movie</div>
+        <nav class="nav">
+          <router-link to="/chat" :class="{ active: route.path === '/chat' }">Chat</router-link>
+          <router-link to="/account" :class="{ active: route.path === '/account' }">Account</router-link>
+        </nav>
+        <div class="spacer" />
+        <div v-if="auth.signedIn" class="user">
+          <span class="name">{{ auth.displayName }}</span>
+          <el-button size="small" text @click="onLogout">Sign out</el-button>
         </div>
-        <button class="secondary" @click="logout">Sign out</button>
       </header>
-
-      <div class="meta">
-        <div v-if="principalId">
-          host principal: <span class="badge">{{ principalId }}</span>
-          <template v-if="principal">
-            (verified <code>{{ principal.userId }}</code>, device <code>{{ principal.deviceId ?? '—' }}</code>)
-          </template>
-        </div>
-        <div v-else class="error">principal path failed: {{ principalError }}</div>
-      </div>
-
-      <div class="timeline" style="margin-top: 12px">
-        <div v-for="m in messages" :key="m.id" :class="['msg', m.kind]">
-          <div class="who">{{ m.name }}</div>
-          <div>{{ m.body }}</div>
-        </div>
-        <div v-if="messages.length === 0" class="sub">No messages yet — say hello to the bot.</div>
-      </div>
-
-      <div class="composer">
-        <input v-model="draft" placeholder="Write a message…" @keyup.enter="sendMessage" />
-        <button @click="sendMessage">Send</button>
-      </div>
-
-      <p v-if="error" class="error">{{ error }}</p>
-    </section>
-  </main>
+      <main class="appMain">
+        <router-view />
+      </main>
+    </div>
+  </el-config-provider>
 </template>
+
+<style lang="scss">
+html {
+  background-color: var(--el-bg-color);
+  color: var(--el-text-color-primary);
+  font-family: Calibri, "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+:root {
+  --el-font-family: Calibri, "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+</style>
+
+<style scoped lang="scss">
+.appRoot {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.appBar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 52px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--el-border-color-light);
+  background-color: var(--el-bg-color-overlay);
+}
+
+.brand {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nav {
+  display: flex;
+  gap: 12px;
+
+  a {
+    color: var(--el-text-color-secondary);
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: var(--ui-radius-small);
+
+    &.active {
+      color: var(--el-color-primary);
+      background-color: var(--el-color-primary-light-9);
+    }
+  }
+}
+
+.spacer {
+  flex: 1;
+}
+
+.user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .name {
+    color: var(--el-text-color-primary);
+    font-size: 14px;
+  }
+}
+
+.appMain {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+</style>
