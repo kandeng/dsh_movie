@@ -283,13 +283,15 @@ async function main(): Promise<void> {
     note('live intent->op-script generation', 'BAILIAN_API_KEY unset; the generator would degrade to llm-unavailable')
   } else {
     process.stdout.write('\n— live: real-LLM intent -> op-script over the mux —\n')
-    const accepted = await callLegC(gatewayUrl, 'canvas/script', memberCreds.accessToken, {
+    // P3-M5: canvas/script mutates the workflow graph, so it is host-gated; the
+    // live generation leg drives it with the host token (a member would 403).
+    const accepted = await callLegC(gatewayUrl, 'canvas/script', hostCreds.accessToken, {
       roomId, intent: 'Add the MovieScript and MovieShotPlan nodes and connect the script output to the shot plan input.',
     })
     const ack = accepted.result as { txnId?: string; accepted?: boolean } | undefined
-    check('canvas/script accepts a member intent', accepted.status === 200 && accepted.ok && ack?.accepted === true && typeof ack?.txnId === 'string', ack?.txnId ?? `status ${accepted.status}`)
+    check('canvas/script accepts a host intent', accepted.status === 200 && accepted.ok && ack?.accepted === true && typeof ack?.txnId === 'string', ack?.txnId ?? `status ${accepted.status}`)
     if (ack?.txnId !== undefined) {
-      const stream = await collectScriptStream(wsBase, roomId, ack.txnId, memberCreds.accessToken)
+      const stream = await collectScriptStream(wsBase, roomId, ack.txnId, hostCreds.accessToken)
       const gotScript = stream.script !== null
       check('the mux streamed a script frame', gotScript, gotScript ? 'script received' : `${stream.errorCode ?? 'none'}: ${stream.errorMessage ?? ''}`)
       if (gotScript) {

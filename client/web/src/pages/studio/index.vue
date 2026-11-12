@@ -10,6 +10,8 @@ import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useCanvasBridge } from "@/composables/useCanvasBridge";
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
+import { useRoomRole } from "@/composables/useRoomRole";
+import { useWorkspaceGraph } from "@/composables/useWorkspaceGraph";
 import { useExecStatus } from "@/composables/useExecStatus";
 import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
 import { useMovieRun } from "@/composables/useMovieRun";
@@ -24,7 +26,7 @@ import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
 // useWorkspaceStore/useRoomSpoke/roomGrants/mcpControl/anonymousData/providerBilling/图形同步。
 const auth = useAuthStore();
 const router = useRouter();
-const { timeline, activeRoomId } = useMatrixChat();
+const { timeline, activeRoomId, teamMembers, sendText } = useMatrixChat();
 
 // ── 画布桥接（M5，design doc §3 Option 1）：舞台嵌入固定版本的 ComfyUI 前端 iframe
 //    （同源 /comfy/index.html），父页面通过版本化 postMessage 桥（@dsh-movie/protocol/bridge）
@@ -35,7 +37,7 @@ const canvasFrame = ref<HTMLIFrameElement>();
 const canvasReady = ref(false);
 const selectedNode = ref<number | null>(null);
 const runningDemo = ref(false);
-const readonlyLock = ref(false);
+const previewReadonly = ref(false);
 const paintedCount = ref(0);
 const bridge = useCanvasBridge(canvasFrame);
 
@@ -47,41 +49,40 @@ const bridge = useCanvasBridge(canvasFrame);
 const execStatus = useExecStatus();
 const workflowStore = useWorkflowStore();
 const currentGraph = ref<WorkflowGraph | null>(null);
-// Suppress the save round-trip while a programmatic load settles (the bridge
-// debounces `graphChanged` 400ms, so a 600ms guard covers the echo).
-let suppressSave = false;
+
+// ── P3-M5：主机独占协作（design doc §4）。roomRole 解析 auth/role 并订阅唯一的
+//    workflow/watch mux（实时收敛 + 角色变更）；workspace 承载主机草稿自动保存
+//    （workspace/draft.put，防抖）、撤销/重做、提交、历史与回滚，并对非主机观众强制
+//    只读（bridge.setReadonly(!isHost)）。程序化加载在 suppress 守卫内进行，避免回灌
+//    触发主机自动保存。workflowStore 仅保留给 AI 编排执行器的原子提交（host-only）。──
+const roomIdRef = computed(() => activeRoomId.value ?? "");
+const roomRole = useRoomRole(roomIdRef);
+const workspace = useWorkspaceGraph(roomIdRef, bridge, roomRole);
 
 async function applyGraph(graph: WorkflowGraph): Promise<void> {
-  suppressSave = true;
   currentGraph.value = graph;
-  try {
-    await bridge.loadWorkflow(graph);
-  } finally {
-    setTimeout(() => { suppressSave = false; }, 600);
-  }
+  await workspace.applyGraph(graph);
 }
 
-/** Load the room's persisted graph (or seed + save the demo) into the canvas. */
+/** Load the room's graph (host draft / committed HEAD, or seed the demo) into the canvas. */
 async function hydrate(roomId: string): Promise<void> {
-  workflowStore.reset();
+  workspace.reset();
   execStatus.reset();
   if (!roomId) {
     await applyGraph(buildDemoWorkflow());
     return;
   }
-  try {
-    const record = await workflowStore.load(roomId);
-    if (record) {
-      await applyGraph(record.graph);
-    } else {
-      const demo = buildDemoWorkflow();
-      await applyGraph(demo);
-      await workflowStore.save(roomId, demo).catch(() => {});
-    }
-  } catch {
-    // Persistence unavailable (e.g. signed-out token): fall back to a local demo.
-    await applyGraph(buildDemoWorkflow());
+  // Ensure the role is fresh before choosing draft (host) vs HEAD (viewer).
+  await roomRole.refresh();
+  const graph = await workspace.hydrate();
+  if (graph) {
+    await applyGraph(graph);
+    return;
   }
+  // Empty room: show the demo locally; only the host seeds it as revision 1.
+  const demo = buildDemoWorkflow();
+  await applyGraph(demo);
+  if (roomRole.isHost.value) await workflowStore.save(roomId, demo).catch(() => {});
 }
 
 bridge.onReady(() => {
@@ -92,18 +93,11 @@ bridge.onNodeSelected((id) => { selectedNode.value = id; });
 bridge.onExecPainted(() => { paintedCount.value += 1; });
 bridge.onGraphChanged(({ graph }) => {
   currentGraph.value = graph;
-  if (suppressSave) return;
-  const roomId = activeRoomId.value;
-  if (roomId) void workflowStore.save(roomId, graph).catch(() => {});
+  // Host-only debounced draft autosave; viewers are read-only (no-op inside).
+  workspace.autosave(graph);
 });
 bridge.onBridgeError(({ message }) => {
   ElMessage.error(`${translate("画布桥接错误")}: ${message}`);
-});
-
-// Another collaborator won the write: adopt the host's current graph.
-workflowStore.onConflict(({ current }) => {
-  void applyGraph(current.graph);
-  ElMessage.warning(translate("画布已被其他协作者更新，已同步最新版本"));
 });
 
 watch(activeRoomId, (roomId) => {
@@ -113,12 +107,13 @@ watch(activeRoomId, (roomId) => {
 // ── P3-M3：AI 编排画布。自然语言意图经 Leg C `canvas/script` POST 提交给宿主真实 LLM，
 //    生成的 op-script 通过 mux 流（按 txnId 关联）回灌，由确定性执行器完成
 //    快照→逐条应用→后置校验→（瞬时错误退避重试 / 硬失败回滚快照）→成功单次保存→回报。
-//    应用期间复用 suppressSave 抑制自动保存，保证执行器的单次显式保存为权威写入。──
+//    P3-M5：canvas/script 现为主机独占；应用期间复用 workspace 的 suppress 守卫抑制自动保存，
+//    保证执行器的单次显式保存（workflow/put = 主机提交）为权威写入。──
 const canvasScript = useCanvasScript({
   bridge,
   workflowStore,
-  onApplyStart: () => { suppressSave = true; },
-  onApplyEnd: () => { setTimeout(() => { suppressSave = false; }, 600); },
+  onApplyStart: () => { workspace.beginSuppress(); },
+  onApplyEnd: () => { workspace.endSuppress(); },
 });
 const aiIntent = ref("");
 const aiRunning = computed(() => canvasScript.busy.value);
@@ -306,9 +301,95 @@ function reloadDemo() {
   void applyGraph(buildDemoWorkflow());
 }
 
-function toggleReadonly() {
-  readonlyLock.value = !readonlyLock.value;
-  bridge.setReadonly(readonlyLock.value);
+// ── P3-M5：主机治理（撤销/重做/提交/移交 + 版本历史）与成员只读交互。
+//    只读由角色驱动（useWorkspaceGraph 内 watch role.isHost → bridge.setReadonly(!isHost)）；
+//    主持人可选「只读预览」临时锁定自己的画布。移交从房间花名册挑选继任者，经
+//    room/transferHost 改写 Matrix 权限级并广播 role 帧；成员只能发群聊请求移交。──
+const historyOpen = ref(false);
+const transferDialogVisible = ref(false);
+
+/** The current host's display name (falls back to the mxid). */
+const hostName = computed(() => {
+  const id = roomRole.host.value;
+  if (!id) return translate("未知");
+  return teamMembers.value.find((member) => member.userId === id)?.name ?? id;
+});
+
+/** Roster members eligible to receive the host seat (not the host, not bots). */
+const transferCandidates = computed(() =>
+  teamMembers.value.filter((member) => !member.host && !member.bot),
+);
+
+function togglePreview() {
+  if (!roomRole.isHost.value) return;
+  previewReadonly.value = !previewReadonly.value;
+  bridge.setReadonly(previewReadonly.value);
+}
+
+// Leaving/entering the host seat clears any host preview lock (role watch re-asserts readonly).
+watch(() => roomRole.isHost.value, () => { previewReadonly.value = false; });
+
+function formatCommitTime(timestamp: number): string {
+  if (!timestamp) return "—";
+  try { return new Date(timestamp).toLocaleString(); } catch { return "—"; }
+}
+
+async function onUndo() {
+  await workspace.undo();
+  if (workspace.lastError.value) ElMessage.error(`${translate("撤销失败")}: ${workspace.lastError.value}`);
+}
+
+async function onRedo() {
+  await workspace.redo();
+  if (workspace.lastError.value) ElMessage.error(`${translate("重做失败")}: ${workspace.lastError.value}`);
+}
+
+async function onCommit() {
+  const message = window.prompt(translate("提交说明"), "") ?? "";
+  const record = await workspace.commit(message.trim());
+  if (record === null) {
+    ElMessage.error(`${translate("提交失败")}: ${workspace.lastError.value ?? ""}`);
+    return;
+  }
+  ElMessage.success(`${translate("已提交")} r${record.rev}`);
+}
+
+async function onRevert(rev: number) {
+  const message = window.prompt(translate("回滚说明"), `${translate("回滚到")} r${rev}`) ?? "";
+  const record = await workspace.revert(rev, message.trim());
+  if (record === null) {
+    ElMessage.error(`${translate("回滚失败")}: ${workspace.lastError.value ?? ""}`);
+    return;
+  }
+  ElMessage.success(`${translate("已回滚到")} r${rev} → r${record.rev}`);
+}
+
+/** Load a committed revision into the canvas for viewing (does not move HEAD). */
+async function onViewCommit(rev: number) {
+  const entry = await workspace.getCommit(rev);
+  if (entry === null) {
+    ElMessage.error(`${translate("读取历史版本失败")}: ${workspace.lastError.value ?? ""}`);
+    return;
+  }
+  await applyGraph(entry.graph);
+  ElMessage.success(`${translate("已载入历史版本")} r${rev}`);
+}
+
+function openTransferDialog() {
+  if (!roomRole.isHost.value) return;
+  transferDialogVisible.value = true;
+}
+
+async function onTransferHost(targetUserId: string) {
+  const ok = await roomRole.transferHost(targetUserId);
+  transferDialogVisible.value = false;
+  if (ok) ElMessage.success(translate("已移交主持人"));
+  else ElMessage.error(`${translate("移交主持人失败")}: ${roomRole.error.value ?? ""}`);
+}
+
+function onRequestHost() {
+  void sendText(translate("我请求成为主持人，请把主持权限移交给我。"));
+  ElMessage.success(translate("已在群聊中发送移交请求"));
 }
 
 // ── 停靠式聊天框分栏：右列宽度由可拖拽分隔条实时调整，夹紧到 [320, 55vw]；
@@ -433,23 +514,20 @@ onScopeDispose(() => { onResizeUp(); });
             <el-button size="small" :disabled="!canvasReady" :loading="runningDemo" @click="runDemoLifecycle">
               {{ translate("运行演示生命周期") }}
             </el-button>
-            <el-button size="small" :disabled="!canvasReady" @click="reloadDemo">
+            <el-button size="small" :disabled="!canvasReady || !roomRole.isHost.value" @click="reloadDemo">
               {{ translate("重载演示图") }}
-            </el-button>
-            <el-button size="small" :disabled="!canvasReady" @click="toggleReadonly">
-              {{ readonlyLock ? translate("解除只读锁") : translate("设为只读") }}
             </el-button>
             <el-input
               v-model="aiIntent"
               class="aiInput"
               size="small"
               :placeholder="translate('用自然语言编排画布，例如：把剧本节点连到分镜节点')"
-              :disabled="!canvasReady || aiRunning"
+              :disabled="!canvasReady || aiRunning || !roomRole.isHost.value"
               @keyup.enter="submitAiIntent" />
             <el-button
               size="small"
               type="primary"
-              :disabled="!canvasReady || aiIntent.trim() === ''"
+              :disabled="!canvasReady || aiIntent.trim() === '' || !roomRole.isHost.value"
               :loading="aiRunning"
               @click="submitAiIntent">
               {{ translate("AI 编排画布") }}
@@ -459,14 +537,80 @@ onScopeDispose(() => { onResizeUp(); });
               class="liveDot"
               :class="{ on: execStatus.connected.value }"
               :title="execStatus.connected.value ? translate('实时状态已连接') : translate('实时状态未连接')" />
-            <span class="revBadge" :title="translate('图修订号')">
-              r{{ workflowStore.currentRev.value }}<template v-if="workflowStore.saving.value">…</template>
-            </span>
             <span class="canvasHint">
               <template v-if="!canvasReady">{{ translate("画布正在启动……") }}</template>
               <template v-else-if="selectedNode !== null">{{ translate("已选中节点 #") }}{{ selectedNode }}</template>
               <template v-else>{{ translate("点击画布节点以查看选中项") }}</template>
             </span>
+          </div>
+          <!-- P3-M5：主机治理条。主持人：撤销/重做/提交/移交 + 只读预览；成员：只读横幅 + 请求移交。
+               右侧常驻当前修订号（含草稿标记）与版本历史开关。 -->
+          <div class="govBar">
+            <template v-if="roomRole.isHost.value">
+              <span class="hostBadge" :title="translate('当前主持人')">{{ translate("主持人") }}：{{ hostName }}</span>
+              <el-button size="small" :disabled="workspace.undoDepth.value === 0 || workspace.busy.value" @click="onUndo">
+                {{ translate("撤销") }}
+              </el-button>
+              <el-button size="small" :disabled="workspace.redoDepth.value === 0 || workspace.busy.value" @click="onRedo">
+                {{ translate("重做") }}
+              </el-button>
+              <el-button
+                size="small"
+                type="primary"
+                :disabled="!workspace.hasDraft.value || workspace.busy.value"
+                @click="onCommit">
+                {{ translate("提交版本") }}
+              </el-button>
+              <el-button size="small" :disabled="transferCandidates.length === 0" @click="openTransferDialog">
+                {{ translate("移交主持人") }}
+              </el-button>
+              <el-button size="small" text :disabled="!canvasReady" @click="togglePreview">
+                {{ previewReadonly ? translate("退出只读预览") : translate("只读预览") }}
+              </el-button>
+            </template>
+            <template v-else>
+              <span class="readonlyBanner">{{ translate("只读模式：仅主持人可编辑画布") }}</span>
+              <el-button size="small" :disabled="!roomRole.host.value" @click="onRequestHost">
+                {{ translate("请求成为主持人") }}
+              </el-button>
+            </template>
+            <span class="govSpacer" />
+            <span class="revBadge" :title="translate('图修订号')">
+              r{{ workspace.rev.value }}<template v-if="workspace.hasDraft.value"> · {{ translate("草稿") }}</template>
+            </span>
+            <el-button size="small" text @click="historyOpen = !historyOpen">
+              {{ historyOpen ? translate("收起历史") : translate("版本历史") }}
+            </el-button>
+          </div>
+          <!-- P3-M5：版本历史面板。点击查看把某个已提交快照载入画布（不移动 HEAD）；主持人可回滚。 -->
+          <div v-if="historyOpen" class="historyPanel">
+            <div class="historyHead">
+              <span class="historyTitle">{{ translate("版本历史") }}</span>
+              <span class="historyCount">{{ workspace.commits.value.length }} {{ translate("个版本") }}</span>
+            </div>
+            <ul v-if="workspace.commits.value.length > 0" class="historyList">
+              <li
+                v-for="entry in [...workspace.commits.value].reverse()"
+                :key="entry.rev"
+                class="historyItem">
+                <span class="historyRev" :class="{ head: entry.rev === workspace.rev.value }">r{{ entry.rev }}</span>
+                <span class="historyMsg">{{ entry.message || translate("（无说明）") }}</span>
+                <span class="historyMeta">{{ formatCommitTime(entry.timestamp) }}</span>
+                <span class="historyActions">
+                  <el-button size="small" text @click="onViewCommit(entry.rev)">{{ translate("查看") }}</el-button>
+                  <el-button
+                    v-if="roomRole.isHost.value"
+                    size="small"
+                    text
+                    type="warning"
+                    :disabled="entry.rev === workspace.rev.value || workspace.busy.value"
+                    @click="onRevert(entry.rev)">
+                    {{ translate("回滚") }}
+                  </el-button>
+                </span>
+              </li>
+            </ul>
+            <p v-else class="historyEmpty">{{ translate("尚无提交版本") }}</p>
           </div>
           <!-- P3-M3：最近一次 AI 编排的逐条操作结果（成功/失败/跳过）。 -->
           <div v-if="canvasScript.opResults.value.length > 0" class="aiResults">
@@ -487,12 +631,12 @@ onScopeDispose(() => { onResizeUp(); });
               class="movieInput"
               size="small"
               :placeholder="translate('描述你想生成的影片，例如：一只猫在月球上跳舞')"
-              :disabled="!canvasReady || movieRunning"
+              :disabled="!canvasReady || movieRunning || !roomRole.isHost.value"
               @keyup.enter="submitMovieIntent" />
             <el-button
               size="small"
               type="primary"
-              :disabled="!canvasReady || movieIntent.trim() === ''"
+              :disabled="!canvasReady || movieIntent.trim() === '' || !roomRole.isHost.value"
               :loading="movieRunning"
               @click="submitMovieIntent">
               {{ translate("运行影片") }}
@@ -586,6 +730,24 @@ onScopeDispose(() => { onResizeUp(); });
           @stage-image="openImage"
           @stage-file="openFile" />
       </div>
+
+      <!-- P3-M5：主持人移交选择器（从房间花名册挑选继任者）。 -->
+      <el-dialog
+        v-model="transferDialogVisible"
+        :title="translate('移交主持人')"
+        width="420px"
+        append-to-body
+        destroy-on-close>
+        <ul v-if="transferCandidates.length > 0" class="transferList">
+          <li v-for="member in transferCandidates" :key="member.userId" class="transferItem">
+            <span class="transferName">{{ member.name }}</span>
+            <el-button size="small" type="primary" @click="onTransferHost(member.userId)">
+              {{ translate("移交") }}
+            </el-button>
+          </li>
+        </ul>
+        <p v-else class="transferEmpty">{{ translate("没有可移交的成员") }}</p>
+      </el-dialog>
     </template>
 
     <!-- 媒体查看器：视频 / 图片 / 只读文本预览。 -->
@@ -681,6 +843,140 @@ onScopeDispose(() => { onResizeUp(); });
   font-size: 12px;
   color: var(--el-text-color-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+.govBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.govSpacer {
+  flex: 1 1 auto;
+}
+
+.hostBadge {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-color-warning);
+}
+
+.readonlyBanner {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.historyPanel {
+  flex: 0 0 auto;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-light);
+}
+
+.historyHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.historyTitle {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.historyCount {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.historyList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.historyItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+  font-size: 12px;
+}
+
+.historyRev {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--el-text-color-secondary);
+
+  &.head {
+    color: var(--el-color-primary);
+    font-weight: 600;
+  }
+}
+
+.historyMsg {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyMeta {
+  flex: 0 0 auto;
+  color: var(--el-text-color-placeholder);
+}
+
+.historyActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.historyEmpty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.transferList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.transferItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.transferName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transferEmpty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
 }
 
 .aiInput {

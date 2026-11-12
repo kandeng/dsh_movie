@@ -343,7 +343,10 @@ async function main(): Promise<void> {
     }
 
     process.stdout.write('\n— live: re-plan corrective script over the mux —\n')
-    const seed = await callLegC(gatewayUrl, 'canvas/script', memberCreds.accessToken, { roomId, intent: 'Add the MovieScript and MovieShotPlan nodes and connect them.' })
+    // P3-M5: canvas/script (POST + mux) is host-gated since it mutates the graph;
+    // the member still reports canvas/result, but the seed + corrective pull use
+    // the host token.
+    const seed = await callLegC(gatewayUrl, 'canvas/script', hostCreds.accessToken, { roomId, intent: 'Add the MovieScript and MovieShotPlan nodes and connect them.' })
     const seedAck = seed.result as { txnId?: string } | undefined
     if (typeof seedAck?.txnId === 'string') {
       const rolled = await callLegC(gatewayUrl, 'canvas/result', memberCreds.accessToken, {
@@ -353,7 +356,7 @@ async function main(): Promise<void> {
       const rolledAck = rolled.result as { replanTxnId?: string } | undefined
       check('the rolled-back result yields a replanTxnId', typeof rolledAck?.replanTxnId === 'string', rolledAck?.replanTxnId ?? 'none')
       if (typeof rolledAck?.replanTxnId === 'string') {
-        const corrective = await collectScriptStream(wsBase, roomId, rolledAck.replanTxnId, memberCreds.accessToken)
+        const corrective = await collectScriptStream(wsBase, roomId, rolledAck.replanTxnId, hostCreds.accessToken)
         const gotScript = corrective.script !== null
         check('the replanTxnId streams a corrective script', gotScript, gotScript ? 'script received' : `${corrective.errorCode ?? 'none'}: ${corrective.errorMessage ?? ''}`)
         if (gotScript) check('the corrective script is a well-formed CanvasScript', isCanvasScript(corrective.script))

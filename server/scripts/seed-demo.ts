@@ -51,8 +51,9 @@ const logger = {
   },
 }
 
-/** Dev-only throwaway local account; not a real secret. */
+/** Dev-only throwaway local accounts; not real secrets. */
 const DEMO_LOCALPART = 'movie_demo'
+const DEMO_MEMBER_LOCALPART = 'movie_demo_member'
 const DEMO_PASSWORD = 'movie-demo-pass'
 
 async function main(): Promise<void> {
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
   }
   const endpoint: MatrixEndpoint = { baseUrl, serverName, adminToken }
   const demoUserId = `@${DEMO_LOCALPART}:${serverName}`
+  const memberUserId = `@${DEMO_MEMBER_LOCALPART}:${serverName}`
 
   const created = await ensureUser(endpoint, logger, demoUserId, {
     password: DEMO_PASSWORD,
@@ -73,15 +75,24 @@ async function main(): Promise<void> {
   })
   process.stdout.write(`demo user: ${demoUserId} (provisioned=${created})\n`)
 
-  const roomId = await createRoom(endpoint, logger, 'Movie Demo Room', demoUserId, [botUserId])
+  // P3-M5: a second throwaway account so the browser E2E can run two sessions
+  // (host + member) against the same room. Same fixed dev-only password.
+  const createdMember = await ensureUser(endpoint, logger, memberUserId, {
+    password: DEMO_PASSWORD,
+    displayName: 'Movie Demo Member',
+  })
+  process.stdout.write(`demo member: ${memberUserId} (provisioned=${createdMember})\n`)
+
+  const roomId = await createRoom(endpoint, logger, 'Movie Demo Room', demoUserId, [memberUserId, botUserId])
   if (roomId === null) {
     process.stdout.write('room creation failed\n')
     process.exit(1)
   }
-  // Ensure the bot is a member even if the host is not currently running.
+  // Ensure the bot + member are joined even if their clients are offline.
   await joinRoomAs(endpoint, logger, botUserId, roomId)
+  await joinRoomAs(endpoint, logger, memberUserId, roomId)
   process.stdout.write(`demo room: ${roomId}\n`)
-  process.stdout.write(`demo password: ${DEMO_PASSWORD} (dev-only throwaway)\n`)
+  process.stdout.write(`demo password: ${DEMO_PASSWORD} (dev-only throwaway, both accounts)\n`)
   process.stdout.write(`\nStart the client with:\n  VITE_ROOM_ID='${roomId}' pnpm --dir ../client/web dev\n`)
 }
 

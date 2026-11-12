@@ -21,8 +21,9 @@ export type MatrixRoomId = string
 
 /**
  * A caller's role within a room (resolved from Synapse room state):
- * - `host`   - the room creator (project owner / privileged seat).
- * - `member` - a joined participant who is not the creator.
+ * - `host`   - the seat holding the top power level (the room creator is the
+ *              initial host; the seat is transferable - Phase-3 P3-M5).
+ * - `member` - a joined participant who is not the current host.
  * - `none`   - not a member, or the role could not be resolved (fail-closed).
  */
 export type RoomRole = 'host' | 'member' | 'none'

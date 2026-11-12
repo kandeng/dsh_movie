@@ -1,16 +1,17 @@
 /**
- * Room-scoped workflow persistence over Leg C (Phase-2 M6).
+ * Room-scoped committed-graph persistence over Leg C (Phase-2 M6, Phase-3 P3-M5).
  *
- * The DSH host is the graph authority: it keeps one in-memory
- * {@link WorkflowRecord} per room behind `workflow/get` + `workflow/put`
- * (see `server/plugins/dsh-movie-gateway/src/workflow-store.ts`). This composable
- * is the browser half of that contract: it loads the persisted graph, saves
- * local edits with optimistic concurrency (`baseRev`), and resyncs on a
- * `conflict` (HTTP 409) so a stale writer can pick up the current revision.
+ * The DSH host is the graph authority: it keeps a file-backed per-room workspace
+ * behind `workflow/get` (committed HEAD) + `workflow/put` (a host-only commit)
+ * (see `server/plugins/dsh-movie-gateway/src/workspace-store.ts`). As of P3-M5
+ * writes are host-exclusive and live convergence runs over the `workflow/watch`
+ * mux channel (see `useRoomRole` / `useWorkspaceGraph`), so this composable is
+ * now the narrow HEAD read + single atomic commit used by the AI op-script
+ * executor (`useCanvasScript`) and the host's first-seed of an empty room.
  *
  * The caller's Matrix access token is read fresh per RPC from the auth store, so
- * a re-validated session propagates automatically (Leg C is stateless). No Matrix
- * room-state consensus: the host store is authoritative for the prototype.
+ * a re-validated session propagates automatically (Leg C is stateless). The
+ * optimistic-concurrency `conflict` path is retained for a stale host write.
  */
 
 import { onScopeDispose, ref, type Ref } from "vue";

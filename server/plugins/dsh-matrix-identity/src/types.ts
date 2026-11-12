@@ -19,8 +19,9 @@ export type MatrixRoomId = string
 
 /**
  * A user's role within a room, resolved from Synapse's room state:
- * - `host` — the room creator (the project owner / DSH host seat).
- * - `member` — a joined participant who is not the creator.
+ * - `host` — the seat holding the top power level (Phase-3 P3-M5); the room
+ *   creator is the initial host, and the seat can be transferred to a member.
+ * - `member` — a joined participant who is not the current host.
  * - `none` — not a member of the room (or the role could not be resolved).
  */
 export type RoomRole = 'host' | 'member' | 'none'
@@ -93,12 +94,25 @@ export interface MatrixIdentity {
   /** Sync display name and/or avatar (data URI) into the Matrix profile. */
   syncProfile(userId: MatrixUserId, displayName?: string, avatarDataUri?: string): Promise<boolean>
   /**
-   * Resolve a user's role in a room from Synapse's room state. The creator is
-   * the `host`; any other joined member is a `member`; a non-member (or a
-   * degraded lookup) is `none`. Downstream policy (Phase 2 Remote decisions)
-   * keys privileged agent actions on `host`.
+   * Resolve a user's role in a room from Synapse's room state. The host seat is
+   * whoever holds the top power level (falling back to the room creator when
+   * power levels are unavailable); any other joined member is a `member`; a
+   * non-member (or a degraded lookup) is `none`. Downstream policy keys
+   * privileged, graph-mutating actions on `host` (Phase-3 P3-M5).
    */
   roomRole(roomId: MatrixRoomId, userId: MatrixUserId): Promise<RoomRole>
+  /**
+   * Resolve the current host seat for a room (top power level; creator
+   * fallback). Returns `null` when it cannot be determined.
+   */
+  roomHost(roomId: MatrixRoomId): Promise<MatrixUserId | null>
+  /**
+   * Transfer the host seat to `targetUserId` by editing the room's
+   * `m.room.power_levels` (target -> 100, prior host -> 50), signed with the
+   * ACTING host's own Matrix token. Returns the new host mxid, or `null` when
+   * degraded/refused.
+   */
+  transferHost(roomId: MatrixRoomId, actingToken: string, targetUserId: MatrixUserId): Promise<MatrixUserId | null>
 }
 
 declare module '@deepseek-ai/cordis' {

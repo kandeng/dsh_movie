@@ -28,6 +28,7 @@ import type { MatrixRoomId, MatrixUserId, Principal, RoomRole } from './principa
 import type { WorkflowGraph } from './leg-b.ts'
 import type { OpResult } from './op-script.ts'
 import type { MoviePipelineStatus } from './movie.ts'
+import type { CommitMeta, DraftState } from './workspace.ts'
 
 /* -------------------------------------------------------------------------- */
 /* Request / response envelope                                                 */
@@ -187,13 +188,60 @@ export interface WorkflowRecord {
   updatedBy: MatrixUserId | null
 }
 
-/** `workflow.*` - the room-scoped workflow graph store (Phase-2 M6). */
+/** `workflow.*` - the room-scoped workflow graph store (Phase-2 M6).
+ *
+ * P3-M5 makes the graph host-authoritative in the strict sense: `workflow/get`
+ * reads the committed HEAD (any room seat), while `workflow/put` is the host-only
+ * commit primitive (a non-host writer is refused `forbidden`). The richer draft /
+ * undo-redo / history / revert surface lives in {@link WorkspaceNamespace}; live
+ * convergence is pushed on the `workflow/watch` mux channel (see
+ * `@dsh-movie/protocol/workspace` {@link WorkflowWatchFrame}).
+ */
 export interface WorkflowNamespace {
   'workflow/get': Method<{ roomId: MatrixRoomId }, { workflow: WorkflowRecord | null }>
   'workflow/put': Method<
     { roomId: MatrixRoomId; graph: WorkflowGraph; baseRev?: number | undefined },
     { workflow: WorkflowRecord }
   >
+}
+
+/**
+ * `workspace.*` - the host-owned per-room workspace (Phase-3 P3-M5): an
+ * uncommitted `draft` with a server-side undo/redo snapshot stack, plus an
+ * append-only committed history of full-fledged graph snapshots (GitHub-style).
+ *
+ * Write operations (`draft.put`, `undo`, `redo`, `commit`, `revert`) are
+ * host-only; reads (`draft.get`, `history.list`, `history.get`) are open to any
+ * room seat. `commit` promotes the current draft (or an explicit graph) to a new
+ * revision; `revert` is a FORWARD commit restoring an old snapshot.
+ */
+export interface WorkspaceNamespace {
+  'workspace/draft.get': Method<{ roomId: MatrixRoomId }, DraftState>
+  'workspace/draft.put': Method<{ roomId: MatrixRoomId; graph: WorkflowGraph }, DraftState>
+  'workspace/undo': Method<{ roomId: MatrixRoomId }, DraftState>
+  'workspace/redo': Method<{ roomId: MatrixRoomId }, DraftState>
+  'workspace/commit': Method<
+    { roomId: MatrixRoomId; message?: string | undefined },
+    { workflow: WorkflowRecord }
+  >
+  'workspace/history.list': Method<{ roomId: MatrixRoomId }, { commits: CommitMeta[] }>
+  'workspace/history.get': Method<{ roomId: MatrixRoomId; rev: number }, { commit: CommitMeta; graph: WorkflowGraph }>
+  'workspace/revert': Method<
+    { roomId: MatrixRoomId; rev: number; message?: string | undefined },
+    { workflow: WorkflowRecord }
+  >
+  /** Per-room workspace file listing (typed stub; not yet implemented). */
+  'workspace/list': Method<{ roomId: MatrixRoomId; path?: string }, { entries: string[] }>
+}
+
+/**
+ * `room.*` - room-seat governance (Phase-3 P3-M5). `room/transferHost` lets the
+ * current host hand the host seat to another member by editing the room's
+ * `m.room.power_levels` (successor -> 100, prior host -> 50) using the caller's
+ * own token; the gateway then broadcasts the new host on `workflow/watch`.
+ */
+export interface RoomNamespace {
+  'room/transferHost': Method<{ roomId: MatrixRoomId; targetUserId: MatrixUserId }, { host: MatrixUserId }>
 }
 
 /**
@@ -237,18 +285,13 @@ export interface AgentNamespace {
   'agent/steer': Method<{ roomId: MatrixRoomId; message: string }, { accepted: boolean }>
 }
 
-/** `workspace.*` - per-user/room workspace file access (typed now, impl later). */
-export interface WorkspaceNamespace {
-  'workspace/list': Method<{ roomId: MatrixRoomId; path?: string }, { entries: string[] }>
-}
-
 /** `quota.*` - usage/quota reporting (typed now, impl later). */
 export interface QuotaNamespace {
   'quota/get': Method<{ userId?: MatrixUserId }, { used: number; limit: number }>
 }
 
 /** Every Leg C namespace method map, keyed by namespace. */
-export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, CanvasNamespace, MovieNamespace, AgentNamespace, WorkspaceNamespace, QuotaNamespace {}
+export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, WorkspaceNamespace, RoomNamespace, CanvasNamespace, MovieNamespace, AgentNamespace, QuotaNamespace {}
 
 /** Every Leg C method name (`<namespace>/<method>`). */
 export type LegCMethod = keyof LegCNamespaces
@@ -269,6 +312,15 @@ export const IMPLEMENTED_METHODS: readonly LegCMethod[] = [
   'assets/get',
   'workflow/get',
   'workflow/put',
+  'workspace/draft.get',
+  'workspace/draft.put',
+  'workspace/undo',
+  'workspace/redo',
+  'workspace/commit',
+  'workspace/history.list',
+  'workspace/history.get',
+  'workspace/revert',
+  'room/transferHost',
   'canvas/script',
   'canvas/result',
   'canvas/replan',

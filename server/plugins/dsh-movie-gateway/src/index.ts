@@ -60,12 +60,19 @@ export interface Config {
    * exists (populated by `scripts/fetch-comfy-frontend.ts`).
    */
   comfyStaticDir: string
+  /**
+   * Directory holding the file-backed per-room workspaces (P3-M5): committed
+   * graph history + the host's uncommitted draft. Empty (default) resolves to
+   * `<server>/.dsh/workspaces`.
+   */
+  workspaceRoot: string
 }
 
 /** Schemastery validation + defaults for {@link Config}. */
 export const Config: z<Config> = z.object({
   port: z.number().min(0).default(8788),
   comfyStaticDir: z.string().default(''),
+  workspaceRoot: z.string().default(''),
 })
 
 /** Build the gateway's loopback coordinates for a port. */
@@ -111,6 +118,10 @@ export function apply(ctx: Context, config: Config): void {
       : defaultStatic
     const staticDir = existsSync(configuredStatic) ? configuredStatic : undefined
     const bridgeExtensionFile = resolve(pluginDir, 'comfy-bridge', 'bridge-extension.js')
+    // The file-backed per-room workspace root (P3-M5). Mirrors the ComfyUI
+    // static-dir resolution: an explicit config wins, else `<server>/.dsh/workspaces`.
+    const defaultWorkspaceRoot = resolve(serverRoot, '.dsh', 'workspaces')
+    const workspaceRoot = config.workspaceRoot !== '' ? resolve(config.workspaceRoot) : defaultWorkspaceRoot
     if (staticDir === undefined) {
       ctx.logger.warn('[movie-gateway] ComfyUI frontend build not found at %s; /comfy/ will 503 (run scripts/fetch-comfy-frontend.ts)', configuredStatic)
     }
@@ -151,6 +162,7 @@ export function apply(ctx: Context, config: Config): void {
         bridgeExtensionFile: existsSync(bridgeExtensionFile) ? bridgeExtensionFile : undefined,
         canvasAgent,
         director,
+        workspaceRoot,
         ...(ctx.jobs === undefined ? {} : { jobs: ctx.jobs }),
       })
       ctx.logger.info('[movie-gateway] Leg B/C gateway active on port %d', config.port)

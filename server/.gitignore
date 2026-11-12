@@ -11,6 +11,7 @@ plugins/*/lib/
 .dsh/logs/
 .dsh/sessions/
 .dsh/storages/
+.dsh/workspaces/
 .dsh/profiles/*/node_modules/
 
 # Scratch logs

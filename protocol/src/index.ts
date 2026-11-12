@@ -17,6 +17,7 @@
 export * from './principal.ts'
 export * from './leg-b.ts'
 export * from './leg-c.ts'
+export * from './workspace.ts'
 export * from './nodes.ts'
 export * from './movie.ts'
 export * from './bridge.ts'

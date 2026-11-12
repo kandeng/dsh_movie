@@ -28,6 +28,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from 'node:crypto'
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { extname, join, normalize, resolve as resolvePath } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import type {
@@ -46,6 +47,9 @@ import type {
   StreamFrame,
   StreamOpen,
   WorkflowGraph,
+  WorkflowWatchFrame,
+  MatrixUserId,
+  RoomRole,
 } from '@dsh-movie/protocol'
 import { IMPLEMENTED_METHODS, methodFromApiPath, buildObjectInfo, initialPipelineStatus } from '@dsh-movie/protocol'
 import type { MatrixIdentity, MatrixPrincipal } from 'dsh-matrix-identity/types'
@@ -56,7 +60,7 @@ import {
   cannedLifecycle,
   nodeIdsOf,
 } from './fixtures.ts'
-import { createWorkflowStore } from './workflow-store.ts'
+import { createWorkspaceStore } from './workspace-store.ts'
 import { objectInfoFromMovieNodes } from './movie-executor/registry.ts'
 import { validatePromptGraph } from './movie-executor/validate.ts'
 import { topoSort } from './movie-executor/topo.ts'
@@ -124,6 +128,12 @@ export interface GatewayServerDeps {
    * `unimplemented` so the gateway boots without the agent runtime.
    */
   director?: MovieDirector | undefined
+  /**
+   * Absolute directory holding the file-backed per-room workspaces (P3-M5):
+   * each room gets a sub-directory of committed history + host draft. When
+   * unset (verifiers/tests) the store falls back to a throwaway temp dir.
+   */
+  workspaceRoot?: string | undefined
 }
 
 /** One live movie pipeline run (P3-M4): its evolving status and mux subscribers. */
@@ -138,6 +148,14 @@ interface MovieRunRecord {
   subscribers: Set<MovieRunListener>
   /** True once the director emitted its terminal `done` stage. */
   settled: boolean
+}
+
+/** One live `workflow/watch` subscriber (P3-M5): its viewer + frame sink. */
+interface WatchSubscription {
+  /** The Matrix user id of the watching client (used to compute per-viewer role). */
+  userId: MatrixUserId
+  /** Emit one watch frame to this subscriber's mux stream. */
+  send(frame: WorkflowWatchFrame): void
 }
 
 /** A running gateway: introspection plus a reversible stop. */
@@ -296,9 +314,12 @@ const MAX_REPLANS = 2
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, director } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, director, workspaceRoot } = deps
   const execClients = new Set<WebSocket>()
-  const workflowStore = createWorkflowStore()
+  // P3-M5: the host-authoritative, file-backed per-room workspace replaces the
+  // volatile in-memory store. When no root is injected (verifiers/tests), fall
+  // back to a throwaway temp dir so the gateway still boots.
+  const workflowStore = createWorkspaceStore(workspaceRoot ?? join(tmpdir(), 'dsh-movie-workspaces'))
   /** Pending canvas script generations keyed by txnId (POST triggers, mux delivers). */
   const canvasPlans = new Map<string, Promise<CanvasGenerateResult>>()
   /** Last canvas execution result per room, retained for the P3-M4 re-plan loop. */
@@ -317,6 +338,33 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
    * subscribes to incremental stages, and `movie/status` reads the last pipeline.
    */
   const movieRuns = new Map<string, MovieRunRecord>()
+  /**
+   * Live `workflow/watch` subscribers per room (P3-M5). Members and the host
+   * attach to converge on the committed HEAD; every host write (commit/revert)
+   * and every host transfer fans out here so all clients stay in sync.
+   */
+  const roomWatchers = new Map<string, Set<WatchSubscription>>()
+
+  /** Fan one committed/reverted frame out to every watcher of a room. */
+  function broadcastWatch(roomId: string, frame: WorkflowWatchFrame): void {
+    const watchers = roomWatchers.get(roomId)
+    if (watchers === undefined) return
+    for (const sub of watchers) sub.send(frame)
+  }
+
+  /**
+   * Fan a host-transfer out to every watcher, computing each viewer's own role
+   * from the new host (a watcher is always a room member, so it is `host` when
+   * it holds the seat and `member` otherwise).
+   */
+  function broadcastRoleChange(roomId: string, host: MatrixUserId | null): void {
+    const watchers = roomWatchers.get(roomId)
+    if (watchers === undefined) return
+    for (const sub of watchers) {
+      const role: RoomRole = host !== null && sub.userId === host ? 'host' : 'member'
+      sub.send({ stage: 'role', host, role })
+    }
+  }
   let queueCounter = 0
   let listening = false
 
@@ -367,8 +415,8 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       return
     }
     const role = await identity.roomRole(roomId, principal.userId)
-    if (role === 'none') {
-      sendFrame(socket, { stream, type: 'error', payload: { code: 'forbidden', message: 'role "none" may not request canvas scripts; room membership required' } })
+    if (role !== 'host') {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'forbidden', message: `role "${role}" may not request canvas scripts; host seat required` } })
       return
     }
     const plan = canvasPlans.get(txnId)
@@ -447,6 +495,64 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
   }
 
   /**
+   * Subscribe a client to a room's live `workflow/watch` channel (Phase-3 P3-M5).
+   * Re-authenticates the socket caller, refuses non-members, emits an initial
+   * `snapshot` (committed HEAD + the caller's resolved role/host), then keeps the
+   * stream open, fanning out every subsequent commit/revert/role frame so all
+   * clients converge. Unlike `movie/run`, this stream does not self-terminate; it
+   * closes when the socket does.
+   * @param socket - the mux client socket.
+   * @param open - the `open` control message carrying `{ roomId, token }`.
+   */
+  async function handleWorkflowWatchStream(socket: WebSocket, open: StreamOpen): Promise<void> {
+    const stream = open.stream
+    const params = open.params ?? {}
+    const token = stringParam(params, 'token')
+    if (token === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'missing-token', message: 'a Matrix access token is required' } })
+      return
+    }
+    const principal = await identity.whoami(token)
+    if (principal === null) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'invalid-token', message: 'the Matrix access token was rejected' } })
+      return
+    }
+    const roomId = stringParam(params, 'roomId')
+    if (roomId === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'bad-request', message: 'roomId is required' } })
+      return
+    }
+    const role = await identity.roomRole(roomId, principal.userId)
+    if (role === 'none') {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'forbidden', message: 'role "none" may not watch the workflow; room membership required' } })
+      return
+    }
+    const host = await identity.roomHost(roomId)
+    const snapshot: WorkflowWatchFrame = { stage: 'snapshot', workflow: workflowStore.getHead(roomId), role, host }
+    sendFrame(socket, { stream, type: 'data', payload: snapshot })
+    const sub: WatchSubscription = {
+      userId: principal.userId,
+      send(frame: WorkflowWatchFrame): void {
+        sendFrame(socket, { stream, type: 'data', payload: frame })
+      },
+    }
+    let watchers = roomWatchers.get(roomId)
+    if (watchers === undefined) {
+      watchers = new Set<WatchSubscription>()
+      roomWatchers.set(roomId, watchers)
+    }
+    watchers.add(sub)
+    const detach = (): void => {
+      const set = roomWatchers.get(roomId)
+      if (set === undefined) return
+      set.delete(sub)
+      if (set.size === 0) roomWatchers.delete(roomId)
+    }
+    socket.on('close', detach)
+    socket.on('error', detach)
+  }
+
+  /**
    * Begin a corrective re-plan for a canvas transaction that did not fully
    * commit (Phase-3 P3-M4 observe->re-plan loop, design doc §5). Starts a
    * `canvasAgent.replan` turn seeded with the failed ops, registers it under a
@@ -467,7 +573,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     const intent = canvasIntents.get(sourceTxnId) ?? canvasIntents.get(origin) ?? ''
     const result = canvasResultsByTxn.get(sourceTxnId)
     const failedOps = (result?.opResults ?? []).filter((entry): boolean => !entry.ok)
-    const graph = workflowStore.get(roomId)?.graph ?? null
+    const graph = workflowStore.getHead(roomId)?.graph ?? null
     const replanTxnId = randomUUID()
     const plan = canvasAgent.replan(roomId, intent, failedOps, graph)
     // Swallow the floating rejection; the mux stream re-awaits the same plan.
@@ -605,7 +711,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           sendApi(res, err('forbidden', 'role "none" may not read the workflow; room membership required'))
           return
         }
-        const payload: LegCResponse<'workflow/get'> = { workflow: workflowStore.get(roomId) }
+        const payload: LegCResponse<'workflow/get'> = { workflow: workflowStore.getHead(roomId) }
         sendApi(res, ok(payload))
         return
       }
@@ -621,18 +727,203 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           return
         }
         const role = await identity.roomRole(roomId, principal.userId)
-        if (role === 'none') {
-          sendApi(res, err('forbidden', 'role "none" may not write the workflow; room membership required'))
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not write the workflow; host seat required`))
           return
         }
         const rawBaseRev = params['baseRev']
         const baseRev = typeof rawBaseRev === 'number' && Number.isFinite(rawBaseRev) ? rawBaseRev : undefined
-        const result = workflowStore.put(roomId, rawGraph as WorkflowGraph, principal.userId, baseRev)
+        const result = workflowStore.putGraph(roomId, rawGraph as WorkflowGraph, principal.userId, baseRev)
         if (!result.ok) {
           sendApi(res, err('conflict', `stale baseRev; the current revision is ${result.current.rev}`))
           return
         }
+        broadcastWatch(roomId, { stage: 'committed', workflow: result.record, by: principal.userId })
         const payload: LegCResponse<'workflow/put'> = { workflow: result.record }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/draft.get': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not read the draft; room membership required'))
+          return
+        }
+        const payload: LegCResponse<'workspace/draft.get'> = workflowStore.readDraft(roomId)
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/draft.put': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const rawGraph = params['graph']
+        if (typeof rawGraph !== 'object' || rawGraph === null) {
+          sendApi(res, err('bad-request', 'graph is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not write the draft; host seat required`))
+          return
+        }
+        const payload: LegCResponse<'workspace/draft.put'> = workflowStore.putDraft(roomId, rawGraph as WorkflowGraph)
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/undo': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not undo the draft; host seat required`))
+          return
+        }
+        const payload: LegCResponse<'workspace/undo'> = workflowStore.undo(roomId)
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/redo': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not redo the draft; host seat required`))
+          return
+        }
+        const payload: LegCResponse<'workspace/redo'> = workflowStore.redo(roomId)
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/commit': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not commit; host seat required`))
+          return
+        }
+        const message = stringParam(params, 'message') ?? ''
+        const record = workflowStore.commitDraft(roomId, principal.userId, message)
+        if (record === null) {
+          sendApi(res, err('not-found', 'nothing to commit; the workspace has no draft or head'))
+          return
+        }
+        broadcastWatch(roomId, { stage: 'committed', workflow: record, by: principal.userId })
+        const payload: LegCResponse<'workspace/commit'> = { workflow: record }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/history.list': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not read history; room membership required'))
+          return
+        }
+        const payload: LegCResponse<'workspace/history.list'> = { commits: workflowStore.listCommits(roomId) }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/history.get': {
+        const roomId = stringParam(params, 'roomId')
+        const rawRev = params['rev']
+        if (roomId === undefined || typeof rawRev !== 'number' || !Number.isFinite(rawRev)) {
+          sendApi(res, err('bad-request', 'roomId and rev are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not read history; room membership required'))
+          return
+        }
+        const entry = workflowStore.getCommit(roomId, rawRev)
+        if (entry === null) {
+          sendApi(res, err('not-found', `no committed revision ${String(rawRev)}`))
+          return
+        }
+        const payload: LegCResponse<'workspace/history.get'> = entry
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/revert': {
+        const roomId = stringParam(params, 'roomId')
+        const rawRev = params['rev']
+        if (roomId === undefined || typeof rawRev !== 'number' || !Number.isFinite(rawRev)) {
+          sendApi(res, err('bad-request', 'roomId and rev are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not revert; host seat required`))
+          return
+        }
+        const message = stringParam(params, 'message') ?? ''
+        const record = workflowStore.revert(roomId, rawRev, principal.userId, message)
+        if (record === null) {
+          sendApi(res, err('not-found', `no committed revision ${String(rawRev)} to revert to`))
+          return
+        }
+        broadcastWatch(roomId, { stage: 'reverted', workflow: record, by: principal.userId, fromRev: rawRev })
+        const payload: LegCResponse<'workspace/revert'> = { workflow: record }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workspace/list': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not list the workspace; room membership required'))
+          return
+        }
+        const entries = workflowStore.listCommits(roomId).map((commit): string => commit.file)
+        const payload: LegCResponse<'workspace/list'> = { entries }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'room/transferHost': {
+        const roomId = stringParam(params, 'roomId')
+        const targetUserId = stringParam(params, 'targetUserId')
+        if (roomId === undefined || targetUserId === undefined) {
+          sendApi(res, err('bad-request', 'roomId and targetUserId are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not transfer the host seat; host seat required`))
+          return
+        }
+        const host = await identity.transferHost(roomId, token, targetUserId)
+        if (host === null) {
+          sendApi(res, err('internal', 'the host transfer was rejected by the homeserver'))
+          return
+        }
+        broadcastRoleChange(roomId, host)
+        const payload: LegCResponse<'room/transferHost'> = { host }
         sendApi(res, ok(payload))
         return
       }
@@ -647,8 +938,8 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           return
         }
         const role = await identity.roomRole(roomId, principal.userId)
-        if (role === 'none') {
-          sendApi(res, err('forbidden', 'role "none" may not request canvas scripts; room membership required'))
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not request canvas scripts; host seat required`))
           return
         }
         if (canvasAgent === undefined) {
@@ -656,7 +947,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           return
         }
         const txnId = randomUUID()
-        const currentGraph = workflowStore.get(roomId)?.graph ?? null
+        const currentGraph = workflowStore.getHead(roomId)?.graph ?? null
         const plan = canvasAgent.generate(roomId, intent, currentGraph)
         // Swallow the floating rejection; the mux stream re-awaits the same plan.
         void plan.catch((): void => {})
@@ -1097,6 +1388,13 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           void handleMovieRunStream(socket, open).catch((error: unknown) => {
             logger.warn('[movie-gateway] movie/run stream failed: %s', String(error))
             sendFrame(socket, { stream, type: 'error', payload: { code: 'internal', message: 'movie run stream failed' } })
+          })
+          return
+        }
+        if (open.channel === 'workflow/watch') {
+          void handleWorkflowWatchStream(socket, open).catch((error: unknown) => {
+            logger.warn('[movie-gateway] workflow/watch stream failed: %s', String(error))
+            sendFrame(socket, { stream, type: 'error', payload: { code: 'internal', message: 'workflow watch stream failed' } })
           })
           return
         }

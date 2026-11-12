@@ -276,6 +276,157 @@ export async function roomMembers(endpoint: MatrixEndpoint, roomId: MatrixRoomId
   }
 }
 
+/** The Matrix power level that marks the room `host` seat (Phase-3 P3-M5). */
+export const HOST_POWER_LEVEL = 100
+
+/** The power level a prior host is demoted to on transfer (still a member). */
+export const DEMOTED_POWER_LEVEL = 50
+
+/** A room's `m.room.power_levels` content (the subset the host model uses). */
+export interface RoomPowerLevels {
+  /** Per-user power levels (only joined/explicitly-listed users appear). */
+  users: Record<MatrixUserId, number>
+  /** The default level for users not listed in `users`. */
+  usersDefault: number
+}
+
+/**
+ * Read one current state event's content via the Synapse ADMIN API
+ * (`GET /_synapse/admin/v1/rooms/<roomId>/state`). The client state API
+ * (`/_matrix/client/v3/rooms/<id>/state/...`) forbids a non-member reader when
+ * room previews are disabled, and the admin token's user is typically NOT a
+ * member of user rooms; the admin endpoint reads any room's state server-wide.
+ * @param endpoint - resolved Synapse endpoint.
+ * @param roomId - the room to inspect.
+ * @param type - the state event type (e.g. `m.room.power_levels`).
+ * @param stateKey - the state key (default the empty key).
+ * @returns the event content, or `null` when unavailable (degraded).
+ */
+export async function roomStateContent(
+  endpoint: MatrixEndpoint,
+  roomId: MatrixRoomId,
+  type: string,
+  stateKey = '',
+): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await fetch(
+      `${endpoint.baseUrl}/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/state`,
+      { headers: authHeaders(endpoint.adminToken) },
+    )
+    if (!response.ok) return null
+    const data = await response.json() as { state?: unknown }
+    if (!Array.isArray(data.state)) return null
+    for (const entry of data.state) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const event = entry as { type?: unknown; state_key?: unknown; content?: unknown }
+      if (event.type !== type) continue
+      const key = typeof event.state_key === 'string' ? event.state_key : ''
+      if (key !== stateKey) continue
+      return typeof event.content === 'object' && event.content !== null
+        ? event.content as Record<string, unknown>
+        : null
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Read a room's `m.room.power_levels` content via the Synapse admin API (see
+ * {@link roomStateContent}); works for rooms the admin token's user has not joined.
+ * @param endpoint - resolved Synapse endpoint.
+ * @param roomId - the room to inspect.
+ * @returns the power-level subset, or `null` when unavailable (degraded).
+ */
+export async function roomPowerLevels(endpoint: MatrixEndpoint, roomId: MatrixRoomId): Promise<RoomPowerLevels | null> {
+  const content = await roomStateContent(endpoint, roomId, 'm.room.power_levels')
+  if (content === null) return null
+  const users: Record<MatrixUserId, number> = {}
+  if (content.users !== null && typeof content.users === 'object') {
+    for (const [mxid, level] of Object.entries(content.users as Record<string, unknown>)) {
+      if (typeof level === 'number') users[mxid] = level
+    }
+  }
+  const usersDefault = typeof content.users_default === 'number' ? content.users_default : 0
+  return { users, usersDefault }
+}
+
+/**
+ * Resolve the host seat from power levels: the single user at or above
+ * {@link HOST_POWER_LEVEL}, tie-broken by mxid for determinism.
+ * @param pl - the room power levels (or null).
+ * @returns the host mxid, or an empty string when nobody holds the host level.
+ */
+export function hostFromPowerLevels(pl: RoomPowerLevels | null): MatrixUserId | '' {
+  if (pl === null) return ''
+  let best: MatrixUserId | '' = ''
+  let bestLevel = Number.NEGATIVE_INFINITY
+  for (const [mxid, level] of Object.entries(pl.users)) {
+    if (level < HOST_POWER_LEVEL) continue
+    if (level > bestLevel || (level === bestLevel && (best === '' || mxid < best))) {
+      best = mxid
+      bestLevel = level
+    }
+  }
+  return best
+}
+
+/**
+ * Transfer the room `host` seat to `targetUserId` by editing
+ * `m.room.power_levels`: the target is raised to {@link HOST_POWER_LEVEL} and
+ * every prior holder of that level is demoted to {@link DEMOTED_POWER_LEVEL}.
+ * The PUT is signed with the ACTING host's own token (a level-100 user is
+ * authorized to edit power_levels), and the rest of the content (events, ban,
+ * kick, ...) is preserved verbatim.
+ * @param endpoint - resolved Synapse endpoint.
+ * @param logger - diagnostics sink.
+ * @param roomId - the room whose host seat moves.
+ * @param actingToken - the current host's Matrix access token.
+ * @param targetUserId - the member being promoted to host.
+ * @returns the new host mxid, or an empty string when degraded/refused.
+ */
+export async function setRoomHostAs(
+  endpoint: MatrixEndpoint,
+  logger: AdminLogger,
+  roomId: MatrixRoomId,
+  actingToken: string,
+  targetUserId: MatrixUserId,
+): Promise<MatrixUserId | ''> {
+  const stateUrl = `${endpoint.baseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`
+  try {
+    // Read the CURRENT full content via the admin API so the PUT preserves every
+    // field (events/users_default/ban/kick/...); the client state GET would 403
+    // for the non-member admin token and wipe them on the subsequent PUT.
+    const content: Record<string, unknown> = (await roomStateContent(endpoint, roomId, 'm.room.power_levels')) ?? {}
+    const rawUsers = content.users !== null && typeof content.users === 'object'
+      ? content.users as Record<string, unknown>
+      : {}
+    const users: Record<MatrixUserId, number> = {}
+    for (const [mxid, level] of Object.entries(rawUsers)) {
+      if (typeof level === 'number') users[mxid] = level
+    }
+    for (const [mxid, level] of Object.entries(users)) {
+      if (level >= HOST_POWER_LEVEL && mxid !== targetUserId) users[mxid] = DEMOTED_POWER_LEVEL
+    }
+    users[targetUserId] = HOST_POWER_LEVEL
+    const next = { ...content, users }
+    const put = await fetch(stateUrl, {
+      method: 'PUT',
+      headers: authHeaders(actingToken),
+      body: JSON.stringify(next),
+    })
+    if (!put.ok) {
+      logger.warn(`[matrix] setRoomHostAs -> HTTP ${put.status}: ${await bodyPreview(put)}`)
+      return ''
+    }
+    return targetUserId
+  } catch (error) {
+    logger.warn(`[matrix] setRoomHostAs failed: ${String(error)}`)
+    return ''
+  }
+}
+
 /**
  * Invite a target into a room as a given inviter. A target already in the room
  * is treated as success (idempotent), matching the vidsay provisioning pattern.

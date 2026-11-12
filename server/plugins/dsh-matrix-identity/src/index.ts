@@ -24,9 +24,12 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   brokerToken as adminBrokerToken,
   ensureUser,
+  hostFromPowerLevels,
   passwordLogin,
   roomCreator,
   roomMembers,
+  roomPowerLevels,
+  setRoomHostAs,
   syncMatrixProfile,
   whoami as adminWhoami,
   type MatrixEndpoint,
@@ -125,6 +128,18 @@ export function apply(ctx: Context, config: Config): void {
     return { baseUrl, serverName, adminToken: resolved.value }
   }
 
+  /**
+   * Resolve the room's host seat: the top power-level holder (Phase-3 P3-M5),
+   * falling back to the `m.room.create` sender when power levels are
+   * unavailable. Returns an empty string when neither can be determined.
+   */
+  async function resolveHost(endpoint: MatrixEndpoint, roomId: MatrixRoomId): Promise<MatrixUserId | ''> {
+    const fromPower = hostFromPowerLevels(await roomPowerLevels(endpoint, roomId))
+    if (fromPower !== '') return fromPower
+    const creator = await roomCreator(endpoint, roomId)
+    return creator.length > 0 ? creator : ''
+  }
+
   const service: MatrixIdentity = {
     async isConfigured(): Promise<boolean> {
       return (await resolveEndpoint()) !== null
@@ -196,14 +211,30 @@ export function apply(ctx: Context, config: Config): void {
     async roomRole(roomId: MatrixRoomId, userId: MatrixUserId): Promise<RoomRole> {
       const endpoint = await resolveEndpoint()
       if (endpoint === null) return 'none'
-      // The creator holds the `host` seat; everyone else who has joined is a
-      // `member`. A degraded/empty lookup (Synapse down, unknown room, user not
-      // in the member list) resolves to `none` so callers fail closed.
-      const creator = await roomCreator(endpoint, roomId)
-      if (creator.length > 0 && creator === userId) return 'host'
+      // The host seat is whoever holds the top power level (Phase-3 P3-M5); the
+      // room creator is the fallback when power levels are unavailable. Any
+      // other joined member is a `member`. A degraded/empty lookup (Synapse
+      // down, unknown room, user not in the member list) resolves to `none` so
+      // callers fail closed.
+      const host = await resolveHost(endpoint, roomId)
+      if (host !== '' && host === userId) return 'host'
       const members = await roomMembers(endpoint, roomId)
       if (members.includes(userId)) return 'member'
       return 'none'
+    },
+
+    async roomHost(roomId: MatrixRoomId): Promise<MatrixUserId | null> {
+      const endpoint = await resolveEndpoint()
+      if (endpoint === null) return null
+      const host = await resolveHost(endpoint, roomId)
+      return host === '' ? null : host
+    },
+
+    async transferHost(roomId: MatrixRoomId, actingToken: string, targetUserId: MatrixUserId): Promise<MatrixUserId | null> {
+      const endpoint = await resolveEndpoint()
+      if (endpoint === null) return null
+      const next = await setRoomHostAs(endpoint, ctx.logger, roomId, actingToken, targetUserId)
+      return next === '' ? null : next
     },
   }
 
