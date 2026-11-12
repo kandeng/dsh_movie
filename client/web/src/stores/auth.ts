@@ -58,6 +58,10 @@ export const useAuthStore = defineStore(
     const restored = ref(false);
     // Resolved (blob) URL for the avatar `mxc://` uri, safe to bind to `<img>`.
     const avatarHttpUrl = ref("");
+    // M7: session liveness. `sessionValid` flips false when a re-validation
+    // proves the stored token is dead; `revalidating` guards concurrent checks.
+    const sessionValid = ref(true);
+    const revalidating = ref(false);
 
     /** Build the SDK-facing Matrix half-session from the stored auth session. */
     function matrixSession() {
@@ -206,11 +210,43 @@ export const useAuthStore = defineStore(
     function invalidate(): void {
       session.value = null;
       restored.value = false;
+      sessionValid.value = false;
+    }
+
+    /**
+     * Re-validate the stored token against Synapse (`whoami`) without a full
+     * restore. On failure the session is invalidated (bouncing guarded routes to
+     * login). Leg C/Leg B re-read the token per call/socket, so a still-valid
+     * session needs no propagation. Returns whether the token is valid.
+     */
+    async function revalidate(): Promise<boolean> {
+      const current = session.value;
+      if (!current?.accessToken) {
+        sessionValid.value = false;
+        return false;
+      }
+      if (revalidating.value) return sessionValid.value;
+      revalidating.value = true;
+      try {
+        const verified = await whoami(sdkConfig, current.accessToken);
+        if (!verified) {
+          invalidate();
+          return false;
+        }
+        sessionValid.value = true;
+        return true;
+      } catch {
+        // A network blip is not proof the token died; keep the session.
+        return sessionValid.value;
+      } finally {
+        revalidating.value = false;
+      }
     }
 
     async function logout(): Promise<void> {
       session.value = null;
       restored.value = false;
+      sessionValid.value = true;
     }
 
     return {
@@ -224,9 +260,12 @@ export const useAuthStore = defineStore(
       displayName,
       avatarUrl,
       avatarHttpUrl,
+      sessionValid,
+      revalidating,
       login,
       logout,
       restore,
+      revalidate,
       invalidate,
       refreshProfile,
       updateProfile,

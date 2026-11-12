@@ -25,6 +25,7 @@
  */
 
 import type { MatrixRoomId, MatrixUserId, Principal, RoomRole } from './principal.ts'
+import type { WorkflowGraph } from './leg-b.ts'
 
 /* -------------------------------------------------------------------------- */
 /* Request / response envelope                                                 */
@@ -43,6 +44,7 @@ export type ApiErrorCode =
   | 'invalid-token'
   | 'forbidden'
   | 'not-found'
+  | 'conflict'
   | 'unimplemented'
   | 'internal'
 
@@ -163,6 +165,35 @@ export interface AssetsNamespace {
   'assets/get': Method<{ id: string }, { asset: AssetRecord | null }>
 }
 
+/**
+ * A persisted workflow graph (Phase-2 M6): one room-scoped editor graph plus
+ * its optimistic-concurrency revision and last-writer lineage. The host is the
+ * authority; the browser saves/loads through `workflow/put` + `workflow/get`.
+ */
+export interface WorkflowRecord {
+  /** Stable record id (currently the room id). */
+  id: string
+  /** The room this graph belongs to. */
+  roomId: MatrixRoomId
+  /** The serialized ComfyUI-style editor graph. */
+  graph: WorkflowGraph
+  /** Monotonic revision; a stale `baseRev` on put is rejected `conflict`. */
+  rev: number
+  /** Last-write timestamp (epoch ms). */
+  updatedAt: number
+  /** Last writer, when known. */
+  updatedBy: MatrixUserId | null
+}
+
+/** `workflow.*` - the room-scoped workflow graph store (Phase-2 M6). */
+export interface WorkflowNamespace {
+  'workflow/get': Method<{ roomId: MatrixRoomId }, { workflow: WorkflowRecord | null }>
+  'workflow/put': Method<
+    { roomId: MatrixRoomId; graph: WorkflowGraph; baseRev?: number | undefined },
+    { workflow: WorkflowRecord }
+  >
+}
+
 /** `agent.*` - steer/stop/approve a running room agent (typed now, impl later). */
 export interface AgentNamespace {
   'agent/status': Method<{ roomId: MatrixRoomId }, { running: boolean; turn?: string }>
@@ -181,7 +212,7 @@ export interface QuotaNamespace {
 }
 
 /** Every Leg C namespace method map, keyed by namespace. */
-export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, AgentNamespace, WorkspaceNamespace, QuotaNamespace {}
+export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, AgentNamespace, WorkspaceNamespace, QuotaNamespace {}
 
 /** Every Leg C method name (`<namespace>/<method>`). */
 export type LegCMethod = keyof LegCNamespaces
@@ -200,6 +231,8 @@ export const IMPLEMENTED_METHODS: readonly LegCMethod[] = [
   'registry/get',
   'assets/list',
   'assets/get',
+  'workflow/get',
+  'workflow/put',
 ] as const
 
 /**

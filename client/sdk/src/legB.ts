@@ -18,6 +18,7 @@
 import type { ExecMessage, PromptGraph, PromptGraphNode, PromptResponse, WorkflowGraph } from '@dsh-movie/protocol'
 import { isExecMessage } from '@dsh-movie/protocol'
 import { gatewayWsBase, trimTrailingSlash, type SdkConfig } from './config.ts'
+import { backoff } from './backoff.ts'
 
 /** Callbacks for an {@link connectExecSocket} execution-lifecycle socket. */
 export interface ExecSocketHandlers {
@@ -31,36 +32,101 @@ export interface ExecSocketHandlers {
   onError?(event: Event): void
 }
 
+/** Reconnect/backoff tuning for {@link connectExecSocket} (Phase-2 M7). */
+export interface ExecSocketOptions {
+  /** Re-create the socket after an unexpected drop; defaults to false (one-shot). */
+  reconnect?: boolean | undefined
+  /** Max reconnect attempts before giving up; defaults to unbounded. */
+  maxAttempts?: number | undefined
+  /** Backoff base delay (ms); defaults to 500. */
+  baseDelayMs?: number | undefined
+  /** Backoff max delay (ms); defaults to 15000. */
+  maxDelayMs?: number | undefined
+  /** Called before each reconnect wait with the 1-based attempt + delay. */
+  onReconnecting?(attempt: number, delayMs: number): void
+  /** Called whenever the socket opens (true) or drops (false). */
+  onStatusChange?(connected: boolean): void
+}
+
 /** A handle to close an execution-lifecycle socket. */
 export interface ExecSocket {
-  /** Close the underlying WebSocket. */
+  /** Close the underlying WebSocket (and stop any reconnect loop). */
   close(): void
 }
 
 /**
  * Connect to the gateway's Leg B execution-lifecycle socket (`/ws`).
+ *
+ * By default this is a one-shot socket (existing callers/verify scripts are
+ * unaffected). Pass `{ reconnect: true }` to re-create it on an unexpected drop
+ * using capped exponential backoff with jitter until {@link ExecSocket.close}.
  * @param config - the SDK config carrying the gateway URL.
  * @param handlers - lifecycle callbacks.
+ * @param options - optional reconnect/backoff tuning.
  * @returns a handle to close the socket.
  */
-export function connectExecSocket(config: SdkConfig, handlers: ExecSocketHandlers): ExecSocket {
-  const socket = new WebSocket(`${gatewayWsBase(trimTrailingSlash(config.gatewayUrl))}/ws`)
-  socket.onopen = () => handlers.onOpen?.()
-  socket.onclose = () => handlers.onClose?.()
-  socket.onerror = (event: Event) => handlers.onError?.(event)
-  socket.onmessage = (event: MessageEvent) => {
-    if (typeof event.data !== 'string') return
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(event.data)
-    } catch {
-      return
+export function connectExecSocket(
+  config: SdkConfig,
+  handlers: ExecSocketHandlers,
+  options: ExecSocketOptions = {},
+): ExecSocket {
+  const url = `${gatewayWsBase(trimTrailingSlash(config.gatewayUrl))}/ws`
+  const reconnect = options.reconnect ?? false
+  const maxAttempts = options.maxAttempts ?? Number.POSITIVE_INFINITY
+  let socket: WebSocket | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let attempt = 0
+  let closed = false
+
+  function open(): void {
+    if (closed) return
+    const ws = new WebSocket(url)
+    socket = ws
+    ws.onopen = () => {
+      attempt = 0
+      options.onStatusChange?.(true)
+      handlers.onOpen?.()
     }
-    if (isExecMessage(parsed)) handlers.onMessage(parsed)
+    ws.onclose = () => {
+      options.onStatusChange?.(false)
+      handlers.onClose?.()
+      scheduleReconnect()
+    }
+    ws.onerror = (event: Event) => handlers.onError?.(event)
+    ws.onmessage = (event: MessageEvent) => {
+      if (typeof event.data !== 'string') return
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(event.data)
+      } catch {
+        return
+      }
+      if (isExecMessage(parsed)) handlers.onMessage(parsed)
+    }
   }
+
+  function scheduleReconnect(): void {
+    if (closed || !reconnect || attempt >= maxAttempts) return
+    const delayMs = backoff(attempt, { baseMs: options.baseDelayMs, maxMs: options.maxDelayMs })
+    attempt += 1
+    options.onReconnecting?.(attempt, delayMs)
+    timer = setTimeout(() => {
+      timer = null
+      open()
+    }, delayMs)
+  }
+
+  open()
+
   return {
     close(): void {
-      socket.close()
+      closed = true
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+      socket?.close()
+      socket = null
     },
   }
 }

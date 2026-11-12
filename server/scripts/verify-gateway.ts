@@ -100,10 +100,22 @@ async function collectExecLifecycle(gatewayUrl: string, wsBase: string): Promise
     const socket = new WebSocket(`${wsBase}/ws`)
     const messages: ExecMessage[] = []
     let promptId = ''
+    let sawSuccess = false
+    let settled = false
     const timer = setTimeout(() => {
       try { socket.close() } catch { /* ignore */ }
       rejectCollect(new Error('Leg B lifecycle timed out'))
     }, 10_000)
+    // The gateway broadcasts the lifecycle before it answers POST /prompt, so the
+    // WS `execution_success` can beat the HTTP response that carries `prompt_id`.
+    // Resolve only once BOTH have arrived to keep the prompt_id assertions stable.
+    function settle(): void {
+      if (settled || !sawSuccess || promptId === '') return
+      settled = true
+      clearTimeout(timer)
+      socket.close()
+      resolveCollect({ messages, promptId })
+    }
     socket.addEventListener('open', () => {
       void (async () => {
         const resp = await fetch(`${gatewayUrl}/prompt`, {
@@ -118,6 +130,7 @@ async function collectExecLifecycle(gatewayUrl: string, wsBase: string): Promise
         })
         const data = (await resp.json()) as { prompt_id?: string }
         promptId = typeof data.prompt_id === 'string' ? data.prompt_id : ''
+        settle()
       })().catch((error: unknown) => rejectCollect(error instanceof Error ? error : new Error(String(error))))
     })
     socket.addEventListener('message', (event: MessageEvent) => {
@@ -127,11 +140,8 @@ async function collectExecLifecycle(gatewayUrl: string, wsBase: string): Promise
       try { parsed = JSON.parse(text) } catch { return }
       if (!isExecMessage(parsed)) return
       messages.push(parsed)
-      if (parsed.type === 'execution_success') {
-        clearTimeout(timer)
-        socket.close()
-        resolveCollect({ messages, promptId })
-      }
+      if (parsed.type === 'execution_success') sawSuccess = true
+      settle()
     })
     socket.addEventListener('error', () => { /* the timeout guards a hard failure */ })
   })

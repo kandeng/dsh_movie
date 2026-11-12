@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watchEffect } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { elementLocales } from "@dsh-movie/i18n/elementPlus";
-import { locale } from "@dsh-movie/i18n/vue";
+import { locale, translate } from "@dsh-movie/i18n/vue";
 import { uiSettings } from "@/stores/settings";
 import { useAuthStore } from "@/stores/auth";
 
@@ -45,6 +45,53 @@ async function onLogout() {
   await auth.logout();
   void router.push({ path: "/account", query: { login: "1" } });
 }
+
+// ── M7：会话重校验。Synapse Mode-B 用长效令牌（无刷新令牌流），所以只在
+//    页面重新可见/聚焦与轻量定时器时重跑 whoami；令牌失效时 auth.revalidate()
+//    会 invalidate()，路由守卫随即弹回登录页。Leg C/Leg B 每次调用都重读令牌，
+//    因此会话一旦刷新会自动传播。──
+const REVALIDATE_INTERVAL_MS = 60_000;
+let revalidateTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopInterval() {
+  if (revalidateTimer !== null) {
+    clearInterval(revalidateTimer);
+    revalidateTimer = null;
+  }
+}
+function startInterval() {
+  stopInterval();
+  if (!auth.signedIn) return;
+  revalidateTimer = setInterval(() => { void auth.revalidate(); }, REVALIDATE_INTERVAL_MS);
+}
+function onRevisible() {
+  if (document.visibilityState === "visible" && auth.signedIn) void auth.revalidate();
+}
+
+onMounted(() => {
+  document.addEventListener("visibilitychange", onRevisible);
+  window.addEventListener("focus", onRevisible);
+  if (auth.signedIn) void auth.revalidate();
+  startInterval();
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("visibilitychange", onRevisible);
+  window.removeEventListener("focus", onRevisible);
+  stopInterval();
+});
+watch(() => auth.signedIn, (signed) => {
+  if (signed) {
+    void auth.revalidate();
+    startInterval();
+  } else {
+    stopInterval();
+  }
+});
+
+const sessionTitle = computed(() => {
+  if (auth.revalidating) return translate("正在校验会话……");
+  return auth.sessionValid ? translate("会话有效") : translate("会话已失效，请重新登录");
+});
 </script>
 
 <template>
@@ -61,6 +108,10 @@ async function onLogout() {
         </nav>
         <div class="spacer" />
         <div v-if="auth.signedIn" class="user">
+          <span
+            class="sessionDot"
+            :class="{ off: !auth.sessionValid, checking: auth.revalidating }"
+            :title="sessionTitle" />
           <span class="name">{{ auth.displayName }}</span>
           <el-button size="small" text @click="onLogout">Sign out</el-button>
         </div>
@@ -135,6 +186,22 @@ html {
   .name {
     color: var(--el-text-color-primary);
     font-size: 14px;
+  }
+}
+
+.sessionDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-success);
+  flex: 0 0 auto;
+
+  &.checking {
+    background: var(--el-color-warning);
+  }
+
+  &.off {
+    background: var(--el-color-danger);
   }
 }
 

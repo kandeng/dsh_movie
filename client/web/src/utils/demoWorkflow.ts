@@ -11,6 +11,7 @@
 
 import {
   MOVIE_NODES,
+  type MovieNodeSchema,
   type PromptGraph,
   type WorkflowGraph,
   type WorkflowGroup,
@@ -28,6 +29,26 @@ const NODE_SIZE: [number, number] = [240, 140];
 /** The six movie nodes ordered by pipeline step. */
 function orderedNodes() {
   return [...MOVIE_NODES].sort((a, b) => a.step - b.step);
+}
+
+/**
+ * Look up a movie node schema by its `class_type`.
+ * @param classType - the registered node type (e.g. `MovieClip`).
+ * @returns the {@link MovieNodeSchema}, or `undefined` for a non-movie node.
+ */
+export function findMovieNode(classType: string): MovieNodeSchema | undefined {
+  return MOVIE_NODES.find((node) => node.classType === classType);
+}
+
+/**
+ * Resolve a graph node id to its movie schema (via its `type`).
+ * @param graph - the editor graph the id belongs to.
+ * @param id - the numeric node id.
+ * @returns the {@link MovieNodeSchema}, or `undefined` when unresolved.
+ */
+export function nodeSchemaForId(graph: WorkflowGraph, id: number): MovieNodeSchema | undefined {
+  const node = graph.nodes.find((candidate) => candidate.id === id);
+  return node ? findMovieNode(node.type) : undefined;
 }
 
 /** Derive a node's serialized `widgets_values` from its widget defaults. */

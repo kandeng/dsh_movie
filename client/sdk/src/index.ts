@@ -15,6 +15,7 @@
  */
 
 export * from './config.ts'
+export * from './backoff.ts'
 export * from './legA.ts'
 export * from './legB.ts'
 export * from './legC.ts'

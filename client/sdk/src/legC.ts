@@ -25,6 +25,7 @@ import type {
 } from '@dsh-movie/protocol'
 import { isApiOk } from '@dsh-movie/protocol'
 import { gatewayWsBase, trimTrailingSlash, type SdkConfig } from './config.ts'
+import { backoff } from './backoff.ts'
 
 /** An error surfaced by the gateway's Leg C envelope. */
 export class LegCError extends Error {
@@ -109,24 +110,89 @@ export interface MuxStream {
   close(): void
 }
 
+/** Reconnect/backoff tuning for {@link MuxSocket} (Phase-2 M7). */
+export interface MuxSocketOptions {
+  /** Re-create the socket after a drop; defaults to true. */
+  reconnect?: boolean | undefined
+  /** Max reconnect attempts before giving up; defaults to unbounded. */
+  maxAttempts?: number | undefined
+  /** Backoff base delay (ms); defaults to 500. */
+  baseDelayMs?: number | undefined
+  /** Backoff max delay (ms); defaults to 15000. */
+  maxDelayMs?: number | undefined
+  /** Called before each reconnect wait with the 1-based attempt + delay. */
+  onReconnecting?(attempt: number, delayMs: number): void
+  /** Called whenever the socket opens (true) or drops (false). */
+  onStatusChange?(connected: boolean): void
+}
+
+/** A subscribed stream: its channel/params (for re-subscribe) + handlers. */
+interface MuxEntry {
+  channel: string
+  params: Record<string, unknown> | undefined
+  handlers: StreamHandlers
+}
+
 /**
  * The Leg C `/api/ws` multiplexed stream socket.
  *
  * Frames are routed to per-stream handlers by their `stream` id. `open`
  * subscribes to a named server channel; the returned {@link MuxStream} closes
  * just that logical stream without tearing down the socket.
+ *
+ * On an unexpected drop the socket reconnects with capped exponential backoff
+ * (default on) and re-sends `open` for every still-subscribed stream, so logical
+ * streams survive a gateway restart transparently.
  */
 export class MuxSocket {
-  private readonly socket: WebSocket
-  private readonly streams = new Map<string, StreamHandlers>()
+  private readonly config: SdkConfig
+  private readonly options: MuxSocketOptions
+  private readonly streams = new Map<string, MuxEntry>()
+  private socket: WebSocket | null = null
+  private timer: ReturnType<typeof setTimeout> | null = null
   private counter = 0
+  private attempt = 0
+  private closed = false
 
   /**
    * @param config - the SDK config carrying the gateway URL.
+   * @param options - optional reconnect/backoff tuning.
    */
-  constructor(config: SdkConfig) {
-    this.socket = new WebSocket(`${gatewayWsBase(trimTrailingSlash(config.gatewayUrl))}/api/ws`)
-    this.socket.onmessage = (event: MessageEvent) => this.handleMessage(event)
+  constructor(config: SdkConfig, options: MuxSocketOptions = {}) {
+    this.config = config
+    this.options = options
+    this.connect()
+  }
+
+  /** (Re)create the underlying WebSocket and re-subscribe open streams. */
+  private connect(): void {
+    if (this.closed) return
+    const socket = new WebSocket(`${gatewayWsBase(trimTrailingSlash(this.config.gatewayUrl))}/api/ws`)
+    this.socket = socket
+    socket.onopen = () => {
+      this.attempt = 0
+      this.options.onStatusChange?.(true)
+      for (const [stream, entry] of this.streams) this.sendRaw(this.openMessage(stream, entry))
+    }
+    socket.onclose = () => {
+      this.options.onStatusChange?.(false)
+      this.scheduleReconnect()
+    }
+    socket.onmessage = (event: MessageEvent) => this.handleMessage(event)
+  }
+
+  /** Schedule a backoff-delayed reconnect unless closed or out of attempts. */
+  private scheduleReconnect(): void {
+    const reconnect = this.options.reconnect ?? true
+    const maxAttempts = this.options.maxAttempts ?? Number.POSITIVE_INFINITY
+    if (this.closed || !reconnect || this.attempt >= maxAttempts) return
+    const delayMs = backoff(this.attempt, { baseMs: this.options.baseDelayMs, maxMs: this.options.maxDelayMs })
+    this.attempt += 1
+    this.options.onReconnecting?.(this.attempt, delayMs)
+    this.timer = setTimeout(() => {
+      this.timer = null
+      this.connect()
+    }, delayMs)
   }
 
   /** Route an incoming frame to its stream handlers. */
@@ -138,28 +204,36 @@ export class MuxSocket {
     } catch {
       return
     }
-    const handlers = this.streams.get(frame.stream)
-    if (handlers === undefined) return
+    const entry = this.streams.get(frame.stream)
+    if (entry === undefined) return
     if (frame.type === 'data') {
-      handlers.onData(frame.payload)
+      entry.handlers.onData(frame.payload)
       return
     }
     if (frame.type === 'end') {
       this.streams.delete(frame.stream)
-      handlers.onEnd?.()
+      entry.handlers.onEnd?.()
       return
     }
-    handlers.onError?.(frame.payload)
+    entry.handlers.onError?.(frame.payload)
+  }
+
+  /** Build the `open` control message for a stream entry. */
+  private openMessage(stream: string, entry: MuxEntry): StreamOpen {
+    return entry.params !== undefined
+      ? { op: 'open', stream, channel: entry.channel, params: entry.params }
+      : { op: 'open', stream, channel: entry.channel }
   }
 
   /** Send a control frame, deferring until the socket opens if needed. */
-  private send(message: StreamOpen | StreamClose): void {
+  private sendRaw(message: StreamOpen | StreamClose): void {
     const text = JSON.stringify(message)
-    if (this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(text)
+    const socket = this.socket
+    if (socket !== null && socket.readyState === WebSocket.OPEN) {
+      socket.send(text)
       return
     }
-    this.socket.addEventListener('open', () => this.socket.send(text), { once: true })
+    socket?.addEventListener('open', () => socket.send(text), { once: true })
   }
 
   /**
@@ -171,20 +245,26 @@ export class MuxSocket {
    */
   open(channel: string, params: Record<string, unknown> | undefined, handlers: StreamHandlers): MuxStream {
     const stream = `s${++this.counter}`
-    this.streams.set(stream, handlers)
-    const message: StreamOpen = params !== undefined ? { op: 'open', stream, channel, params } : { op: 'open', stream, channel }
-    this.send(message)
+    const entry: MuxEntry = { channel, params, handlers }
+    this.streams.set(stream, entry)
+    this.sendRaw(this.openMessage(stream, entry))
     return {
       close: () => {
         this.streams.delete(stream)
-        this.send({ op: 'close', stream })
+        this.sendRaw({ op: 'close', stream })
       },
     }
   }
 
-  /** Close the whole socket and forget every stream. */
+  /** Close the whole socket, stop reconnecting, and forget every stream. */
   close(): void {
+    this.closed = true
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
     this.streams.clear()
-    this.socket.close()
+    this.socket?.close()
+    this.socket = null
   }
 }

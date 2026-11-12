@@ -3,12 +3,15 @@ import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
+import type { NodeRunStatus, WorkflowGraph } from "@dsh-movie/protocol";
 import groupChat from "@/components/groupChat.vue";
 import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useCanvasBridge } from "@/composables/useCanvasBridge";
-import { buildDemoWorkflow, buildDemoPrompt } from "@/utils/demoWorkflow";
+import { useWorkflowStore } from "@/composables/useWorkflowStore";
+import { useExecStatus } from "@/composables/useExecStatus";
+import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId } from "@/utils/demoWorkflow";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
 
 // ACT: 工作室框架外壳（design doc §4.3，M4）。这是「分步生成」模式的页面骨架：
@@ -34,20 +37,127 @@ const readonlyLock = ref(false);
 const paintedCount = ref(0);
 const bridge = useCanvasBridge(canvasFrame);
 
+// ── M6：产物检视器 + 图持久化 + 实时状态。
+//    execStatus 打开一条父页面侧 Leg B /ws（与 iframe 自有 socket 并存于网关共享的 execClients），
+//    把 executing/progress/executed/execution_error 折叠成按节点 id 的状态与产物输出。
+//    workflowStore 走 Leg C workflow/get|put：宿主是图的权威（内存、房间级、乐观并发 baseRev）。
+//    currentGraph 缓存最近一次加载/导出的图，供节点选中时解析 MOVIE_NODES 架构。──
+const execStatus = useExecStatus();
+const workflowStore = useWorkflowStore();
+const currentGraph = ref<WorkflowGraph | null>(null);
+// Suppress the save round-trip while a programmatic load settles (the bridge
+// debounces `graphChanged` 400ms, so a 600ms guard covers the echo).
+let suppressSave = false;
+
+async function applyGraph(graph: WorkflowGraph): Promise<void> {
+  suppressSave = true;
+  currentGraph.value = graph;
+  try {
+    await bridge.loadWorkflow(graph);
+  } finally {
+    setTimeout(() => { suppressSave = false; }, 600);
+  }
+}
+
+/** Load the room's persisted graph (or seed + save the demo) into the canvas. */
+async function hydrate(roomId: string): Promise<void> {
+  workflowStore.reset();
+  execStatus.reset();
+  if (!roomId) {
+    await applyGraph(buildDemoWorkflow());
+    return;
+  }
+  try {
+    const record = await workflowStore.load(roomId);
+    if (record) {
+      await applyGraph(record.graph);
+    } else {
+      const demo = buildDemoWorkflow();
+      await applyGraph(demo);
+      await workflowStore.save(roomId, demo).catch(() => {});
+    }
+  } catch {
+    // Persistence unavailable (e.g. signed-out token): fall back to a local demo.
+    await applyGraph(buildDemoWorkflow());
+  }
+}
+
 bridge.onReady(() => {
   canvasReady.value = true;
-  void bridge.loadWorkflow(buildDemoWorkflow());
+  void hydrate(activeRoomId.value);
 });
 bridge.onNodeSelected((id) => { selectedNode.value = id; });
 bridge.onExecPainted(() => { paintedCount.value += 1; });
+bridge.onGraphChanged(({ graph }) => {
+  currentGraph.value = graph;
+  if (suppressSave) return;
+  const roomId = activeRoomId.value;
+  if (roomId) void workflowStore.save(roomId, graph).catch(() => {});
+});
 bridge.onBridgeError(({ message }) => {
   ElMessage.error(`${translate("画布桥接错误")}: ${message}`);
 });
+
+// Another collaborator won the write: adopt the host's current graph.
+workflowStore.onConflict(({ current }) => {
+  void applyGraph(current.graph);
+  ElMessage.warning(translate("画布已被其他协作者更新，已同步最新版本"));
+});
+
+watch(activeRoomId, (roomId) => {
+  if (canvasReady.value) void hydrate(roomId);
+});
+
+// ── 产物检视器派生状态：把选中节点 id 解析成 MOVIE_NODES 架构 + 实时状态 + 产物输出。──
+const selectedSchema = computed(() => {
+  const id = selectedNode.value;
+  if (id === null || !currentGraph.value) return undefined;
+  return nodeSchemaForId(currentGraph.value, id);
+});
+const selectedStatus = computed<NodeRunStatus>(() =>
+  selectedNode.value === null ? "idle" : execStatus.statusOf(selectedNode.value),
+);
+const outputTypes = computed(() => {
+  const outputs = selectedSchema.value?.outputs ?? [];
+  return outputs.length > 0 ? outputs.map((slot) => slot.type).join(", ") : "—";
+});
+const outputSummary = computed(() => {
+  const id = selectedNode.value;
+  if (id === null) return "";
+  const output = execStatus.outputOf(id);
+  if (output === undefined) return "";
+  if (typeof output === "object" && output !== null && (output as Record<string, unknown>).fixture === true) {
+    return translate("原型占位产物：真实推理将在 Phase 3 由离主机代理生成");
+  }
+  try {
+    return JSON.stringify(output, null, 2);
+  } catch {
+    return String(output);
+  }
+});
+
+function statusTagType(status: NodeRunStatus): "success" | "danger" | "warning" | "info" {
+  if (status === "success") return "success";
+  if (status === "error") return "danger";
+  if (status === "running" || status === "progress") return "warning";
+  return "info";
+}
+function statusLabel(status: NodeRunStatus): string {
+  switch (status) {
+    case "queued": return translate("排队中");
+    case "running": return translate("执行中");
+    case "progress": return translate("生成中");
+    case "success": return translate("已完成");
+    case "error": return translate("出错");
+    default: return translate("空闲");
+  }
+}
 
 async function runDemoLifecycle() {
   if (runningDemo.value) return;
   runningDemo.value = true;
   paintedCount.value = 0;
+  execStatus.reset();
   try {
     const resp = await fetch("/comfy/api/prompt", {
       method: "POST",
@@ -64,7 +174,7 @@ async function runDemoLifecycle() {
 }
 
 function reloadDemo() {
-  void bridge.loadWorkflow(buildDemoWorkflow());
+  void applyGraph(buildDemoWorkflow());
 }
 
 function toggleReadonly() {
@@ -200,17 +310,62 @@ onScopeDispose(() => { onResizeUp(); });
             <el-button size="small" :disabled="!canvasReady" @click="toggleReadonly">
               {{ readonlyLock ? translate("解除只读锁") : translate("设为只读") }}
             </el-button>
+            <span
+              class="liveDot"
+              :class="{ on: execStatus.connected.value }"
+              :title="execStatus.connected.value ? translate('实时状态已连接') : translate('实时状态未连接')" />
+            <span class="revBadge" :title="translate('图修订号')">
+              r{{ workflowStore.currentRev.value }}<template v-if="workflowStore.saving.value">…</template>
+            </span>
             <span class="canvasHint">
               <template v-if="!canvasReady">{{ translate("画布正在启动……") }}</template>
               <template v-else-if="selectedNode !== null">{{ translate("已选中节点 #") }}{{ selectedNode }}</template>
               <template v-else>{{ translate("点击画布节点以查看选中项") }}</template>
             </span>
           </div>
-          <iframe
-            ref="canvasFrame"
-            class="canvasFrame"
-            :src="bridge.iframeSrc"
-            :title="translate('工作流画布')" />
+          <div class="stageBody">
+            <iframe
+              ref="canvasFrame"
+              class="canvasFrame"
+              :src="bridge.iframeSrc"
+              :title="translate('工作流画布')" />
+            <!-- M6 产物检视器：选中节点时展示其步骤、产物类型、实时状态与最近输出。 -->
+            <aside v-if="selectedNode !== null" class="inspector">
+              <div class="inspectorHead">
+                <span class="inspectorTitle">
+                  {{ selectedSchema?.displayName ?? translate("节点") }} · #{{ selectedNode }}
+                </span>
+                <el-button text size="small" @click="selectedNode = null">{{ translate("关闭") }}</el-button>
+              </div>
+              <dl class="inspectorList">
+                <div class="row">
+                  <dt>{{ translate("步骤") }}</dt>
+                  <dd>{{ selectedSchema ? `${selectedSchema.step} / 6` : "—" }}</dd>
+                </div>
+                <div class="row">
+                  <dt>{{ translate("类型") }}</dt>
+                  <dd>{{ selectedSchema?.classType ?? "—" }}</dd>
+                </div>
+                <div class="row">
+                  <dt>{{ translate("产物") }}</dt>
+                  <dd>{{ outputTypes }}</dd>
+                </div>
+                <div class="row">
+                  <dt>{{ translate("状态") }}</dt>
+                  <dd>
+                    <el-tag :type="statusTagType(selectedStatus)" size="small" disable-transitions>
+                      {{ statusLabel(selectedStatus) }}
+                    </el-tag>
+                  </dd>
+                </div>
+              </dl>
+              <p v-if="selectedSchema?.description" class="inspectorDesc">{{ selectedSchema.description }}</p>
+              <div class="outputBlock">
+                <div class="outputLabel">{{ translate("最近产物输出") }}</div>
+                <pre class="outputPre">{{ outputSummary || translate("尚无输出，运行演示生命周期后查看") }}</pre>
+              </div>
+            </aside>
+          </div>
         </div>
       </div>
 
@@ -311,13 +466,117 @@ onScopeDispose(() => { onResizeUp(); });
   color: var(--el-text-color-secondary);
 }
 
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-danger);
+  flex: 0 0 auto;
+
+  &.on {
+    background: var(--el-color-success);
+  }
+}
+
+.revBadge {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.stageBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
 .canvasFrame {
   flex: 1 1 auto;
   display: block;
   width: 100%;
+  min-width: 0;
   min-height: 0;
   border: 0;
   background: #202124;
+}
+
+.inspector {
+  flex: 0 0 300px;
+  width: 300px;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  border-inline-start: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
+}
+
+.inspectorHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.inspectorTitle {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.inspectorList {
+  margin: 0 0 12px;
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--el-border-color-lighter);
+  }
+
+  dt {
+    flex: 0 0 48px;
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+  }
+
+  dd {
+    margin: 0;
+    flex: 1;
+    font-size: 13px;
+    word-break: break-word;
+  }
+}
+
+.inspectorDesc {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+.outputBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.outputLabel {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.outputPre {
+  margin: 0;
+  padding: 8px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--el-fill-color-light);
+  border-radius: var(--ui-radius, 8px);
 }
 
 .divider {

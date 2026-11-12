@@ -43,6 +43,7 @@ import type {
   StreamControl,
   StreamFrame,
   StreamOpen,
+  WorkflowGraph,
 } from '@dsh-movie/protocol'
 import { IMPLEMENTED_METHODS, methodFromApiPath, buildObjectInfo } from '@dsh-movie/protocol'
 import type { MatrixIdentity, MatrixPrincipal } from 'dsh-matrix-identity/types'
@@ -54,6 +55,7 @@ import {
   cannedLifecycle,
   nodeIdsOf,
 } from './fixtures.ts'
+import { createWorkflowStore } from './workflow-store.ts'
 import type { MovieGatewayInfo } from './types.ts'
 
 /** Diagnostics sink the gateway writes to (matches `ctx.logger`). */
@@ -145,6 +147,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   'invalid-token': 401,
   'forbidden': 403,
   'not-found': 404,
+  'conflict': 409,
   'unimplemented': 501,
   'internal': 500,
 }
@@ -239,6 +242,7 @@ function toPrincipal(principal: MatrixPrincipal): Principal {
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
   const { port, identity, logger, staticDir, bridgeExtensionFile } = deps
   const execClients = new Set<WebSocket>()
+  const workflowStore = createWorkflowStore()
   let queueCounter = 0
   let listening = false
 
@@ -362,6 +366,50 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
         }
         const asset = CANNED_ASSETS.find((candidate): boolean => candidate.id === id) ?? null
         const payload: LegCResponse<'assets/get'> = { asset }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workflow/get': {
+        // M6 workflow store: any room seat (host|member) may read the graph; a
+        // non-member is refused fail-closed, mirroring the assets/list policy.
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not read the workflow; room membership required'))
+          return
+        }
+        const payload: LegCResponse<'workflow/get'> = { workflow: workflowStore.get(roomId) }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'workflow/put': {
+        const roomId = stringParam(params, 'roomId')
+        if (roomId === undefined) {
+          sendApi(res, err('bad-request', 'roomId is required'))
+          return
+        }
+        const rawGraph = params['graph']
+        if (typeof rawGraph !== 'object' || rawGraph === null) {
+          sendApi(res, err('bad-request', 'graph is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not write the workflow; room membership required'))
+          return
+        }
+        const rawBaseRev = params['baseRev']
+        const baseRev = typeof rawBaseRev === 'number' && Number.isFinite(rawBaseRev) ? rawBaseRev : undefined
+        const result = workflowStore.put(roomId, rawGraph as WorkflowGraph, principal.userId, baseRev)
+        if (!result.ok) {
+          sendApi(res, err('conflict', `stale baseRev; the current revision is ${result.current.rev}`))
+          return
+        }
+        const payload: LegCResponse<'workflow/put'> = { workflow: result.record }
         sendApi(res, ok(payload))
         return
       }
