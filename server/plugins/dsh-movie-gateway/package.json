@@ -27,6 +27,7 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-agent-default-model": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-jobs": "0.2.2-rc.1",
     "@deepseek-ai/dsh-subagent": "0.2.2-rc.1",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.0",

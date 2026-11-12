@@ -38,6 +38,7 @@ import type {
   ExecMessage,
   LegCMethod,
   LegCResponse,
+  MoviePipelineStatus,
   OpResult,
   Principal,
   PromptGraph,
@@ -46,19 +47,25 @@ import type {
   StreamOpen,
   WorkflowGraph,
 } from '@dsh-movie/protocol'
-import { IMPLEMENTED_METHODS, methodFromApiPath, buildObjectInfo } from '@dsh-movie/protocol'
+import { IMPLEMENTED_METHODS, methodFromApiPath, buildObjectInfo, initialPipelineStatus } from '@dsh-movie/protocol'
 import type { MatrixIdentity, MatrixPrincipal } from 'dsh-matrix-identity/types'
 import {
   CANNED_ASSETS,
-  CANNED_OBJECT_INFO,
   CANNED_REGISTRY,
   CANNED_SYSTEM_STATS,
   cannedLifecycle,
   nodeIdsOf,
 } from './fixtures.ts'
 import { createWorkflowStore } from './workflow-store.ts'
+import { objectInfoFromMovieNodes } from './movie-executor/registry.ts'
+import { validatePromptGraph } from './movie-executor/validate.ts'
+import { topoSort } from './movie-executor/topo.ts'
+import { startPromptJob, type StepTextGenerator } from './movie-executor/runner.ts'
+import { cannedMediaProvider, type MediaProvider } from './movie-executor/media-provider.ts'
+import type { JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MovieGatewayInfo } from './types.ts'
 import type { CanvasScriptAgent, CanvasGenerateResult } from './canvas-agent.ts'
+import type { MovieDirector, MovieRunListener } from './movie-team/director.ts'
 
 /** Diagnostics sink the gateway writes to (matches `ctx.logger`). */
 export interface GatewayLogger {
@@ -93,6 +100,44 @@ export interface GatewayServerDeps {
    * answers `unimplemented` so the gateway boots without the agent runtime.
    */
   canvasAgent?: CanvasScriptAgent | undefined
+  /**
+   * Optional background-job registry (`ctx.jobs`, Phase-3 P3-M4). When present,
+   * `POST /prompt` is validated, topo-sorted, and scheduled as a `movie-exec`
+   * job that drives the lifecycle in dependency order; when absent the gateway
+   * falls back to the canned lifecycle so `verify-comfy-bridge` stays green.
+   */
+  jobs?: JobRegistry | undefined
+  /**
+   * Optional media-artifact seam for the executor's non-text steps. Defaults to
+   * {@link cannedMediaProvider} (Bailian is chat-only; no GPU inference here).
+   */
+  mediaProvider?: MediaProvider | undefined
+  /**
+   * Optional real-text generator for the executor's text steps
+   * (`MovieScript`/`MovieShotPlan`), wired to the Task-4 director. When absent,
+   * text steps fall back to the canned provider.
+   */
+  stepText?: StepTextGenerator | undefined
+  /**
+   * Optional six-step movie pipeline director (Phase-3 P3-M4). When present,
+   * `movie/run` is accepted and streamed over the mux; when absent it answers
+   * `unimplemented` so the gateway boots without the agent runtime.
+   */
+  director?: MovieDirector | undefined
+}
+
+/** One live movie pipeline run (P3-M4): its evolving status and mux subscribers. */
+interface MovieRunRecord {
+  /** The room whose pipeline is running. */
+  roomId: string
+  /** The originating intent. */
+  intent: string
+  /** The authoritative pipeline status, updated as stages arrive. */
+  pipeline: MoviePipelineStatus
+  /** Live mux subscribers fanning out each incremental stage. */
+  subscribers: Set<MovieRunListener>
+  /** True once the director emitted its terminal `done` stage. */
+  settled: boolean
 }
 
 /** A running gateway: introspection plus a reversible stop. */
@@ -241,6 +286,9 @@ function toPrincipal(principal: MatrixPrincipal): Principal {
   }
 }
 
+/** Maximum corrective re-plans per original canvas txn (bounds the §5 loop). */
+const MAX_REPLANS = 2
+
 /**
  * Start the loopback Leg B/C gateway. The returned handle is stopped by the
  * plugin's reversible effect teardown.
@@ -248,13 +296,27 @@ function toPrincipal(principal: MatrixPrincipal): Principal {
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, director } = deps
   const execClients = new Set<WebSocket>()
   const workflowStore = createWorkflowStore()
   /** Pending canvas script generations keyed by txnId (POST triggers, mux delivers). */
   const canvasPlans = new Map<string, Promise<CanvasGenerateResult>>()
   /** Last canvas execution result per room, retained for the P3-M4 re-plan loop. */
   const lastCanvasResults = new Map<string, { txnId: string; committed: boolean; opResults: OpResult[] }>()
+  /** Original intent per canvas txn, so a re-plan can rebuild the corrective prompt. */
+  const canvasIntents = new Map<string, string>()
+  /** Per-txn canvas execution result, so `canvas/replan` can pull the failed ops. */
+  const canvasResultsByTxn = new Map<string, { committed: boolean; opResults: OpResult[] }>()
+  /** Maps a corrective txn back to the original txn it re-plans (for the cap). */
+  const replanOrigin = new Map<string, string>()
+  /** Re-plan count per original txn, capped by {@link MAX_REPLANS} to avoid loops. */
+  const replanCounts = new Map<string, number>()
+  /**
+   * Live movie pipeline runs keyed by runId (P3-M4). The POST `movie/run` starts
+   * the director and records the evolving pipeline; the `movie/run` mux channel
+   * subscribes to incremental stages, and `movie/status` reads the last pipeline.
+   */
+  const movieRuns = new Map<string, MovieRunRecord>()
   let queueCounter = 0
   let listening = false
 
@@ -323,6 +385,105 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     }
     sendFrame(socket, { stream, type: 'data', payload: { stage: 'script', script: result.script } })
     sendFrame(socket, { stream, type: 'end' })
+  }
+
+  /**
+   * Stream one movie pipeline run over the mux (Phase-3 P3-M4). The POST
+   * `movie/run` call already started the director and registered the run under
+   * `runId`; this re-authenticates the socket caller, replays the progress so
+   * far, then fans out each incremental stage until the terminal `done`, and
+   * closes the stream. Delivering over the mux keeps the run request-scoped.
+   * @param socket - the mux client socket.
+   * @param open - the `open` control message carrying `{ roomId, runId, token }`.
+   */
+  async function handleMovieRunStream(socket: WebSocket, open: StreamOpen): Promise<void> {
+    const stream = open.stream
+    const params = open.params ?? {}
+    const token = stringParam(params, 'token')
+    if (token === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'missing-token', message: 'a Matrix access token is required' } })
+      return
+    }
+    const principal = await identity.whoami(token)
+    if (principal === null) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'invalid-token', message: 'the Matrix access token was rejected' } })
+      return
+    }
+    const roomId = stringParam(params, 'roomId')
+    const runId = stringParam(params, 'runId')
+    if (roomId === undefined || runId === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'bad-request', message: 'roomId and runId are required' } })
+      return
+    }
+    const role = await identity.roomRole(roomId, principal.userId)
+    if (role === 'none') {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'forbidden', message: 'role "none" may not stream the movie pipeline; room membership required' } })
+      return
+    }
+    const record = movieRuns.get(runId)
+    if (record === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'not-found', message: `no movie run for runId ${runId}` } })
+      return
+    }
+    // Replay the progress so far so a subscriber that attaches mid-run sees it.
+    for (const step of record.pipeline.steps) {
+      sendFrame(socket, { stream, type: 'data', payload: { stage: 'step', step } })
+    }
+    if (record.settled) {
+      sendFrame(socket, { stream, type: 'data', payload: { stage: 'done', pipeline: record.pipeline } })
+      sendFrame(socket, { stream, type: 'end' })
+      return
+    }
+    const listener: MovieRunListener = (stage): void => {
+      sendFrame(socket, { stream, type: 'data', payload: stage })
+      if (stage.stage === 'done') {
+        record.subscribers.delete(listener)
+        sendFrame(socket, { stream, type: 'end' })
+      }
+    }
+    record.subscribers.add(listener)
+    socket.on('close', () => record.subscribers.delete(listener))
+    socket.on('error', () => record.subscribers.delete(listener))
+  }
+
+  /**
+   * Begin a corrective re-plan for a canvas transaction that did not fully
+   * commit (Phase-3 P3-M4 observe->re-plan loop, design doc §5). Starts a
+   * `canvasAgent.replan` turn seeded with the failed ops, registers it under a
+   * fresh txnId in `canvasPlans` (so the client pulls it on the existing
+   * `canvas/script` mux channel), and enforces a per-origin cap to avoid loops.
+   * @param roomId - the room whose canvas is repaired.
+   * @param sourceTxnId - the txn whose result triggered the re-plan.
+   * @returns the fresh corrective txnId, or `null` when capped or unavailable.
+   */
+  function beginReplan(roomId: string, sourceTxnId: string): string | null {
+    if (canvasAgent === undefined) return null
+    const origin = replanOrigin.get(sourceTxnId) ?? sourceTxnId
+    const count = replanCounts.get(origin) ?? 0
+    if (count >= MAX_REPLANS) {
+      logger.info('[movie-gateway] re-plan cap reached for origin txn=%s (%d/%d)', origin, count, MAX_REPLANS)
+      return null
+    }
+    const intent = canvasIntents.get(sourceTxnId) ?? canvasIntents.get(origin) ?? ''
+    const result = canvasResultsByTxn.get(sourceTxnId)
+    const failedOps = (result?.opResults ?? []).filter((entry): boolean => !entry.ok)
+    const graph = workflowStore.get(roomId)?.graph ?? null
+    const replanTxnId = randomUUID()
+    const plan = canvasAgent.replan(roomId, intent, failedOps, graph)
+    // Swallow the floating rejection; the mux stream re-awaits the same plan.
+    void plan.catch((): void => {})
+    canvasPlans.set(replanTxnId, plan)
+    canvasIntents.set(replanTxnId, intent)
+    replanOrigin.set(replanTxnId, origin)
+    replanCounts.set(origin, count + 1)
+    // TTL sweep so an abandoned corrective txn frees its state.
+    setTimeout(() => {
+      canvasPlans.delete(replanTxnId)
+      canvasIntents.delete(replanTxnId)
+      replanOrigin.delete(replanTxnId)
+    }, 120_000)
+    logger.info('[movie-gateway] re-plan started txn=%s origin=%s room=%s attempt=%d', replanTxnId, origin, roomId, count + 1)
+    return replanTxnId
   }
 
   /* ---------------------------- Leg C dispatch --------------------------- */
@@ -500,8 +661,12 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
         // Swallow the floating rejection; the mux stream re-awaits the same plan.
         void plan.catch((): void => {})
         canvasPlans.set(txnId, plan)
+        canvasIntents.set(txnId, intent)
         // TTL sweep so an abandoned txn (client never opened the stream) frees.
-        setTimeout(() => canvasPlans.delete(txnId), 120_000)
+        setTimeout(() => {
+          canvasPlans.delete(txnId)
+          canvasIntents.delete(txnId)
+        }, 120_000)
         logger.info('[movie-gateway] canvas/script accepted txn=%s room=%s', txnId, roomId)
         const payload: LegCResponse<'canvas/script'> = { txnId, accepted: true }
         sendApi(res, ok(payload))
@@ -525,8 +690,112 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
         const rawResults = params['opResults']
         const opResults = Array.isArray(rawResults) ? (rawResults as OpResult[]) : []
         lastCanvasResults.set(roomId, { txnId, committed, opResults })
+        canvasResultsByTxn.set(txnId, { committed, opResults })
         logger.info('[movie-gateway] canvas/result room=%s txn=%s committed=%s ops=%d', roomId, txnId, String(committed), opResults.length)
-        const payload: LegCResponse<'canvas/result'> = { accepted: true }
+        // Observe -> re-plan (design doc §5): a rolled-back txn or any failed op
+        // triggers a corrective script the client pulls on the canvas/script mux
+        // channel, bounded by MAX_REPLANS per original txn to avoid loops.
+        const needsReplan = !committed || opResults.some((entry): boolean => !entry.ok)
+        const replanTxnId = needsReplan ? beginReplan(roomId, txnId) : null
+        const payload: LegCResponse<'canvas/result'> = replanTxnId === null
+          ? { accepted: true }
+          : { accepted: true, replanTxnId }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'canvas/replan': {
+        // P3-M4: the client explicitly requests a corrective pass for a txn; the
+        // fresh corrective txnId is pulled on the existing canvas/script mux.
+        const roomId = stringParam(params, 'roomId')
+        const txnId = stringParam(params, 'txnId')
+        if (roomId === undefined || txnId === undefined) {
+          sendApi(res, err('bad-request', 'roomId and txnId are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not request a canvas re-plan; room membership required'))
+          return
+        }
+        if (canvasAgent === undefined) {
+          sendApi(res, err('unimplemented', 'canvas/replan requires the agent runtime (not configured)'))
+          return
+        }
+        const replanTxnId = beginReplan(roomId, txnId)
+        if (replanTxnId === null) {
+          sendApi(res, err('conflict', `re-plan cap (${String(MAX_REPLANS)}) reached for txn ${txnId}`))
+          return
+        }
+        const payload: LegCResponse<'canvas/replan'> = { txnId: replanTxnId, accepted: true }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'movie/run': {
+        // P3-M4: a POST starts the six-step director pipeline and returns a
+        // runId; incremental step progress is delivered over the `movie/run` mux
+        // channel correlated by that runId (mirrors the canvas/script pattern).
+        const roomId = stringParam(params, 'roomId')
+        const intent = stringParam(params, 'intent')
+        if (roomId === undefined || intent === undefined) {
+          sendApi(res, err('bad-request', 'roomId and intent are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not run the movie pipeline; room membership required'))
+          return
+        }
+        if (director === undefined) {
+          sendApi(res, err('unimplemented', 'movie/run requires the agent runtime (not configured)'))
+          return
+        }
+        const runId = randomUUID()
+        const record: MovieRunRecord = {
+          roomId,
+          intent,
+          pipeline: initialPipelineStatus(runId, roomId),
+          subscribers: new Set<MovieRunListener>(),
+          settled: false,
+        }
+        movieRuns.set(runId, record)
+        const onStage: MovieRunListener = (stage): void => {
+          if (stage.stage === 'step') {
+            const index = record.pipeline.steps.findIndex((candidate): boolean => candidate.step === stage.step.step)
+            if (index >= 0) record.pipeline.steps[index] = stage.step
+          } else {
+            record.pipeline = stage.pipeline
+            record.settled = true
+          }
+          for (const subscriber of record.subscribers) subscriber(stage)
+        }
+        const run = director.run(roomId, runId, intent, onStage)
+        // Swallow the floating rejection; the mux stream and movie/status read
+        // the recorded pipeline. Mark settled so a late subscriber terminates.
+        void run.catch((error: unknown): void => {
+          logger.warn('[movie-gateway] movie/run %s failed: %s', runId, String(error))
+          record.settled = true
+        })
+        // TTL sweep so an abandoned run (client never opened the stream) frees.
+        setTimeout(() => movieRuns.delete(runId), 300_000)
+        logger.info('[movie-gateway] movie/run accepted run=%s room=%s', runId, roomId)
+        const payload: LegCResponse<'movie/run'> = { runId, accepted: true }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'movie/status': {
+        const roomId = stringParam(params, 'roomId')
+        const runId = stringParam(params, 'runId')
+        if (roomId === undefined || runId === undefined) {
+          sendApi(res, err('bad-request', 'roomId and runId are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not read the movie pipeline; room membership required'))
+          return
+        }
+        const record = movieRuns.get(runId)
+        const payload: LegCResponse<'movie/status'> = { pipeline: record?.pipeline ?? null }
         sendApi(res, ok(payload))
         return
       }
@@ -545,7 +814,10 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       return
     }
     if (method === 'GET' && pathname === '/object_info') {
-      sendRaw(res, 200, CANNED_OBJECT_INFO)
+      // Merged catalog: the six movie step nodes plus the canned bridge demo
+      // nodes (P3-M4 executor registry). Keeping the demo nodes merged preserves
+      // the `verify-comfy-bridge` contract.
+      sendRaw(res, 200, objectInfoFromMovieNodes())
       return
     }
     if (method === 'GET' && pathname === '/system_stats') {
@@ -561,27 +833,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       return
     }
     if (method === 'POST' && pathname === '/prompt') {
-      let prompt: PromptGraph
-      try {
-        const params = await readParams(req)
-        const raw = params['prompt']
-        if (typeof raw !== 'object' || raw === null) {
-          sendRaw(res, 400, { error: 'bad-request', message: 'prompt graph is required' })
-          return
-        }
-        prompt = raw as PromptGraph
-      } catch (error) {
-        logger.warn('[movie-gateway] /prompt bad body: %s', String(error))
-        sendRaw(res, 400, { error: 'bad-request', message: 'invalid JSON body' })
-        return
-      }
-      const promptId = randomUUID()
-      const number = ++queueCounter
-      const lifecycle = cannedLifecycle(promptId, number, nodeIdsOf(prompt))
-      // Drive the lifecycle socket first so a client already connected on `/ws`
-      // observes the full sequence for this prompt id.
-      broadcastExec(lifecycle)
-      sendRaw(res, 200, { prompt_id: promptId, number })
+      await handlePromptPost(req, res)
       return
     }
     sendRaw(res, 404, { error: 'not-found' })
@@ -591,6 +843,21 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
 
   /** Accept a prompt graph and drive the shared execution-lifecycle socket. */
   async function submitPrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    await handlePromptPost(req, res)
+  }
+
+  /**
+   * Shared `POST /prompt` handler for both the Leg B surface (`/prompt`) and the
+   * ComfyUI frontend (`/comfy/api/prompt`): parse -> validate (400 with
+   * `node_errors`) -> topo-sort (400 on a cycle) -> schedule. When the executor
+   * deps are present (`deps.jobs`) the graph runs as a `movie-exec` background
+   * job that broadcasts the lifecycle in dependency order; otherwise — or if job
+   * admission throws — it falls back to the canned lifecycle so
+   * `verify-comfy-bridge` stays green. Always answers `{ prompt_id, number }`.
+   * @param req - the POST request carrying `{ prompt }`.
+   * @param res - the response to settle.
+   */
+  async function handlePromptPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
     let prompt: PromptGraph
     try {
       const params = await readParams(req)
@@ -605,8 +872,46 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       sendRaw(res, 400, { error: 'bad-request', message: 'invalid JSON body' })
       return
     }
+
+    const validation = validatePromptGraph(prompt)
+    if (!validation.ok) {
+      sendRaw(res, 400, { error: 'invalid_prompt', message: 'prompt graph failed validation', node_errors: validation.nodeErrors })
+      return
+    }
+    const sorted = topoSort(prompt)
+    if (!sorted.ok) {
+      sendRaw(res, 400, {
+        error: 'invalid_prompt',
+        message: 'prompt graph has a cycle',
+        node_errors: { '': { class_type: '', errors: [`cycle detected among nodes: ${sorted.cycle.join(', ')}`] } },
+      })
+      return
+    }
+
     const promptId = randomUUID()
     const number = ++queueCounter
+
+    if (jobs !== undefined) {
+      try {
+        startPromptJob({
+          jobs,
+          broadcast: broadcastExec,
+          mediaProvider: mediaProvider ?? cannedMediaProvider,
+          ...(stepText === undefined ? {} : { stepText }),
+          logger,
+          promptId,
+          number,
+          label: `movie-exec prompt ${number}`,
+        }, prompt, sorted.order)
+        sendRaw(res, 200, { prompt_id: promptId, number })
+        return
+      } catch (error) {
+        // Job admission can refuse (e.g. no attached controller); degrade to the
+        // canned lifecycle rather than failing the submit.
+        logger.warn('[movie-gateway] /prompt job admission failed, using canned lifecycle: %s', String(error))
+      }
+    }
+
     broadcastExec(cannedLifecycle(promptId, number, nodeIdsOf(prompt)))
     sendRaw(res, 200, { prompt_id: promptId, number })
   }
@@ -785,6 +1090,13 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           void handleCanvasScriptStream(socket, open).catch((error: unknown) => {
             logger.warn('[movie-gateway] canvas/script stream failed: %s', String(error))
             sendFrame(socket, { stream, type: 'error', payload: { code: 'internal', message: 'canvas script stream failed' } })
+          })
+          return
+        }
+        if (open.channel === 'movie/run') {
+          void handleMovieRunStream(socket, open).catch((error: unknown) => {
+            logger.warn('[movie-gateway] movie/run stream failed: %s', String(error))
+            sendFrame(socket, { stream, type: 'error', payload: { code: 'internal', message: 'movie run stream failed' } })
           })
           return
         }

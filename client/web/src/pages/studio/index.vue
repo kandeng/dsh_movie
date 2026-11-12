@@ -3,7 +3,7 @@ import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
-import type { NodeRunStatus, WorkflowGraph } from "@dsh-movie/protocol";
+import type { NodeRunStatus, WorkflowGraph, MovieStepResult, MovieStepStatus, MovieStepId } from "@dsh-movie/protocol";
 import groupChat from "@/components/groupChat.vue";
 import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
@@ -12,7 +12,8 @@ import { useCanvasBridge } from "@/composables/useCanvasBridge";
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
 import { useExecStatus } from "@/composables/useExecStatus";
 import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
-import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId } from "@/utils/demoWorkflow";
+import { useMovieRun } from "@/composables/useMovieRun";
+import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId, findMovieNode } from "@/utils/demoWorkflow";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
 
 // ACT: 工作室框架外壳（design doc §4.3，M4）。这是「分步生成」模式的页面骨架：
@@ -155,6 +156,85 @@ async function submitAiIntent() {
   } else {
     ElMessage.warning(`${translate("AI 编排已回滚，存在无法应用的操作")} (${okCount}/${result.opResults.length})`);
   }
+}
+
+// ── P3-M4：影片流水线。自然语言意图经 Leg C `movie/run` POST 提交给宿主导演代理，
+//    六步流水线（剧本→分镜→资产→故事板→片段→合成）的进度通过 mux 流（按 runId 关联）
+//    逐步回灌：文本步产出真实 Bailian 文本，媒体步产出罐头占位（media:true）。每个 step
+//    映射回画布节点徽章（复用 Leg B 的 node.setStatus 上色语义），文本产物在检视器展示。──
+function movieStatusToNode(status: MovieStepStatus): NodeRunStatus {
+  switch (status) {
+    case "running": return "running";
+    case "success": return "success";
+    case "error": return "error";
+    case "skipped": return "idle";
+    default: return "idle";
+  }
+}
+
+/** Paint one streamed movie step onto its matching canvas node badge. */
+function paintMovieStep(step: MovieStepResult): void {
+  const graph = currentGraph.value;
+  if (!graph) return;
+  const node = graph.nodes.find((candidate) => candidate.type === step.classType);
+  if (node) bridge.setNodeStatus(node.id, movieStatusToNode(step.status));
+}
+
+const movieRun = useMovieRun({ onStep: paintMovieStep });
+const movieIntent = ref("");
+const movieRunning = computed(() => movieRun.busy.value);
+const movieDoneCount = computed(
+  () => movieRun.steps.value.filter((step) => step.status === "success" || step.status === "error" || step.status === "skipped").length,
+);
+
+function movieStageLabel(stage: string): string {
+  switch (stage) {
+    case "submitting": return translate("提交中");
+    case "running": return translate("流水线执行中");
+    case "done": return translate("已完成");
+    case "error": return translate("出错");
+    default: return "";
+  }
+}
+
+function movieStepName(classType: MovieStepId): string {
+  return findMovieNode(classType)?.displayName ?? classType;
+}
+
+function movieStepStatusLabel(status: MovieStepStatus): string {
+  switch (status) {
+    case "pending": return translate("等待中");
+    case "running": return translate("执行中");
+    case "success": return translate("已完成");
+    case "error": return translate("出错");
+    case "skipped": return translate("已跳过");
+    default: return "";
+  }
+}
+
+/** The movie artifact for the currently selected node's classType (inspector). */
+const selectedMovieStep = computed<MovieStepResult | undefined>(() => {
+  const classType = selectedSchema.value?.classType;
+  if (classType === undefined) return undefined;
+  return movieRun.steps.value.find((step) => step.classType === classType);
+});
+
+async function submitMovieIntent() {
+  const intent = movieIntent.value.trim();
+  if (intent === "" || !canvasReady.value || movieRunning.value) return;
+  const roomId = activeRoomId.value;
+  if (!roomId) {
+    ElMessage.warning(translate("请先进入一个房间再运行影片"));
+    return;
+  }
+  const result = await movieRun.runIntent(roomId, intent);
+  if (result === null) {
+    ElMessage.error(`${translate("影片流水线失败")}: ${movieRun.error.value ?? ""}`);
+    return;
+  }
+  const okCount = result.steps.filter((step) => step.status === "success").length;
+  ElMessage.success(`${translate("影片流水线已完成")} (${okCount}/${result.steps.length})`);
+  movieIntent.value = "";
 }
 
 // ── 产物检视器派生状态：把选中节点 id 解析成 MOVIE_NODES 架构 + 实时状态 + 产物输出。──
@@ -400,6 +480,41 @@ onScopeDispose(() => { onResizeUp(); });
               </li>
             </ul>
           </div>
+          <!-- P3-M4：影片流水线控制条 + 六步进度带。 -->
+          <div class="movieBar">
+            <el-input
+              v-model="movieIntent"
+              class="movieInput"
+              size="small"
+              :placeholder="translate('描述你想生成的影片，例如：一只猫在月球上跳舞')"
+              :disabled="!canvasReady || movieRunning"
+              @keyup.enter="submitMovieIntent" />
+            <el-button
+              size="small"
+              type="primary"
+              :disabled="!canvasReady || movieIntent.trim() === ''"
+              :loading="movieRunning"
+              @click="submitMovieIntent">
+              {{ translate("运行影片") }}
+            </el-button>
+            <span v-if="movieRunning" class="movieStage">
+              {{ movieStageLabel(movieRun.stage.value) }} · {{ movieDoneCount }}/6
+            </span>
+          </div>
+          <div v-if="movieRun.steps.value.length > 0" class="movieStrip">
+            <span class="movieStripTitle">{{ translate("影片流水线") }}</span>
+            <ol class="movieSteps">
+              <li
+                v-for="step in movieRun.steps.value"
+                :key="step.step"
+                :class="step.status">
+                <span class="movieStepIdx">{{ step.step }}</span>
+                <span class="movieStepName">{{ movieStepName(step.classType) }}</span>
+                <span class="movieStepStatus">{{ movieStepStatusLabel(step.status) }}</span>
+                <span v-if="step.media" class="movieStepMedia">{{ translate("占位") }}</span>
+              </li>
+            </ol>
+          </div>
           <div class="stageBody">
             <iframe
               ref="canvasFrame"
@@ -440,6 +555,13 @@ onScopeDispose(() => { onResizeUp(); });
               <div class="outputBlock">
                 <div class="outputLabel">{{ translate("最近产物输出") }}</div>
                 <pre class="outputPre">{{ outputSummary || translate("尚无输出，运行演示生命周期后查看") }}</pre>
+              </div>
+              <div v-if="selectedMovieStep?.artifact" class="outputBlock">
+                <div class="outputLabel">
+                  {{ translate("影片步骤产物") }}
+                  <template v-if="selectedMovieStep.media">（{{ translate("占位") }}）</template>
+                </div>
+                <pre class="outputPre">{{ selectedMovieStep.artifact }}</pre>
               </div>
             </aside>
           </div>
@@ -596,6 +718,75 @@ onScopeDispose(() => { onResizeUp(); });
 
   li.ok { color: var(--el-color-success); }
   li.bad { color: var(--el-color-danger); }
+}
+
+.movieBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.movieInput {
+  width: 320px;
+  flex: 0 1 auto;
+}
+
+.movieStage {
+  font-size: 12px;
+  color: var(--el-color-primary);
+}
+
+.movieStrip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  font-size: 12px;
+}
+
+.movieStripTitle {
+  flex: 0 0 auto;
+  color: var(--el-text-color-secondary);
+}
+
+.movieSteps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--el-text-color-secondary);
+  }
+
+  li.running { color: var(--el-color-warning); }
+  li.success { color: var(--el-color-success); }
+  li.error { color: var(--el-color-danger); }
+}
+
+.movieStepIdx {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--el-fill-color);
+  font-variant-numeric: tabular-nums;
+}
+
+.movieStepMedia {
+  color: var(--el-text-color-placeholder);
 }
 
 .stageBody {

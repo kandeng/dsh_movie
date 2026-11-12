@@ -90,6 +90,12 @@ const REQUEST_TIMEOUT_MS = 8_000;
 const MAX_RETRIES = 2;
 /** Whole-generation guard so a hung LLM turn cannot wedge the UI forever. */
 const GENERATE_TIMEOUT_MS = 120_000;
+/**
+ * Client-side bound on observe->re-plan follow-ups (Phase-3 P3-M4, §5). Mirrors
+ * the gateway's own `MAX_REPLANS` cap so the browser never loops past the host;
+ * the server also stops returning `replanTxnId` once its cap is reached.
+ */
+const MAX_REPLANS = 2;
 
 /** Turn an unknown throw into a short human-readable message. */
 function describeError(error: unknown): string {
@@ -282,17 +288,46 @@ export function useCanvasScript(options: UseCanvasScriptOptions): CanvasScriptHa
       if (!ack.accepted) throw new Error("canvas/script was not accepted by the host");
       lastTxn.value = ack.txnId;
       const script = await awaitScript(roomId, ack.txnId);
-      const result = await executeScript(roomId, script);
-      opResults.value = result.opResults;
+      let result = await executeScript(roomId, script);
+      // Aggregate every op across the initial + any corrective re-plan passes so
+      // the Studio results strip shows the full history; indices are rebased to
+      // stay unique across passes.
+      const aggregated: OpResult[] = [...result.opResults];
+      opResults.value = aggregated;
       stage.value = "reporting";
-      await rpc
+      // Report the outcome. When the transaction did not fully commit the host
+      // may answer with a fresh `replanTxnId` for a corrective script (the
+      // observe->re-plan loop); pull + apply it on the same mux channel.
+      let report = await rpc
         .call("canvas/result", {
           roomId,
           txnId: result.txnId,
           committed: result.committed,
           opResults: result.opResults,
         })
-        .catch(() => {});
+        .catch(() => null);
+      let replans = 0;
+      while (report?.replanTxnId !== undefined && replans < MAX_REPLANS) {
+        replans += 1;
+        lastTxn.value = report.replanTxnId;
+        const fixScript = await awaitScript(roomId, report.replanTxnId);
+        const fixResult = await executeScript(roomId, fixScript);
+        const offset = aggregated.length;
+        aggregated.push(
+          ...fixResult.opResults.map((entry): OpResult => ({ ...entry, index: entry.index + offset })),
+        );
+        opResults.value = [...aggregated];
+        result = { txnId: fixResult.txnId, committed: fixResult.committed, opResults: aggregated };
+        stage.value = "reporting";
+        report = await rpc
+          .call("canvas/result", {
+            roomId,
+            txnId: fixResult.txnId,
+            committed: fixResult.committed,
+            opResults: fixResult.opResults,
+          })
+          .catch(() => null);
+      }
       stage.value = "done";
       return result;
     } catch (caught) {

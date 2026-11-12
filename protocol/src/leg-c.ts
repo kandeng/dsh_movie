@@ -27,6 +27,7 @@
 import type { MatrixRoomId, MatrixUserId, Principal, RoomRole } from './principal.ts'
 import type { WorkflowGraph } from './leg-b.ts'
 import type { OpResult } from './op-script.ts'
+import type { MoviePipelineStatus } from './movie.ts'
 
 /* -------------------------------------------------------------------------- */
 /* Request / response envelope                                                 */
@@ -201,13 +202,32 @@ export interface WorkflowNamespace {
  * {@link CanvasScript} and streams it back on the `canvas/script` mux channel
  * (the POST only acknowledges acceptance with the transaction id). The client
  * executor applies it and reports per-op outcomes via `canvas/result`.
+ *
+ * P3-M4 adds the observe->re-plan loop: when a transaction did not commit (or
+ * any op failed), `canvas/result` may carry a fresh `replanTxnId` for a
+ * corrective script the client pulls on the same `canvas/script` mux channel;
+ * `canvas/replan` lets the client request that corrective pass explicitly.
  */
 export interface CanvasNamespace {
   'canvas/script': Method<{ roomId: MatrixRoomId; intent: string }, { txnId: string; accepted: boolean }>
   'canvas/result': Method<
     { roomId: MatrixRoomId; txnId: string; committed: boolean; opResults: OpResult[] },
-    { accepted: boolean }
+    { accepted: boolean; replanTxnId?: string | undefined }
   >
+  'canvas/replan': Method<{ roomId: MatrixRoomId; txnId: string }, { txnId: string; accepted: boolean }>
+}
+
+/**
+ * `movie.*` - the six-step movie pipeline channel (Phase-3 P3-M4). `movie/run`
+ * submits an intent; the director agent runs the script->shot-plan->asset->
+ * storyboard->clip->assemble pipeline (real Bailian text for the text steps,
+ * canned media for the rest) and streams step progress on the `movie/run` mux
+ * channel. The POST only acknowledges acceptance with the run id; `movie/status`
+ * reads the last {@link MoviePipelineStatus} for a run.
+ */
+export interface MovieNamespace {
+  'movie/run': Method<{ roomId: MatrixRoomId; intent: string }, { runId: string; accepted: boolean }>
+  'movie/status': Method<{ roomId: MatrixRoomId; runId: string }, { pipeline: MoviePipelineStatus | null }>
 }
 
 /** `agent.*` - steer/stop/approve a running room agent (typed now, impl later). */
@@ -228,7 +248,7 @@ export interface QuotaNamespace {
 }
 
 /** Every Leg C namespace method map, keyed by namespace. */
-export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, CanvasNamespace, AgentNamespace, WorkspaceNamespace, QuotaNamespace {}
+export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, CanvasNamespace, MovieNamespace, AgentNamespace, WorkspaceNamespace, QuotaNamespace {}
 
 /** Every Leg C method name (`<namespace>/<method>`). */
 export type LegCMethod = keyof LegCNamespaces
@@ -251,6 +271,9 @@ export const IMPLEMENTED_METHODS: readonly LegCMethod[] = [
   'workflow/put',
   'canvas/script',
   'canvas/result',
+  'canvas/replan',
+  'movie/run',
+  'movie/status',
 ] as const
 
 /**

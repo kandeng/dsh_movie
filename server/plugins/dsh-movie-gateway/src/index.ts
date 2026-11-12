@@ -25,6 +25,8 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startGatewayServer, type GatewayHandle } from './gateway-server.ts'
 import { CanvasScriptAgent } from './canvas-agent.ts'
+import { MovieDirector } from './movie-team/director.ts'
+import { cannedMediaProvider } from './movie-executor/media-provider.ts'
 import type { MovieGateway, MovieGatewayInfo } from './types.ts'
 
 export type { MovieGateway, MovieGatewayInfo } from './types.ts'
@@ -33,10 +35,20 @@ export type { MovieGateway, MovieGatewayInfo } from './types.ts'
 export const name = 'movie-gateway'
 
 /**
- * The gateway resolves callers through the identity provider and drives canvas
- * op-script generation through the DSH agent runtime (Phase-3 P3-M3).
+ * The gateway resolves callers through the identity provider, drives canvas
+ * op-script generation through the DSH agent runtime (Phase-3 P3-M3), and (in
+ * P3-M4) orchestrates the director/step pipeline through the in-process
+ * subagent runtime and the background-job registry.
+ *
+ * NOTE (P3-M4 Task 0 finding): `ctx.subagents` and `ctx.jobs` ship in the
+ * `@deepseek-ai/dsh-base` bundle, so they resolve here. The shared task-DAG
+ * board (`ctx.agentTeams`) does NOT: in `0.2.2-rc.1` it lives in the experimental
+ * `@deepseek-ai/dsh-experimental-agent-team-profile` bundle, which also disables
+ * the standard subagent tools and injects experimental team tools/UI globally.
+ * We deliberately keep the host composition stable and run the director on
+ * `subagents` + `jobs`, holding the step DAG in gateway-owned state instead.
  */
-export const inject = ['matrixIdentity', 'agents', 'agentDefaultModel', 'sessions']
+export const inject = ['matrixIdentity', 'agents', 'agentDefaultModel', 'sessions', 'subagents', 'jobs']
 
 /** Plugin configuration: the loopback port to bind. */
 export interface Config {
@@ -113,7 +125,24 @@ export function apply(ctx: Context, config: Config): void {
       cwd: process.cwd(),
       logger: ctx.logger,
     })
+    // The six-step movie pipeline director (P3-M4). It runs the two text steps
+    // as real spawned subagents (Bailian) and the media steps through the canned
+    // provider seam, holding the step DAG in gateway-owned pipeline state.
+    const director = new MovieDirector({
+      agents: ctx.agents,
+      agentDefaultModel: ctx.agentDefaultModel,
+      sessions: ctx.sessions,
+      ...ctx.get('subagents') === undefined ? {} : { subagents: ctx.get('subagents') },
+      cwd: process.cwd(),
+      logger: ctx.logger,
+      mediaProvider: cannedMediaProvider,
+    })
     ctx.effect(() => {
+      // The Leg B executor schedules prompts as `movie-exec` background jobs.
+      // `ctx.jobs.start` refuses work unless an attached controller serves the
+      // (here, unowned) job, so attach one for the gateway's lifetime and detach
+      // it on teardown (P3-M4 Task 0 finding).
+      const detachController = ctx.jobs === undefined ? undefined : ctx.jobs.attachController('movie-gateway')
       handle = startGatewayServer({
         port: config.port,
         identity: ctx.matrixIdentity,
@@ -121,12 +150,16 @@ export function apply(ctx: Context, config: Config): void {
         staticDir,
         bridgeExtensionFile: existsSync(bridgeExtensionFile) ? bridgeExtensionFile : undefined,
         canvasAgent,
+        director,
+        ...(ctx.jobs === undefined ? {} : { jobs: ctx.jobs }),
       })
       ctx.logger.info('[movie-gateway] Leg B/C gateway active on port %d', config.port)
       return async () => {
         const current = handle
         handle = null
         if (current !== null) await current.stop()
+        detachController?.()
+        director.dispose()
         canvasAgent.dispose()
       }
     })

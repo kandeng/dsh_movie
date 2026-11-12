@@ -30,6 +30,7 @@ import {
   MOVIE_NODES,
   type CanvasScript,
   type MatrixRoomId,
+  type OpResult,
   type WorkflowGraph,
 } from '@dsh-movie/protocol'
 import { validateOps } from './op-script-validator.ts'
@@ -141,6 +142,51 @@ function buildPrompt(intent: string, graph: WorkflowGraph | null | undefined): s
   ].join('\n')
 }
 
+/** Render the failed operations of a rolled-back transaction for the re-plan prompt. */
+function failedOpsText(failedOps: readonly OpResult[]): string {
+  if (failedOps.length === 0) return '  (the transaction rolled back; no per-op detail was reported)'
+  return failedOps
+    .map((result): string => `  ${String(result.index)}: ${result.op.op} ${JSON.stringify(result.op.payload)} -> ${result.error ?? 'failed postcondition'}`)
+    .join('\n')
+}
+
+/**
+ * Compose the corrective re-plan prompt (Phase-3 P3-M4, design doc §5): the same
+ * constrained op catalog, but seeded with the prior transaction's failed ops so
+ * the model diagnoses and repairs rather than re-planning from scratch.
+ * @param intent - the original natural-language intent.
+ * @param failedOps - the ops that did not apply/commit.
+ * @param graph - the room's current persisted graph.
+ * @returns the corrective planner prompt.
+ */
+function buildReplanPrompt(intent: string, failedOps: readonly OpResult[], graph: WorkflowGraph | null | undefined): string {
+  return [
+    'You are the dsh_movie canvas planner performing a CORRECTIVE re-plan.',
+    'A previous op-script for the intent below did not fully commit. Repair it.',
+    '',
+    'MOVIE NODE TYPES:',
+    nodeCatalogText(),
+    '',
+    'OP CATALOG:',
+    opCatalogText(),
+    '',
+    'CURRENT GRAPH:',
+    graphContextText(graph),
+    '',
+    'FAILED OPERATIONS (index: op payload -> error):',
+    failedOpsText(failedOps),
+    '',
+    'RULES:',
+    '1. Diagnose why each failed op did not apply (e.g. an edge referencing a missing node or a mismatched/out-of-range slot, a node id that does not exist, a wrong artifact type).',
+    '2. Emit a minimal corrective op-script against the CURRENT graph that still achieves the original intent.',
+    '3. Reuse existing node ids; only add what is genuinely missing. Match artifact types on edges; slot indices are 0-based.',
+    '4. Prefer the fewest ops. Do not repeat an op that already succeeded.',
+    '5. Reply with ONLY the raw JSON array. No prose, no markdown fences, no tool calls, no explanations.',
+    '',
+    `ORIGINAL INTENT: ${intent}`,
+  ].join('\n')
+}
+
 /**
  * Extract the first JSON array from a model reply, tolerating code fences and
  * surrounding prose.
@@ -220,8 +266,28 @@ export class CanvasScriptAgent {
    * @returns the generated script, or a typed failure.
    */
   generate(roomId: MatrixRoomId, intent: string, graph: WorkflowGraph | null): Promise<CanvasGenerateResult> {
+    return this.enqueue(roomId, buildPrompt(intent, graph))
+  }
+
+  /**
+   * Produce a corrective op-script after a transaction did not fully commit
+   * (Phase-3 P3-M4 observe->re-plan loop). Serialized behind the room's prior
+   * turns exactly like {@link generate}; the prompt is seeded with the failed
+   * ops so the model repairs rather than re-plans from scratch.
+   * @param roomId - the room whose canvas is being repaired.
+   * @param intent - the original natural-language intent.
+   * @param failedOps - the ops that did not apply/commit.
+   * @param graph - the room's current persisted graph.
+   * @returns the corrective script, or a typed failure.
+   */
+  replan(roomId: MatrixRoomId, intent: string, failedOps: readonly OpResult[], graph: WorkflowGraph | null): Promise<CanvasGenerateResult> {
+    return this.enqueue(roomId, buildReplanPrompt(intent, failedOps, graph))
+  }
+
+  /** Serialize one planner turn behind the room's prior turn. */
+  private enqueue(roomId: MatrixRoomId, prompt: string): Promise<CanvasGenerateResult> {
     const previous = this.queues.get(roomId) ?? Promise.resolve()
-    const turn = previous.then(() => this.runTurn(roomId, intent, graph), () => this.runTurn(roomId, intent, graph))
+    const turn = previous.then(() => this.runTurn(roomId, prompt), () => this.runTurn(roomId, prompt))
     // The queue tracks completion only; the caller receives the turn's result.
     this.queues.set(roomId, turn.then(() => undefined, () => undefined))
     return turn
@@ -250,14 +316,14 @@ export class CanvasScriptAgent {
   }
 
   /** Drive one planner turn to quiescence and parse/validate its JSON output. */
-  private async runTurn(roomId: MatrixRoomId, intent: string, graph: WorkflowGraph | null): Promise<CanvasGenerateResult> {
+  private async runTurn(roomId: MatrixRoomId, prompt: string): Promise<CanvasGenerateResult> {
     if (this.closed) return { ok: false, code: 'llm-unavailable', message: 'canvas planner disposed' }
     let text: string
     try {
       const agent = await this.ensureAgent(roomId)
       const firstSeq = Number(agent.session.seq)
       agent.followup(createUserMessage({
-        content: [{ type: 'text', text: buildPrompt(intent, graph) }],
+        content: [{ type: 'text', text: prompt }],
         source: { kind: 'user' },
       }))
       const subagents = this.deps.subagents
