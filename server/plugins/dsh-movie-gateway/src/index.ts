@@ -24,6 +24,7 @@ import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startGatewayServer, type GatewayHandle } from './gateway-server.ts'
+import { CanvasScriptAgent } from './canvas-agent.ts'
 import type { MovieGateway, MovieGatewayInfo } from './types.ts'
 
 export type { MovieGateway, MovieGatewayInfo } from './types.ts'
@@ -31,8 +32,11 @@ export type { MovieGateway, MovieGatewayInfo } from './types.ts'
 /** Stable Loader identity. */
 export const name = 'movie-gateway'
 
-/** The gateway resolves callers through the identity provider. */
-export const inject = ['matrixIdentity']
+/**
+ * The gateway resolves callers through the identity provider and drives canvas
+ * op-script generation through the DSH agent runtime (Phase-3 P3-M3).
+ */
+export const inject = ['matrixIdentity', 'agents', 'agentDefaultModel', 'sessions']
 
 /** Plugin configuration: the loopback port to bind. */
 export interface Config {
@@ -98,6 +102,17 @@ export function apply(ctx: Context, config: Config): void {
     if (staticDir === undefined) {
       ctx.logger.warn('[movie-gateway] ComfyUI frontend build not found at %s; /comfy/ will 503 (run scripts/fetch-comfy-frontend.ts)', configuredStatic)
     }
+    // The real-LLM canvas op-script generator (P3-M3). It mirrors the matrix-chat
+    // agent wiring: per-room sessions, optional subagent settlement, and the
+    // host CWD as the agent working directory.
+    const canvasAgent = new CanvasScriptAgent({
+      agents: ctx.agents,
+      agentDefaultModel: ctx.agentDefaultModel,
+      sessions: ctx.sessions,
+      ...ctx.get('subagents') === undefined ? {} : { subagents: ctx.get('subagents') },
+      cwd: process.cwd(),
+      logger: ctx.logger,
+    })
     ctx.effect(() => {
       handle = startGatewayServer({
         port: config.port,
@@ -105,12 +120,14 @@ export function apply(ctx: Context, config: Config): void {
         logger: ctx.logger,
         staticDir,
         bridgeExtensionFile: existsSync(bridgeExtensionFile) ? bridgeExtensionFile : undefined,
+        canvasAgent,
       })
       ctx.logger.info('[movie-gateway] Leg B/C gateway active on port %d', config.port)
       return async () => {
         const current = handle
         handle = null
         if (current !== null) await current.stop()
+        canvasAgent.dispose()
       }
     })
   } else {

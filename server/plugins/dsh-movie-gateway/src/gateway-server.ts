@@ -38,6 +38,7 @@ import type {
   ExecMessage,
   LegCMethod,
   LegCResponse,
+  OpResult,
   Principal,
   PromptGraph,
   StreamControl,
@@ -57,6 +58,7 @@ import {
 } from './fixtures.ts'
 import { createWorkflowStore } from './workflow-store.ts'
 import type { MovieGatewayInfo } from './types.ts'
+import type { CanvasScriptAgent, CanvasGenerateResult } from './canvas-agent.ts'
 
 /** Diagnostics sink the gateway writes to (matches `ctx.logger`). */
 export interface GatewayLogger {
@@ -85,6 +87,12 @@ export interface GatewayServerDeps {
    * `/comfy/extensions/dsh-movie-bridge.js` and listed by `/comfy/api/extensions`.
    */
   bridgeExtensionFile?: string | undefined
+  /**
+   * Optional real-LLM canvas op-script generator (Phase-3 P3-M3). When present,
+   * `canvas/script` is accepted and streamed back over the mux; when absent it
+   * answers `unimplemented` so the gateway boots without the agent runtime.
+   */
+  canvasAgent?: CanvasScriptAgent | undefined
 }
 
 /** A running gateway: introspection plus a reversible stop. */
@@ -240,9 +248,13 @@ function toPrincipal(principal: MatrixPrincipal): Principal {
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent } = deps
   const execClients = new Set<WebSocket>()
   const workflowStore = createWorkflowStore()
+  /** Pending canvas script generations keyed by txnId (POST triggers, mux delivers). */
+  const canvasPlans = new Map<string, Promise<CanvasGenerateResult>>()
+  /** Last canvas execution result per room, retained for the P3-M4 re-plan loop. */
+  const lastCanvasResults = new Map<string, { txnId: string; committed: boolean; opResults: OpResult[] }>()
   let queueCounter = 0
   let listening = false
 
@@ -261,6 +273,56 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
   /** Send one mux frame to a socket when it is open. */
   function sendFrame(socket: WebSocket, frame: StreamFrame): void {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame))
+  }
+
+  /**
+   * Stream one canvas op-script generation over the mux (Phase-3 P3-M3). The
+   * POST `canvas/script` call already started the generation and registered it
+   * under `txnId`; this re-authenticates the socket caller, waits for the plan,
+   * and emits a `script` data frame (or a typed `error`) followed by `end`.
+   * Delivering over the mux (rather than the POST response) keeps the script
+   * request-scoped, so a second browser tab cannot double-apply the same ops.
+   * @param socket - the mux client socket.
+   * @param open - the `open` control message carrying `{ roomId, txnId, token }`.
+   */
+  async function handleCanvasScriptStream(socket: WebSocket, open: StreamOpen): Promise<void> {
+    const stream = open.stream
+    const params = open.params ?? {}
+    const token = stringParam(params, 'token')
+    if (token === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'missing-token', message: 'a Matrix access token is required' } })
+      return
+    }
+    const principal = await identity.whoami(token)
+    if (principal === null) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'invalid-token', message: 'the Matrix access token was rejected' } })
+      return
+    }
+    const roomId = stringParam(params, 'roomId')
+    const txnId = stringParam(params, 'txnId')
+    if (roomId === undefined || txnId === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'bad-request', message: 'roomId and txnId are required' } })
+      return
+    }
+    const role = await identity.roomRole(roomId, principal.userId)
+    if (role === 'none') {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'forbidden', message: 'role "none" may not request canvas scripts; room membership required' } })
+      return
+    }
+    const plan = canvasPlans.get(txnId)
+    if (plan === undefined) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: 'not-found', message: `no pending canvas script for txnId ${txnId}` } })
+      return
+    }
+    sendFrame(socket, { stream, type: 'data', payload: { stage: 'generating', txnId } })
+    const result = await plan
+    canvasPlans.delete(txnId)
+    if (!result.ok) {
+      sendFrame(socket, { stream, type: 'error', payload: { code: result.code, message: result.message } })
+      return
+    }
+    sendFrame(socket, { stream, type: 'data', payload: { stage: 'script', script: result.script } })
+    sendFrame(socket, { stream, type: 'end' })
   }
 
   /* ---------------------------- Leg C dispatch --------------------------- */
@@ -410,6 +472,61 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           return
         }
         const payload: LegCResponse<'workflow/put'> = { workflow: result.record }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'canvas/script': {
+        // P3-M3: a POST triggers generation and returns a txnId; the script
+        // itself is delivered over the `canvas/script` mux channel correlated by
+        // that txnId (so a second browser tab cannot double-apply the same ops).
+        const roomId = stringParam(params, 'roomId')
+        const intent = stringParam(params, 'intent')
+        if (roomId === undefined || intent === undefined) {
+          sendApi(res, err('bad-request', 'roomId and intent are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not request canvas scripts; room membership required'))
+          return
+        }
+        if (canvasAgent === undefined) {
+          sendApi(res, err('unimplemented', 'canvas/script requires the agent runtime (not configured)'))
+          return
+        }
+        const txnId = randomUUID()
+        const currentGraph = workflowStore.get(roomId)?.graph ?? null
+        const plan = canvasAgent.generate(roomId, intent, currentGraph)
+        // Swallow the floating rejection; the mux stream re-awaits the same plan.
+        void plan.catch((): void => {})
+        canvasPlans.set(txnId, plan)
+        // TTL sweep so an abandoned txn (client never opened the stream) frees.
+        setTimeout(() => canvasPlans.delete(txnId), 120_000)
+        logger.info('[movie-gateway] canvas/script accepted txn=%s room=%s', txnId, roomId)
+        const payload: LegCResponse<'canvas/script'> = { txnId, accepted: true }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'canvas/result': {
+        // P3-M3: the client executor reports per-op outcomes; the host records
+        // the last result per room (the observe/re-plan loop is P3-M4).
+        const roomId = stringParam(params, 'roomId')
+        const txnId = stringParam(params, 'txnId')
+        if (roomId === undefined || txnId === undefined) {
+          sendApi(res, err('bad-request', 'roomId and txnId are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not report canvas results; room membership required'))
+          return
+        }
+        const committed = params['committed'] === true
+        const rawResults = params['opResults']
+        const opResults = Array.isArray(rawResults) ? (rawResults as OpResult[]) : []
+        lastCanvasResults.set(roomId, { txnId, committed, opResults })
+        logger.info('[movie-gateway] canvas/result room=%s txn=%s committed=%s ops=%d', roomId, txnId, String(committed), opResults.length)
+        const payload: LegCResponse<'canvas/result'> = { accepted: true }
         sendApi(res, ok(payload))
         return
       }
@@ -664,6 +781,13 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       if (control.op === 'open') {
         const open = control as StreamOpen
         const stream = open.stream
+        if (open.channel === 'canvas/script') {
+          void handleCanvasScriptStream(socket, open).catch((error: unknown) => {
+            logger.warn('[movie-gateway] canvas/script stream failed: %s', String(error))
+            sendFrame(socket, { stream, type: 'error', payload: { code: 'internal', message: 'canvas script stream failed' } })
+          })
+          return
+        }
         if (open.channel === 'leg-b/exec') {
           const promptId = randomUUID()
           const params = open.params

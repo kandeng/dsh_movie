@@ -11,6 +11,7 @@ import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useCanvasBridge } from "@/composables/useCanvasBridge";
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
 import { useExecStatus } from "@/composables/useExecStatus";
+import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
 import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId } from "@/utils/demoWorkflow";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
 
@@ -107,6 +108,54 @@ workflowStore.onConflict(({ current }) => {
 watch(activeRoomId, (roomId) => {
   if (canvasReady.value) void hydrate(roomId);
 });
+
+// ── P3-M3：AI 编排画布。自然语言意图经 Leg C `canvas/script` POST 提交给宿主真实 LLM，
+//    生成的 op-script 通过 mux 流（按 txnId 关联）回灌，由确定性执行器完成
+//    快照→逐条应用→后置校验→（瞬时错误退避重试 / 硬失败回滚快照）→成功单次保存→回报。
+//    应用期间复用 suppressSave 抑制自动保存，保证执行器的单次显式保存为权威写入。──
+const canvasScript = useCanvasScript({
+  bridge,
+  workflowStore,
+  onApplyStart: () => { suppressSave = true; },
+  onApplyEnd: () => { setTimeout(() => { suppressSave = false; }, 600); },
+});
+const aiIntent = ref("");
+const aiRunning = computed(() => canvasScript.busy.value);
+
+function stageLabel(stage: CanvasScriptStage): string {
+  switch (stage) {
+    case "submitting": return translate("提交中");
+    case "generating": return translate("AI 生成中");
+    case "applying": return translate("应用操作中");
+    case "saving": return translate("保存中");
+    case "reporting": return translate("回报结果中");
+    case "done": return translate("已完成");
+    case "error": return translate("出错");
+    default: return "";
+  }
+}
+
+async function submitAiIntent() {
+  const intent = aiIntent.value.trim();
+  if (intent === "" || !canvasReady.value || aiRunning.value) return;
+  const roomId = activeRoomId.value;
+  if (!roomId) {
+    ElMessage.warning(translate("请先进入一个房间再使用 AI 编排"));
+    return;
+  }
+  const result = await canvasScript.runIntent(roomId, intent);
+  if (result === null) {
+    ElMessage.error(`${translate("AI 编排失败")}: ${canvasScript.error.value ?? ""}`);
+    return;
+  }
+  const okCount = result.opResults.filter((entry) => entry.ok).length;
+  if (result.committed) {
+    ElMessage.success(`${translate("AI 编排已应用")} (${okCount}/${result.opResults.length})`);
+    aiIntent.value = "";
+  } else {
+    ElMessage.warning(`${translate("AI 编排已回滚，存在无法应用的操作")} (${okCount}/${result.opResults.length})`);
+  }
+}
 
 // ── 产物检视器派生状态：把选中节点 id 解析成 MOVIE_NODES 架构 + 实时状态 + 产物输出。──
 const selectedSchema = computed(() => {
@@ -310,6 +359,22 @@ onScopeDispose(() => { onResizeUp(); });
             <el-button size="small" :disabled="!canvasReady" @click="toggleReadonly">
               {{ readonlyLock ? translate("解除只读锁") : translate("设为只读") }}
             </el-button>
+            <el-input
+              v-model="aiIntent"
+              class="aiInput"
+              size="small"
+              :placeholder="translate('用自然语言编排画布，例如：把剧本节点连到分镜节点')"
+              :disabled="!canvasReady || aiRunning"
+              @keyup.enter="submitAiIntent" />
+            <el-button
+              size="small"
+              type="primary"
+              :disabled="!canvasReady || aiIntent.trim() === ''"
+              :loading="aiRunning"
+              @click="submitAiIntent">
+              {{ translate("AI 编排画布") }}
+            </el-button>
+            <span v-if="aiRunning" class="aiStage">{{ stageLabel(canvasScript.stage.value) }}</span>
             <span
               class="liveDot"
               :class="{ on: execStatus.connected.value }"
@@ -322,6 +387,18 @@ onScopeDispose(() => { onResizeUp(); });
               <template v-else-if="selectedNode !== null">{{ translate("已选中节点 #") }}{{ selectedNode }}</template>
               <template v-else>{{ translate("点击画布节点以查看选中项") }}</template>
             </span>
+          </div>
+          <!-- P3-M3：最近一次 AI 编排的逐条操作结果（成功/失败/跳过）。 -->
+          <div v-if="canvasScript.opResults.value.length > 0" class="aiResults">
+            <span class="aiResultsTitle">{{ translate("AI 操作结果") }}</span>
+            <ul class="aiResultsList">
+              <li
+                v-for="entry in canvasScript.opResults.value"
+                :key="entry.index"
+                :class="entry.ok ? 'ok' : 'bad'">
+                #{{ entry.index }} · {{ entry.op.op }}<template v-if="!entry.ok"> — {{ entry.error }}</template>
+              </li>
+            </ul>
           </div>
           <div class="stageBody">
             <iframe
@@ -482,6 +559,43 @@ onScopeDispose(() => { onResizeUp(); });
   font-size: 12px;
   color: var(--el-text-color-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+.aiInput {
+  width: 280px;
+  flex: 0 1 auto;
+}
+
+.aiStage {
+  font-size: 12px;
+  color: var(--el-color-primary);
+}
+
+.aiResults {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  font-size: 12px;
+}
+
+.aiResultsTitle {
+  flex: 0 0 auto;
+  color: var(--el-text-color-secondary);
+}
+
+.aiResultsList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+
+  li.ok { color: var(--el-color-success); }
+  li.bad { color: var(--el-color-danger); }
 }
 
 .stageBody {

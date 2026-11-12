@@ -26,6 +26,7 @@
 
 import type { MatrixRoomId, MatrixUserId, Principal, RoomRole } from './principal.ts'
 import type { WorkflowGraph } from './leg-b.ts'
+import type { OpResult } from './op-script.ts'
 
 /* -------------------------------------------------------------------------- */
 /* Request / response envelope                                                 */
@@ -194,6 +195,21 @@ export interface WorkflowNamespace {
   >
 }
 
+/**
+ * `canvas.*` - the agent op-script channel (Phase-3 P3-M3). `canvas/script`
+ * submits a natural-language intent; the server agent generates a validated
+ * {@link CanvasScript} and streams it back on the `canvas/script` mux channel
+ * (the POST only acknowledges acceptance with the transaction id). The client
+ * executor applies it and reports per-op outcomes via `canvas/result`.
+ */
+export interface CanvasNamespace {
+  'canvas/script': Method<{ roomId: MatrixRoomId; intent: string }, { txnId: string; accepted: boolean }>
+  'canvas/result': Method<
+    { roomId: MatrixRoomId; txnId: string; committed: boolean; opResults: OpResult[] },
+    { accepted: boolean }
+  >
+}
+
 /** `agent.*` - steer/stop/approve a running room agent (typed now, impl later). */
 export interface AgentNamespace {
   'agent/status': Method<{ roomId: MatrixRoomId }, { running: boolean; turn?: string }>
@@ -212,7 +228,7 @@ export interface QuotaNamespace {
 }
 
 /** Every Leg C namespace method map, keyed by namespace. */
-export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, AgentNamespace, WorkspaceNamespace, QuotaNamespace {}
+export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, CanvasNamespace, AgentNamespace, WorkspaceNamespace, QuotaNamespace {}
 
 /** Every Leg C method name (`<namespace>/<method>`). */
 export type LegCMethod = keyof LegCNamespaces
@@ -233,6 +249,8 @@ export const IMPLEMENTED_METHODS: readonly LegCMethod[] = [
   'assets/get',
   'workflow/get',
   'workflow/put',
+  'canvas/script',
+  'canvas/result',
 ] as const
 
 /**
