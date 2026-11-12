@@ -3,10 +3,11 @@ import { useAuthStore } from "@/stores/auth";
 
 /**
  * Phase-2 routes (hash history so the built app can be served from any path):
- * - `/chat`    the merged one-shot room + stage view (ported in Task 6).
- * - `/account` Mode-B login / profile / logout.
- * Later milestones add `/plaza`, `/studio`, `/settings`; they are stubbed as
- * redirects to `/chat` for now so deep links never 404 during the skeleton.
+ * - `/chat`     the merged one-shot room + stage view.
+ * - `/plaza`    the generated-video gallery (M3).
+ * - `/account`  Mode-B login / profile edit / change password / logout (M3).
+ * - `/settings` placeholder entry (full settings UI not ported; M3).
+ * - `/studio`   the step-by-step Studio shell: stage slot + docked chatbox (M4).
  */
 const router = createRouter({
   history: createWebHashHistory(),
@@ -21,10 +22,19 @@ const router = createRouter({
       path: "/account",
       component: () => import("@/pages/account/index.vue"),
     },
-    // Stubs for deferred milestones (M3-M5); keep them resolving to /chat.
-    { path: "/plaza", redirect: "/chat" },
-    { path: "/studio", redirect: "/chat" },
-    { path: "/settings", redirect: "/account" },
+    {
+      path: "/plaza",
+      component: () => import("@/pages/plaza/index.vue"),
+    },
+    {
+      path: "/settings",
+      component: () => import("@/pages/settings/index.vue"),
+    },
+    {
+      path: "/studio",
+      component: () => import("@/pages/studio/index.vue"),
+      meta: { requiresAuth: true },
+    },
   ],
 });
 

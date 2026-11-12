@@ -26,6 +26,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { createReadStream, existsSync, statSync } from 'node:fs'
+import { extname, join, normalize, resolve as resolvePath } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import type {
@@ -42,7 +44,7 @@ import type {
   StreamFrame,
   StreamOpen,
 } from '@dsh-movie/protocol'
-import { IMPLEMENTED_METHODS, methodFromApiPath } from '@dsh-movie/protocol'
+import { IMPLEMENTED_METHODS, methodFromApiPath, buildObjectInfo } from '@dsh-movie/protocol'
 import type { MatrixIdentity, MatrixPrincipal } from 'dsh-matrix-identity/types'
 import {
   CANNED_ASSETS,
@@ -70,6 +72,17 @@ export interface GatewayServerDeps {
   identity: MatrixIdentity
   /** Diagnostics sink. */
   logger: GatewayLogger
+  /**
+   * Directory holding the pinned ComfyUI frontend build, served same-origin at
+   * `/comfy/` (Phase-2 M5). When unset, `/comfy/` answers 503 so the Studio
+   * canvas can show a clear "frontend not fetched" state instead of a blank 404.
+   */
+  staticDir?: string | undefined
+  /**
+   * Absolute path to the bridge extension JS we own, served at
+   * `/comfy/extensions/dsh-movie-bridge.js` and listed by `/comfy/api/extensions`.
+   */
+  bridgeExtensionFile?: string | undefined
 }
 
 /** A running gateway: introspection plus a reversible stop. */
@@ -84,6 +97,46 @@ export interface GatewayHandle {
 
 /** Bound the request body so a hostile client cannot exhaust memory. */
 const MAX_BODY_BYTES = 65_536
+
+/** MIME type by lowercase file extension for the `/comfy/` static route. */
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.wasm': 'application/wasm',
+  '.txt': 'text/plain; charset=utf-8',
+  '.glb': 'model/gltf-binary',
+  '.mp3': 'audio/mpeg',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+}
+
+/**
+ * The URL the frontend imports for our bridge extension, listed by
+ * `/comfy/api/extensions`. The pinned frontend resolves each entry with
+ * `fileURL(e) = api_base + e`, where `api_base` is `/comfy` for a subpath
+ * deployment, so we advertise an api_base-relative path (leading slash, NO
+ * `/comfy` prefix). That yields the final `/comfy/extensions/dsh-movie-bridge.js`
+ * we serve below. Returning the absolute `/comfy/...` form would double the
+ * prefix (`/comfy/comfy/...` -> 404 -> a vite preloadError that aborts
+ * `app.setup()`, leaving node defs and the bridge unregistered).
+ */
+const BRIDGE_EXTENSION_URL = '/extensions/dsh-movie-bridge.js'
 
 /** HTTP status each Leg C error code maps to. */
 const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
@@ -184,7 +237,7 @@ function toPrincipal(principal: MatrixPrincipal): Principal {
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile } = deps
   const execClients = new Set<WebSocket>()
   let queueCounter = 0
   let listening = false
@@ -369,6 +422,147 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     sendRaw(res, 404, { error: 'not-found' })
   }
 
+  /* --------------------- ComfyUI frontend (/comfy/*) --------------------- */
+
+  /** Accept a prompt graph and drive the shared execution-lifecycle socket. */
+  async function submitPrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let prompt: PromptGraph
+    try {
+      const params = await readParams(req)
+      const raw = params['prompt']
+      if (typeof raw !== 'object' || raw === null) {
+        sendRaw(res, 400, { error: 'bad-request', message: 'prompt graph is required' })
+        return
+      }
+      prompt = raw as PromptGraph
+    } catch (error) {
+      logger.warn('[movie-gateway] /prompt bad body: %s', String(error))
+      sendRaw(res, 400, { error: 'bad-request', message: 'invalid JSON body' })
+      return
+    }
+    const promptId = randomUUID()
+    const number = ++queueCounter
+    broadcastExec(cannedLifecycle(promptId, number, nodeIdsOf(prompt)))
+    sendRaw(res, 200, { prompt_id: promptId, number })
+  }
+
+  /** Stream a file from disk with a MIME type, or 404 when absent. */
+  function sendFile(res: ServerResponse, filePath: string): void {
+    let isFile = false
+    try {
+      isFile = statSync(filePath).isFile()
+    } catch {
+      isFile = false
+    }
+    if (!isFile) {
+      sendRaw(res, 404, { error: 'not-found' })
+      return
+    }
+    const type = MIME_TYPES[extname(filePath).toLowerCase()] ?? 'application/octet-stream'
+    applyCors(res)
+    res.writeHead(200, { 'Content-Type': type })
+    createReadStream(filePath).pipe(res)
+  }
+
+  /**
+   * The minimal ComfyUI backend-protocol subset the pinned frontend demands on
+   * boot, served under `/comfy/api/*` (the frontend prefixes every REST call with
+   * `{api_base}/api`, where `api_base` is `/comfy`). Optional cloud/agent/hub
+   * features answer with empty defaults; unknown calls are logged and 404 so the
+   * E2E pass reveals any remaining boot gap.
+   */
+  async function handleComfyApi(req: IncomingMessage, res: ServerResponse, endpoint: string): Promise<void> {
+    const method = req.method ?? 'GET'
+    if (endpoint === '/prompt') {
+      if (method === 'POST') await submitPrompt(req, res)
+      else sendRaw(res, 405, { error: 'method-not-allowed' })
+      return
+    }
+    if (method !== 'GET' && method !== 'POST') {
+      sendRaw(res, 405, { error: 'method-not-allowed' })
+      return
+    }
+    switch (endpoint) {
+      case '/object_info': sendRaw(res, 200, buildObjectInfo()); return
+      case '/system_stats': sendRaw(res, 200, CANNED_SYSTEM_STATS); return
+      case '/extensions': sendRaw(res, 200, [BRIDGE_EXTENSION_URL]); return
+      case '/queue': sendRaw(res, 200, { queue_running: [], queue_pending: [] }); return
+      case '/history': sendRaw(res, 200, {}); return
+      case '/settings': sendRaw(res, 200, {}); return
+      case '/userdata': sendRaw(res, 200, []); return
+      case '/user': sendRaw(res, 200, {}); return
+      case '/users': sendRaw(res, 200, {}); return
+      case '/i18n': sendRaw(res, 200, {}); return
+      case '/features': sendRaw(res, 200, {}); return
+      case '/node_replacements': sendRaw(res, 200, []); return
+      case '/global_subgraphs': sendRaw(res, 200, []); return
+      case '/folder_paths': sendRaw(res, 200, {}); return
+      case '/workflow_templates': sendRaw(res, 200, []); return
+      // The pinned frontend derives the queue FROM the Jobs API (`fetchQueue`
+      // calls `fetchJobsRaw`), zod-parsing `{ jobs, pagination: { total, offset,
+      // limit, has_more } }`. An empty-but-well-shaped answer silences both the
+      // Jobs and "Failed to fetch queue" console errors.
+      case '/jobs': sendRaw(res, 200, { jobs: [], pagination: { total: 0, offset: 0, limit: 200, has_more: false } }); return
+      default: break
+    }
+    // A single job detail (`/jobs/{id}`) has no history in this prototype.
+    if (endpoint.startsWith('/jobs/')) {
+      sendRaw(res, 200, {})
+      return
+    }
+    // Prefix families that must answer with benign empties to let boot proceed.
+    if (endpoint.startsWith('/settings/')
+      || endpoint.startsWith('/models')
+      || endpoint.startsWith('/templates')
+      || endpoint.startsWith('/embeddings')
+      || endpoint.startsWith('/workflow_templates/')) {
+      sendRaw(res, 200, [])
+      return
+    }
+    if (endpoint.startsWith('/userdata/')) {
+      if (method === 'POST') { sendRaw(res, 200, { ok: true }); return }
+      sendRaw(res, 404, { error: 'not-found' })
+      return
+    }
+    logger.warn('[movie-gateway] unhandled comfy api: %s %s', method, endpoint)
+    sendRaw(res, 404, { error: 'not-found', endpoint })
+  }
+
+  /** Serve the pinned frontend build (and our bridge extension) under `/comfy/`. */
+  function handleComfyStatic(res: ServerResponse, subPath: string): void {
+    if (subPath === 'extensions/dsh-movie-bridge.js') {
+      if (bridgeExtensionFile === undefined) { sendRaw(res, 404, { error: 'bridge-not-configured' }); return }
+      sendFile(res, bridgeExtensionFile)
+      return
+    }
+    if (staticDir === undefined) {
+      sendRaw(res, 503, { error: 'comfy-frontend-not-fetched', hint: 'run server/scripts/fetch-comfy-frontend.ts' })
+      return
+    }
+    const rel = subPath === '' ? 'index.html' : subPath
+    const root = resolvePath(staticDir)
+    const full = resolvePath(root, normalize(rel))
+    if (full !== root && !full.startsWith(root + '/')) {
+      sendRaw(res, 403, { error: 'forbidden' })
+      return
+    }
+    if (existsSync(full) && statSync(full).isDirectory()) {
+      sendFile(res, join(full, 'index.html'))
+      return
+    }
+    sendFile(res, full)
+  }
+
+  /** Route a `/comfy/*` request to the API subset or the static build. */
+  async function handleComfy(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
+    const sub = pathname.slice('/comfy'.length)
+    if (sub === '/api' || sub.startsWith('/api/')) {
+      await handleComfyApi(req, res, sub.slice('/api'.length) || '/')
+      return
+    }
+    handleComfyStatic(res, sub.replace(/^\//, ''))
+  }
+
   /* ------------------------------ HTTP router ---------------------------- */
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -377,6 +571,10 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       applyCors(res)
       res.writeHead(204)
       res.end()
+      return
+    }
+    if (pathname === '/comfy' || pathname.startsWith('/comfy/')) {
+      await handleComfy(req, res, pathname)
       return
     }
     if (pathname === '/api' || pathname.startsWith('/api/')) {
@@ -442,7 +640,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
 
   httpServer.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const pathname = (req.url ?? '').split('?')[0] ?? ''
-    if (pathname === '/ws') {
+    if (pathname === '/ws' || pathname === '/comfy/ws') {
       execWs.handleUpgrade(req, socket, head, (ws: WebSocket) => execWs.emit('connection', ws, req))
       return
     }

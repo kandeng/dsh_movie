@@ -27,8 +27,19 @@ export interface WorkflowSlot {
   name?: string
   /** Slot value type, e.g. `IMAGE`, `STRING`, `*`. */
   type?: string
-  /** Id of the link connected to this slot, or `null` when unconnected. */
+  /**
+   * Id of the link connected to this slot, or `null` when unconnected. Input
+   * slots carry a single `link`; output slots additionally carry `links`.
+   */
   link: number | null
+  /**
+   * Output slots only: the list of link ids connected to this output (a node
+   * output may fan out to several inputs), or `null`/empty when unconnected.
+   * Matches the serialized LiteGraph shape the pinned frontend expects.
+   */
+  links?: number[] | null
+  /** Output slots only: the slot index hint LiteGraph stores when serializing. */
+  slot_index?: number
 }
 
 /** A single node in the editor workflow graph. */

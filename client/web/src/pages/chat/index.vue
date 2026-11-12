@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
 import groupChat from "@/components/groupChat.vue";
+import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
@@ -102,13 +103,21 @@ function goLogin() {
 
     <!-- Signed in: the shared room-timeline chat fills the page. -->
     <div v-else class="chatColumn">
-      <groupChat
-        mode="one-shot"
-        @select-video="openVideo($event, false)"
-        @play-video="openVideo($event, true)"
-        @stage-image="openImage"
-        @stage-file="openFile"
-      />
+      <!-- ACT: In-place mode switcher (M3/M4): toggles one-shot (this page) ↔ step-by-step
+           (/studio), carrying the current room across. Centered in a slim toolbar above the
+           chat so it never overlaps the groupChat header. -->
+      <div class="modeBar">
+        <modeSwitcher mode="one-shot" />
+      </div>
+      <div class="chatFill">
+        <groupChat
+          mode="one-shot"
+          @select-video="openVideo($event, false)"
+          @play-video="openVideo($event, true)"
+          @stage-image="openImage"
+          @stage-file="openFile"
+        />
+      </div>
     </div>
 
     <!-- Lightweight media viewer: video / image / read-only text preview. -->
@@ -158,6 +167,23 @@ function goLogin() {
   position: relative;
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+// ACT: Slim centered toolbar hosting the mode switcher; fixed height so the chat
+// below keeps a definite height for groupChat's height:100% panel.
+.modeBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+}
+
+.chatFill {
+  flex: 1 1 auto;
   min-height: 0;
 }
 

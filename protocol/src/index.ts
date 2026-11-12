@@ -17,3 +17,5 @@
 export * from './principal.ts'
 export * from './leg-b.ts'
 export * from './leg-c.ts'
+export * from './nodes.ts'
+export * from './bridge.ts'

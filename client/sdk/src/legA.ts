@@ -194,3 +194,114 @@ export function mxcToHttp(client: MatrixClient, mxc: string): string | null {
   // matching the Chat port's authenticated media download.
   return client.mxcUrlToHttp(mxc, undefined, undefined, undefined, undefined, undefined, true)
 }
+
+/**
+ * Set the account's display name (Matrix `PUT .../profile/{userId}/displayname`).
+ * @param config - the SDK config carrying the homeserver URL.
+ * @param session - the authenticated half-session (token + user id).
+ * @param displayName - the new display name.
+ */
+export async function setDisplayName(
+  config: SdkConfig,
+  session: MatrixSession,
+  displayName: string,
+): Promise<void> {
+  const url = `${trimTrailingSlash(config.homeserverUrl)}/_matrix/client/v3/profile/${encodeURIComponent(session.userId)}/displayname`
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${session.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ displayname: displayName }),
+  })
+  if (!response.ok) throw new Error(`displayname HTTP ${response.status}`)
+}
+
+/**
+ * Upload an image blob and set it as the account's avatar.
+ *
+ * The upload goes through `matrix-js-sdk`'s `uploadContent` so it targets the
+ * correct (authenticated-media) upload endpoint for the pinned SDK version;
+ * the resulting `mxc://` uri is then written to the profile's `avatar_url`.
+ * @param config - the SDK config carrying the homeserver URL.
+ * @param session - the authenticated half-session (token + user id).
+ * @param blob - the avatar image bytes.
+ * @returns the uploaded `mxc://` content uri now set as the avatar.
+ */
+export async function setAvatar(
+  config: SdkConfig,
+  session: MatrixSession,
+  blob: Blob,
+): Promise<string> {
+  const client = createClient({
+    baseUrl: trimTrailingSlash(config.homeserverUrl),
+    accessToken: session.accessToken,
+    userId: session.userId,
+  })
+  try {
+    const upload = await client.uploadContent(blob)
+    const mxc = upload.content_uri
+    const url = `${trimTrailingSlash(config.homeserverUrl)}/_matrix/client/v3/profile/${encodeURIComponent(session.userId)}/avatar_url`
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${session.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ avatar_url: mxc }),
+    })
+    if (!response.ok) throw new Error(`avatar_url HTTP ${response.status}`)
+    return mxc
+  } finally {
+    client.stopClient()
+  }
+}
+
+/**
+ * Change the account password.
+ *
+ * Drives the user-interactive-authentication (UIA) flow directly against
+ * `POST /_matrix/client/v3/account/password`: the first request returns a UIA
+ * `session` (401), which is then replayed with password auth. Devices are
+ * logged out so a stale token cannot survive the change; the caller should
+ * re-login afterwards.
+ * @param config - the SDK config carrying the homeserver URL.
+ * @param session - the authenticated half-session (token + user id).
+ * @param oldPassword - the current password (for UIA).
+ * @param newPassword - the password to set.
+ */
+export async function changePassword(
+  config: SdkConfig,
+  session: MatrixSession,
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const url = `${trimTrailingSlash(config.homeserverUrl)}/_matrix/client/v3/account/password`
+  const headers = {
+    Authorization: `Bearer ${session.accessToken}`,
+    'Content-Type': 'application/json',
+  }
+  const bodyFor = (uiaSession?: string) => JSON.stringify({
+    auth: {
+      type: 'm.login.password',
+      user: session.userId,
+      password: oldPassword,
+      ...(uiaSession ? { session: uiaSession } : {}),
+    },
+    new_password: newPassword,
+    logout_devices: true,
+  })
+
+  const first = await fetch(url, { method: 'POST', headers, body: bodyFor() })
+  if (first.ok) return
+  // A 401 with a UIA session id means "authenticate to continue"; replay once.
+  if (first.status === 401) {
+    const challenge = (await first.json().catch(() => null)) as { session?: unknown } | null
+    const uiaSession = typeof challenge?.session === 'string' ? challenge.session : undefined
+    const second = await fetch(url, { method: 'POST', headers, body: bodyFor(uiaSession) })
+    if (second.ok) return
+    throw new Error(`changePassword HTTP ${second.status}`)
+  }
+  throw new Error(`changePassword HTTP ${first.status}`)
+}

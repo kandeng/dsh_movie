@@ -2,7 +2,14 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import axios from "axios";
 import { translate } from "@dsh-movie/i18n/vue";
-import { loginWithPassword, whoami } from "@dsh-movie/sdk";
+import {
+  loginWithPassword,
+  whoami,
+  setDisplayName,
+  setAvatar,
+  changePassword as sdkChangePassword,
+} from "@dsh-movie/sdk";
+import { fetchMediaBlobUrl } from "@/lib/matrixMedia";
 import { clientConfig, sdkConfig, toMatrixId } from "@/config";
 
 /**
@@ -49,6 +56,34 @@ export const useAuthStore = defineStore(
     const session = ref<AuthSession | null>(null);
     const busy = ref(false);
     const restored = ref(false);
+    // Resolved (blob) URL for the avatar `mxc://` uri, safe to bind to `<img>`.
+    const avatarHttpUrl = ref("");
+
+    /** Build the SDK-facing Matrix half-session from the stored auth session. */
+    function matrixSession() {
+      const current = session.value;
+      if (!current) return null;
+      return {
+        accessToken: current.accessToken,
+        userId: current.userId,
+        deviceId: current.deviceId || null,
+      };
+    }
+
+    /** Resolve the session's avatar `mxc://` into a displayable blob URL. */
+    async function resolveAvatar(): Promise<void> {
+      const current = session.value;
+      const mxc = current?.avatarUrl ?? "";
+      if (!mxc || !current?.accessToken) {
+        avatarHttpUrl.value = "";
+        return;
+      }
+      try {
+        avatarHttpUrl.value = await fetchMediaBlobUrl(mxc, current.accessToken);
+      } catch {
+        avatarHttpUrl.value = "";
+      }
+    }
 
     const signedIn = computed(() => Boolean(session.value?.accessToken));
     const myUserId = computed(() => session.value?.userId ?? "");
@@ -73,8 +108,54 @@ export const useAuthStore = defineStore(
           displayName: typeof data.displayname === "string" && data.displayname ? data.displayname : current.displayName,
           avatarUrl: typeof data.avatar_url === "string" ? data.avatar_url : current.avatarUrl,
         };
+        await resolveAvatar();
       } catch {
         // Display name and avatar are best-effort; ignore failures.
+      }
+    }
+
+    /**
+     * Update the account profile on Synapse: display name and/or avatar.
+     * @param displayName - the new display name (trimmed; ignored when empty).
+     * @param avatarDataUri - an optional `data:` image URI to upload as avatar.
+     */
+    async function updateProfile(displayName: string, avatarDataUri?: string): Promise<void> {
+      const current = session.value;
+      const half = matrixSession();
+      if (!current || !half) throw new Error(translate("请先登录"));
+      busy.value = true;
+      try {
+        const name = displayName.trim();
+        if (name && name !== current.displayName) {
+          await setDisplayName(sdkConfig, half, name);
+          session.value = { ...session.value!, displayName: name };
+        }
+        if (avatarDataUri) {
+          const blob = await (await fetch(avatarDataUri)).blob();
+          const mxc = await setAvatar(sdkConfig, half, blob);
+          session.value = { ...session.value!, avatarUrl: mxc };
+          await resolveAvatar();
+        }
+      } finally {
+        busy.value = false;
+      }
+    }
+
+    /**
+     * Change the account password on Synapse. On success all devices are logged
+     * out, so the local session is cleared and the caller must re-login.
+     */
+    async function changePassword(oldPassword: string, newPassword: string): Promise<void> {
+      const half = matrixSession();
+      if (!half) throw new Error(translate("请先登录"));
+      if (!oldPassword || !newPassword) throw new Error(translate("请输入密码"));
+      busy.value = true;
+      try {
+        await sdkChangePassword(sdkConfig, half, oldPassword, newPassword);
+        // Password changed with logout_devices: the current token is now dead.
+        invalidate();
+      } finally {
+        busy.value = false;
       }
     }
 
@@ -142,11 +223,14 @@ export const useAuthStore = defineStore(
       deviceId,
       displayName,
       avatarUrl,
+      avatarHttpUrl,
       login,
       logout,
       restore,
       invalidate,
       refreshProfile,
+      updateProfile,
+      changePassword,
     };
   },
   {

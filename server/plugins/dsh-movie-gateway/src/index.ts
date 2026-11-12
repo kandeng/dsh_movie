@@ -20,6 +20,9 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { existsSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { startGatewayServer, type GatewayHandle } from './gateway-server.ts'
 import type { MovieGateway, MovieGatewayInfo } from './types.ts'
 
@@ -35,11 +38,18 @@ export const inject = ['matrixIdentity']
 export interface Config {
   /** Loopback port for the Leg B/C gateway; `0` disables it. */
   port: number
+  /**
+   * Directory holding the pinned ComfyUI frontend build served at `/comfy/`.
+   * Empty (default) resolves to `<server>/static/comfy` when that directory
+   * exists (populated by `scripts/fetch-comfy-frontend.ts`).
+   */
+  comfyStaticDir: string
 }
 
 /** Schemastery validation + defaults for {@link Config}. */
 export const Config: z<Config> = z.object({
   port: z.number().min(0).default(8788),
+  comfyStaticDir: z.string().default(''),
 })
 
 /** Build the gateway's loopback coordinates for a port. */
@@ -74,11 +84,27 @@ export function apply(ctx: Context, config: Config): void {
   ctx.provide('movieGateway', service)
 
   if (config.port > 0) {
+    // Resolve the ComfyUI frontend build dir and our bridge extension relative to
+    // this plugin file (CWD-independent): `<server>/static/comfy` and the
+    // `comfy-bridge/bridge-extension.js` we ship alongside the plugin source.
+    const pluginDir = dirname(fileURLToPath(import.meta.url))
+    const serverRoot = resolve(pluginDir, '..', '..', '..')
+    const defaultStatic = resolve(serverRoot, 'static', 'comfy')
+    const configuredStatic = config.comfyStaticDir !== ''
+      ? resolve(config.comfyStaticDir)
+      : defaultStatic
+    const staticDir = existsSync(configuredStatic) ? configuredStatic : undefined
+    const bridgeExtensionFile = resolve(pluginDir, 'comfy-bridge', 'bridge-extension.js')
+    if (staticDir === undefined) {
+      ctx.logger.warn('[movie-gateway] ComfyUI frontend build not found at %s; /comfy/ will 503 (run scripts/fetch-comfy-frontend.ts)', configuredStatic)
+    }
     ctx.effect(() => {
       handle = startGatewayServer({
         port: config.port,
         identity: ctx.matrixIdentity,
         logger: ctx.logger,
+        staticDir,
+        bridgeExtensionFile: existsSync(bridgeExtensionFile) ? bridgeExtensionFile : undefined,
       })
       ctx.logger.info('[movie-gateway] Leg B/C gateway active on port %d', config.port)
       return async () => {

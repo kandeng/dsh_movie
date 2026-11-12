@@ -5,6 +5,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# ComfyUI frontend build (fetched by server/scripts/fetch-comfy-frontend.ts;
+# GPL-3.0 static assets served at /comfy/, never vendored or committed)
+server/static/comfy/
+
 # Logs & scratch
 *.log
 

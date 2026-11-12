@@ -19,6 +19,11 @@ export default defineConfig({
       // /_matrix fetches (e.g. authenticated media) work in dev. In production
       // a reverse proxy (Caddy) plays the same role.
       "/_matrix": { target: "http://127.0.0.1:8008", changeOrigin: true },
+      // The pinned ComfyUI frontend (Phase-2 M5) is served by the gateway under
+      // /comfy/ and derives its API base from location.pathname, so every REST
+      // call (/comfy/api/*), static asset (/comfy/*), and the execution WS
+      // (/comfy/ws) stays under this single prefix. ws:true upgrades the socket.
+      "/comfy": { target: "http://127.0.0.1:8788", changeOrigin: true, ws: true },
     },
   },
   resolve: {

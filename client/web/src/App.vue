@@ -53,8 +53,11 @@ async function onLogout() {
       <header class="appBar">
         <div class="brand" @click="router.push('/chat')">DSH Movie</div>
         <nav class="nav">
+          <router-link to="/plaza" :class="{ active: route.path === '/plaza' }">Plaza</router-link>
           <router-link to="/chat" :class="{ active: route.path === '/chat' }">Chat</router-link>
+          <router-link to="/studio" :class="{ active: route.path === '/studio' }">Studio</router-link>
           <router-link to="/account" :class="{ active: route.path === '/account' }">Account</router-link>
+          <router-link to="/settings" :class="{ active: route.path === '/settings' }">Settings</router-link>
         </nav>
         <div class="spacer" />
         <div v-if="auth.signedIn" class="user">
