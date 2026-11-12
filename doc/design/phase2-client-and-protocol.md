@@ -1,6 +1,6 @@
 # Phase 2 Plan: Browser Client & Client–Server Communication Protocol
 
-- Status: P2-M1 + P2-M2 + P2-M3 + P2-M4 implemented and verified (see §5 build notes); M5-M7 pending go-ahead
+- Status: Phase 2 implemented and verified (P2-M1–M7 complete; see §5 build notes). P2-M5 canvas decision gate verdict: ADOPT Option 1 (ComfyUI frontend-in-iframe). Note: P2-M6's Matrix room-state consensus for multi-device convergence was deferred to Phase 3; P3-M5 delivered host-exclusive governance instead, with durable room-state consensus still deferred (see `phase3-comfyui-canvas-agent-scripting.md` §7 P3-M5).
 - Depends on: `phase1-dsh-matrix-feasibility.md` (identity plugin, chat transport plugin, DSH `movie` profile)
 - Scope: unified client–server protocol, canvas strategy (ComfyUI iframe exploration), and copy-paste porting of vidsay client pages into `/home/robot/dsh_movie/client`
 - Source: `/home/robot/vidsay` read-only copy-paste source; never modified
