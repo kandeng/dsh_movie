@@ -1,7 +1,7 @@
 # dsh_movie System Architecture
 
 - Nature: conceptual design and decision rationale — **not** an implementation or code-detail reference.
-- Synthesizes the four phase design documents in `doc/design/` (`phase1-dsh-matrix-feasibility.md`, `phase2-client-and-protocol.md`, `phase3-comfyui-canvas-agent-scripting.md`, `phase4-vueflow-canvas-vidsay-shell.md`).
+- Synthesizes the four phase design documents in `doc/design/` (Phase 1 feasibility, Phase 2 client & protocol, Phase 3 canvas & agent scripting, Phase 4 canvas & shell port).
 - Audience: a reader who wants to understand *why the system is shaped the way it is*, and the trade-offs behind its arguable choices.
 
 ## 0. At a glance
@@ -25,7 +25,7 @@ graph TB
     HOST --> SY
 ```
 
-The rest of this document expands the framing (plugins), then authentication, the three legs, the canvas, the session/governance model, the server and client loops, the movie pipeline, cross-cutting decisions, and the honest list of deferred gaps.
+The rest of this document expands the framing (plugins), then authentication, the three legs, the canvas, the session/governance model, the server and client loops, and the movie pipeline.
 
 ## 1. Framing: DSH/Cordis — everything is a plugin
 
@@ -41,7 +41,7 @@ A running `dsh` is a **plugin tree composed at boot from ordered layers** — a 
 
 DSH ships **no user-account subsystem** — its `identity` package provides only an anonymous per-installation correlation id. dsh_movie therefore does not build accounts; it **fills the gap with Synapse** (Matrix), adapted into a plugin.
 
-This is a deliberate **inversion of vidsay**, where `better-auth` was the primary account store and Synapse a shadow. In dsh_movie, **Synapse is the only identity store** and better-auth is removed entirely. The decision: *no JavaScript "FastAPI-Users" equivalent is needed* — Synapse's Client-Server API + Admin API + `homeserver.yaml` policy already cover registration, login, password hashing/reset, email verification, user CRUD, and rate limiting; MAS/OIDC covers future SSO. The plugin does **only adaptation**: provisioning idempotency, token introspection/brokering, principal mapping, and events.
+This is a deliberate **inversion of the common pattern** in which a web-app account store (such as `better-auth`) is primary and Matrix is only a shadow identity. In dsh_movie, **Synapse is the only identity store** and there is no separate website-account layer. The decision: *no JavaScript "FastAPI-Users" equivalent is needed* — Synapse's Client-Server API + Admin API + `homeserver.yaml` policy already cover registration, login, password hashing/reset, email verification, user CRUD, and rate limiting; MAS/OIDC covers future SSO. The plugin does **only adaptation**: provisioning idempotency, token introspection/brokering, principal mapping, and events.
 
 ### 2.2 Where credentials live
 
@@ -54,7 +54,11 @@ This is a deliberate **inversion of vidsay**, where `better-auth` was the primar
 | Secrets (admin token, brokered tokens) | DSH | `ctx.credentials` = `credentials-local` private YAML readable only by the same OS user; config holds **names, never values** |
 | Product extras (quota/ownership/billing) | dsh_movie | Deferred; not part of the identity story |
 
-Rejected alternatives for auth: (a) a DSH-native account store (re-implements hashing/reset/email and loses Matrix integration); (b) MAS/OIDC as the product IdP now (a valid *later* upgrade; the plugin seam is unchanged); (c) keeping Toonflow's better-auth (explicitly excluded).
+**Explicitly — where the data physically lives:** all user-facing identity data (login name, password, and profile) is stored by the **Matrix/Synapse homeserver, not by DSH**. It lives in **Synapse's own database** — SQLite in development, a self-provisioned **PostgreSQL** in production (the dev→prod switch is a one-way `synapse_port_db` migration, not a config flip). That PostgreSQL belongs to Synapse. **DSH runs no relational database of its own for identity** and never stores a login name, password, or profile field; passwords are hashed inside Synapse and never leave it. 
+
+The only things DSH persists are *non-user* operational secrets (the Synapse admin registration token and any brokered tokens) in the `ctx.credentials` local YAML file, plus non-identity durable state (append-only session logs and per-room workspace files). A future separate PostgreSQL schema may hold product extras (quota/ownership/billing) — but never credentials or profile data, and Synapse's schema is never shared or touched.
+
+Rejected alternatives for auth: (a) a DSH-native account store (re-implements hashing/reset/email and loses Matrix integration); (b) MAS/OIDC as the product IdP now (a valid *later* upgrade; the plugin seam is unchanged); (c) keeping a separate web-app account store such as `better-auth` (explicitly excluded).
 
 ### 2.3 Two authentication modes
 
@@ -63,15 +67,28 @@ Rejected alternatives for auth: (a) a DSH-native account store (re-implements ha
 
 Mode B makes the browser the trust anchor and means there is **no second login and no JWT of our own** — one credential (the Matrix token) authenticates all three legs.
 
+**Single entry point:** in dsh_movie the **only** surface where a user registers or logs in is the **Account page** — there is no separate login dialog, pop-up, deep-link, or any other route that authenticates. Both registration and login go straight from that page to Synapse (Mode B). Mode A is defined only as a brokered-token variant for completeness; it is **not** an additional user-facing access path.
+
 ### 2.4 The `@Remote` fallback (an arguable decision)
 
 DSH's native API surface is the **Typert `@Remote` gateway**: services mark methods `@Remote`/`@RemoteScope`, a build step generates strict Host/Client contracts, and calls flow over `POST /api/<ns>/<method>` + a multiplexed WebSocket, each naming a **Peer** principal, gated by `ctx.remoteAccess.decide()` role policies.
 
-The catch: **native `@Remote` generation cannot be fed by an out-of-tree, run-from-source plugin** — the Connection client requires pre-generated `lib/typert.remote-client.*` artifacts and refuses to mount source (SRC) descriptors that lack strict codecs. dsh_movie therefore uses the documented **fallback**: a **plugin-owned `/auth/*` loopback HTTP listener** (port 8787). The browser presents its Matrix token; the host introspects it and maps it to a principal, and resolves the caller's **room role** (`host` / `member` / `none`, **fail-closed**). Production front-names this listener behind Caddy and tightens the allowed origin; **the endpoint contract stays the same**. This preserves Synapse as the sole identity authority and leaves the native-`@Remote` seam unchanged for a future upgrade.
+The catch: **native `@Remote` generation cannot be fed by an out-of-tree, run-from-source plugin** — the Connection client requires pre-generated `lib/typert.remote-client.*` artifacts and refuses to mount source (SRC) descriptors that lack strict codecs.
 
-### 2.5 Per-user isolation (server-side)
+dsh_movie therefore uses the documented **fallback**: a **plugin-owned `/auth/*` loopback HTTP listener** (port 8787). The browser presents its Matrix token; the host introspects it and maps it to a principal, and resolves the caller's **room role** (`host` / `member` / `none`, **fail-closed**). Production front-names this listener behind Caddy and tightens the allowed origin; **the endpoint contract stays the same**. This preserves Synapse as the sole identity authority and leaves the native-`@Remote` seam unchanged for a future upgrade.
 
-A Matrix user id maps to a DSH **Peer** + `@RemoteScope('user')` **scoped Context**, so sessions, workspaces, and agent inboxes are isolated per user; room host/member roles map to `ctx.remoteAccess` role policies. (This — not the browser cache — is the real isolation mechanism; see §7.3.)
+### 2.5 Isolation & access control (per-room, server-side)
+
+The isolation unit is the **room**, not the user: **one chatroom == one session == one per-room workspace directory on the host** (committed graph history + the host's uncommitted draft), and the chat relay serializes each room's messages into its own agent inbox.
+
+Access control is a **two-step, per-room** mechanism — authenticate, then authorize — enforced by the plugin-owned gateway (§2.4) rather than by DSH's native Typert scoping:
+
+1. **Step 1 — Identity (authentication).** The gateway introspects the caller's Matrix access token to a **principal `matrix:<mxid>`**. This establishes *who* is calling.
+2. **Step 2 — Authorization (per-room permission).** Every graph/workspace/movie call is then gated by the caller's **room role** (`host` / `member` / `none`) resolved from Matrix power levels. This establishes *what* that principal may do in that room.
+
+The two steps are tied together by a **fail-closed** default: if the token cannot be introspected, or the role cannot be resolved from power levels, the result is `none` (deny). So no call passes without both a resolved identity and a resolved room role — which is why this replaces DSH's native Typert scoping rather than layering on top of it.
+
+There is **no per-user workspace and no `@RemoteScope('user')` scoped Context** in the as-built system — those were Phase-1 feasibility aspirations that the native-`@Remote` fallback (§2.4) made moot. (This room-level model — not the browser cache — is the real isolation boundary; see §5 and §7.3.)
 
 ## 3. Three legs, one SDK
 
@@ -83,14 +100,20 @@ Two questions drove the protocol design.
 
 **The key decision:** unification happens **at the client SDK layer, not on the wire.** One typed SDK (`client/sdk`) multiplexes three legs behind a single surface over shared contract types in the `protocol` package, with **one auth principal** (the Matrix token). Merging the wire protocols themselves would mean re-implementing Matrix sync/federation and ComfyUI execution semantics for no gain.
 
+**Zoom-in of the at-a-glance diagram (§0).** The SDK / leg / Synapse nodes below carry the *same labels* as in §0; the only difference is that §0's single `DSH host` node is opened here into a box showing which host component serves each leg.
+
 ```mermaid
 graph TB
-    SDK[Client SDK: single typed surface, one auth principal] --> A[Leg A: Matrix CS API]
-    SDK --> B[Leg B: ComfyUI-style execution channel]
+    SDK[Client SDK: one typed surface, one auth principal] --> A[Leg A: Matrix CS API]
+    SDK --> B[Leg B: ComfyUI-protocol execution channel]
     SDK --> C[Leg C: DSH gateway RPC + WS mux]
-    A --> SY[(Synapse)]
-    B --> EX[Leg B subset implemented on the DSH host]
-    C --> DSH[DSH host plugins: identity, workflow, canvas, movie, assets]
+    A --> SY[(Synapse homeserver: identity + chat + media)]
+    subgraph HOST[DSH host, movie profile: plugins]
+        EX[Leg B subset: ComfyUI protocol served on the host]
+        GW[Leg C gateway: workflow, canvas, movie, assets]
+    end
+    B --> EX
+    C --> GW
 ```
 
 - **Leg A (Matrix CS API, matrix-js-sdk in browser):** login/whoami/refresh, room sync, messages/state, media upload + authenticated media download, presence/typing. The chat UI speaks this directly.
@@ -99,31 +122,48 @@ graph TB
 
 **Contract-as-code:** the `protocol` package is a shared TypeScript catalog (Leg B message set, Leg C interfaces, the bridge postMessage contract, the workflow-JSON schema, the op-script catalog, and the movie-step node-schema registry). It is imported by **both** client and server and contains **no runtime proxies** — a single source of truth.
 
-## 4. The canvas: from ComfyUI iframe to Vue Flow (Path B)
+## 4. The canvas: from ComfyUI iframe to Toonflow UI (Path B)
 
-The canvas has the most interesting evolutionary arc in the system, and it demonstrates the value of designing for a **seam**.
+### 4.1 Why we replaced ComfyUI's frontend UI
 
-### 4.1 Frontend-only ComfyUI, no Python server
+ComfyUI's whole UI is built around **typed ports and diffusion computation nodes**. If our infinite canvas embedded ComfyUI's UI, it would force its users to think in terms of **KSampler, VAE, and latent tensors** — which is exactly what our canvas tries to hide for its target creative workflow. 
 
-The original approach (adopted at the Phase-2 decision gate) embedded the **unmodified ComfyUI frontend build** (pinned version) in an `<iframe>`, served same-origin by our own host. There is **no Python ComfyUI server**: the DSH host implements the minimal backend protocol subset the frontend demands (`/object_info` generated from our movie-step node schemas, `/system_stats`, `/extensions`, `WS /ws`, `/userdata` mapped onto the Leg C workflow store, plus no-op/forwarded `/queue|/history|/prompt`). ComfyUI is a **pure editor/visualizer** — its `/prompt` queue is accepted but never executed natively; execution lifecycle events are emitted by our own executor as ComfyUI WS messages and painted as node status badges.
+Our use scenario is different: we generate **movies**. Toonflow's UI — its components, including tags — is ready to use for movie generation out of the box. So we replace the frontend UI with Toonflow's own in-app UI (a Vue Flow canvas), and keep ComfyUI's protocol and backend underneath.
 
-**Licensing boundary:** ComfyUI core/frontend are **GPL-3.0**. The iframe embeds the unmodified build served as static assets — **no ComfyUI code is vendored or copied into our bundle**, so there is no license contamination.
+This is **Path B — client-only**. The three backend legs (Leg A chat, Leg B execution + status, Leg C server-authoritative `WorkflowGraph`) are unchanged. Only the canvas view and the app shell were ported.
 
-### 4.2 Why it was later replaced (Phase 4, Path B)
+### 4.2 Why we keep ComfyUI's protocol
 
-Phase 4 **replaced the ComfyUI iframe with an in-app Vue Flow canvas**, taking the pre-planned fallback from the risk table. Rationale: full typing and branding control, no untyped/version-fragile `postMessage` surface, and no dependency on ComfyUI frontend API churn. Crucially this is **Path B — client-only**: the three backend legs (Leg A chat, Leg B execution + status, Leg C server-authoritative `WorkflowGraph`) are **unchanged**. Only the canvas *view* and the app *shell* were ported.
+ComfyUI's community has many useful tools and assets: custom nodes, models, and workflows. With the ComfyUI protocol, we can use those community-developed tools and assets easily. The protocol is the contract between our client and the ComfyUI server: a graph JSON plus an HTTP/WebSocket API. By speaking the protocol, we inherit the whole community ecosystem without forking it — and we never vendor or copy ComfyUI's code into our bundle; we only talk to it over the wire.
 
-### 4.3 The `CanvasBridge` seam (the whole trick)
+### 4.3 The APIs of ComfyUI's protocol
 
-`useCanvasBridge.ts` defined a **`CanvasBridge` interface** (`loadWorkflow`, `exportGraph`, `setNodeStatus`, `setReadonly`, `viewFit`, `request`, `sendCommand`, `whenReady`, and event hooks). Phase 4 added `useVueFlowBridge.ts` implementing the **same interface** over a Vue Flow store + a graph mapper. Because the seam is an interface, **every downstream consumer works unchanged**: the op-script executor, the Leg B execution-status watcher, the Leg C persistence/governance composables, the room-role composable, and the movie-run composable. No protocol, op-catalog, postcondition, or gateway change.
+**Submit & control (HTTP)**
+- `POST /prompt` — Send a workflow (graph) to the server and ask it to run. The body is the graph as JSON.
+- `GET /queue` — Ask what is waiting to run and what is running right now.
+- `POST /interrupt` — Stop the run that is currently in progress.
+- `POST /free` — Tell the server to release memory it no longer needs.
+
+**Inspect results (HTTP)**
+- `GET /history` — Ask for past runs and their outputs (images, values).
+- `GET /view` — Download or display one output image or file.
+- `GET /object_info` — Ask what node types the server knows and what inputs/outputs each has.
+
+**Real-time progress (WebSocket)**
+- `GET /ws` — A live channel that tells the client, moment by moment, which node is running and how far along the run is.
+
+**Files & users (HTTP)**
+- `POST /upload/image` — Send an input image to the server.
+- `GET /userdata` — Read and write the user's saved workflows.
+- `GET /system_stats` — Ask basic facts about the server's hardware and versions.
 
 ### 4.4 Graph model: server-authoritative ComfyUI graph
 
-The **ComfyUI `WorkflowGraph` stays server-authoritative** — it is the persisted and executed shape. The Vue Flow graph `{nodes, edges, viewport}` is **only the client view model**, translated by a **bidirectional mapper**. The alternative ("persist Vue Flow natively") was **rejected** because it would force a protocol + governance re-do for no backend benefit.
+The graph (workflow) is a JSON object of nodes + links. **Server-authoritative** means the server owns, validates, and executes the graph; the client only edits and submits it. The client never executes the graph itself, so the server remains the single source of truth for what actually ran. Persisting the client's Vue Flow view natively was rejected because it would force a protocol and governance re-do for no backend benefit.
 
-Two further decisions:
-- **Static nodes, not runtime plugins.** vidsay loads node types as UMD runtime plugins; dsh_movie ships **one generic node component** mapped to all six movie-step class types, fully **data-driven off each node's schema** (widget editors, per-slot input/output handles, status badges).
-- **Leg B badge paint rewiring.** With the iframe's internal WS gone, the parent-side Leg B socket now drives node badges. Status paint is **view-only** (never serialized into the `WorkflowGraph`), so the bridge suppresses the graph-dirty tick briefly after a badge paint to avoid spurious autosave/revision bumps.
+### 4.5 The CanvasBridge seam
+
+The CanvasBridge is the seam between the Toonflow UI (canvas) and the ComfyUI protocol. It is a thin adapter that translates UI events into protocol calls, so the rest of the app never talks to the protocol directly. Because it is an interface, every downstream consumer (the op-script executor, the execution-status watcher, the persistence/governance composables) works unchanged when the underlying canvas is swapped. Keeping the seam thin means the UI can change without touching the protocol, and the protocol can change without touching the UI.
 
 ## 5. Session model & graph governance
 
@@ -182,7 +222,7 @@ The director runs on **`ctx.subagents` + `ctx.jobs`** (§8). The shared task-DAG
 
 **Durable server state** = append-only session logs + credentials YAML + revision-gated per-room file stores. Phase 1 deliberately runs **no relational DB**; a separate Postgres schema (asset lineage/billing/ownership) is a later concern, and Synapse's schema is never shared or touched.
 
-## 7. Client side: deterministic executor, supervision split, per-user cache
+## 7. Client side: deterministic executor, supervision split, client cache
 
 ### 7.1 No pi-core in the browser
 
@@ -200,7 +240,7 @@ The client's "loop" is a **deterministic, LLM-free transactional executor**:
 
 The server agent emits a **constrained op-script** (a JSON op sequence over the command catalog), **never eval-able arbitrary JavaScript** — this avoids executing untrusted/LLM-hallucinated code in the user's browser, keeps transactions verifiable, and makes replays/diffs testable. The result is a clean **supervision split**: *deterministic verification on the client, intelligent re-planning on the server.*
 
-### 7.3 Per-user client cache/state (simple)
+### 7.3 Client-side cache/state (simple)
 
 The browser persists a small amount of state in `localStorage`; this is a **persistence convenience, not an isolation mechanism**:
 
@@ -208,7 +248,7 @@ The browser persists a small amount of state in `localStorage`; this is a **pers
 - **Auth:** only the **Matrix half-session** is persisted (key `dsh-movie.auth`, picking just `session`). On reload, `restore()` re-verifies the token via `whoami`; a lighter `revalidate()` runs on tab-focus/visibility and a periodic timer, and **a network blip is not treated as a dead token**.
 - **Ephemeral in-memory caches:** the avatar `mxc://` is resolved to a **blob URL held in memory** (not persisted); chat media uses object URLs.
 
-**Honest caveat:** these keys are **not namespaced per user** — there is one active session per browser profile, and switching accounts overwrites the same keys. Genuine per-user isolation lives **server-side** (`@RemoteScope('user')` scoped Contexts + per-user workspace roots, §2.5). So the client "cache" is best described as a short tutorial in browser state persistence, not a security boundary.
+**Honest caveat:** these keys are **not namespaced per user** — there is one active session per browser profile, and switching accounts overwrites the same keys. Genuine isolation lives **server-side** and is **per room** (one chatroom == one session == one per-room workspace directory, gated by principal + room role; §2.5). So the client "cache" is best described as a short tutorial in browser state persistence, not a security boundary.
 
 ## 8. The movie pipeline: what the system actually produces
 
@@ -248,38 +288,3 @@ graph LR
     Agent --> LegB[Leg B lifecycle -> node badges]
 ```
 
-## 9. Cross-cutting decisions
-
-### 9.1 vidsay port strategy (Path B) and stubs
-
-The UI is **copy-pasted from vidsay** (a read-only source, never modified), then adapted. Ported: the **app shell** (left icon rail + top bar), the **chat UI skin** (wired to dsh_movie's Leg A data layer, not vidsay stores), the **language picker**, the **theme system**, and the **canvas view**. The guiding principle is **"port, not vendor"**: the canvas was rebuilt natively on `@vue-flow/core` rather than vendoring vidsay's 13 `@toonflow/*` packages (avoiding a Bun→pnpm reconciliation risk), while `i18n` *was* vendored as `@dsh-movie/i18n`.
-
-Most vidsay **SaaS/pi surfaces were never ported** (MCP control, single-agent dialog, agent cloud, plugin market, provider billing, local models, anonymous data) — there is nothing to call and no route to render. The only SaaS surfaces present are the account page's **Wallet** and **Billing** sections, which are intentionally **"coming soon" text stubs with no backend calls**.
-
-### 9.2 Licensing as an architecture driver
-
-- **DSH** — MIT (attribution retained).
-- **vidsay** — same owner; copied as a read-only source.
-- **ComfyUI** — GPL-3.0, **embedded via iframe only, never vendored/copied** → no contamination. (After Phase 4 the ComfyUI frontend is no longer even embedded; only its **protocol** survives as Leg B.)
-
-### 9.3 Per-user isolation & principal mapping
-
-Restated as a cross-cutting concern: a Matrix mxid → a DSH **Peer** → a `@RemoteScope('user')` **scoped Context** → a **per-user workspace root**; the room role (`host`/`member`/`none`, fail-closed) is resolved through `ctx.remoteAccess`. This is the actual isolation boundary — the browser cache (§7.3) is not.
-
-### 9.4 Contract-as-code
-
-A single `protocol` package is the **single source of truth** for all three legs, the workflow-JSON schema, the op-script catalog, and the node-schema registry — imported by client and server, with no runtime proxies. This is what keeps the three legs and both canvas implementations swappable.
-
-## 10. Deferred / honest gaps
-
-The system is deliberately scoped; the following are **known, documented deferrals**, not oversights:
-
-- **Durable Matrix room-state consensus** for the host seat (currently resolved from power levels on demand, not persisted as a governance event).
-- **Live member draft-sharing** (members see committed HEAD + role only, not the host's uncommitted draft).
-- **Structured/graph diffing** (history stores whole snapshots, not deltas).
-- **Real GPU/provider-API media inference** (the `MediaProvider` seam exists; only the canned impl ships, because the wired LLM is chat-only).
-- **Executing non-movie node types via Leg B** (render-only until a later milestone).
-- **Volatile live workflow store** (resets on a gateway restart; committed history is durable).
-- **SaaS backends** — wallet, billing, quota, plugin market, MCP, single-agent — **stubbed or not ported**.
-
-These gaps are consistent with the framing in §1: because everything is a plugin behind stable contracts, each can be added later without reshaping the kernel, the protocol, or the canvas seam.
