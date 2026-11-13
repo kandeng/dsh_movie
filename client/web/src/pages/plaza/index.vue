@@ -41,9 +41,8 @@ function goLogin() {
   <div class="plaza">
     <div class="plazaScroll">
       <section v-if="!auth.signedIn" class="plazaNote">
-        <el-empty :description="translate('登录后即可浏览各群聊生成的视频。')">
-          <el-button type="primary" @click="goLogin">{{ translate("登录") }}</el-button>
-        </el-empty>
+        <p>{{ translate("登录后即可浏览各群聊生成的视频。") }}</p>
+        <el-button type="primary" @click="goLogin">{{ translate("登录") }}</el-button>
       </section>
       <section v-else-if="connecting && !videos.length" class="plazaNote">
         <p>{{ translate("连接中…") }}</p>

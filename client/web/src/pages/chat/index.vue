@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
@@ -8,62 +8,65 @@ import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
+import videoStage from "./components/videoStage.vue";
 
-// Chat page (one-shot view). The room timeline, input area and room management
-// all live in the shared groupChat component; this page only keeps page-level
-// concerns: the signed-out guide and a lightweight media viewer dialog that
-// opens when the user selects/plays a video, views an image, or previews a file.
-// Matrix state is a module-level singleton, so we read `timeline` directly here
-// and share the same data with groupChat.
+// Chat page (one-shot view). The room timeline, input area and room management all
+// live in the shared groupChat component; this page keeps the page-level concerns:
+// the signed-out guide, the left media stage (video player + image + in-stage text
+// reader + pencil/screenshot toolbox), and the draggable divider between the stage
+// and the docked chatbox. Matrix state is a module-level singleton, so we read
+// `timeline` directly here and share the same data with groupChat.
 const auth = useAuthStore();
 const router = useRouter();
 const { timeline, activeRoomId } = useMatrixChat();
 
-// ── Media viewer dialog state ──
-type ViewerKind = "video" | "image" | "text";
-const viewerVisible = ref(false);
-const viewerKind = ref<ViewerKind>("video");
-const viewerUrl = ref("");
-const viewerName = ref("");
-const viewerText = ref("");
-const viewerTextKind = ref<TextPreviewKind>("text");
-// Bumping the play token re-triggers autoplay when "play" is chosen.
+// ── Stage selection state ──
+const selectedVideoId = ref("");
+const videoItems = computed(() =>
+  timeline.value.filter(m => m.msgtype === "m.video" && m.url).map(m => ({ id: m.id, url: m.url!, name: m.body })),
+);
+// Bumping the play token (right-click "play") auto-starts playback; plain card select does not.
 const playToken = ref(0);
-const autoPlay = computed(() => playToken.value > 0);
-
+// Image state for the main panel: shown in place of the player until a video is
+// selected/played, the room changes, or the message is redacted.
+const stageImage = ref<{ id: string; url: string; name: string } | null>(null);
+// Read-only text state for the main panel (mutually exclusive with the image state).
+const stageText = ref<{ id: string; name: string; content: string; kind: TextPreviewKind } | null>(null);
 // Preview cap of 5MB: larger text files are slow to read/render, prompt download.
 const PREVIEW_MAX = 5 * 1024 * 1024;
-
-// Switching rooms or deleting the shown message closes the viewer.
-watch(activeRoomId, () => { viewerVisible.value = false; });
+watch(activeRoomId, () => { stageImage.value = null; stageText.value = null; });
+// If the shown image/file message is redacted, the timeline no longer has that id:
+// retract the stage display so we never dangle a stale blob.
 watch(timeline, list => {
-  if (viewerVisible.value && viewerUrl.value && !list.some(m => m.url === viewerUrl.value)) {
-    viewerVisible.value = false;
-  }
+  const shownImage = stageImage.value;
+  if (shownImage && !list.some(m => m.id === shownImage.id)) stageImage.value = null;
+  const shownText = stageText.value;
+  if (shownText && !list.some(m => m.id === shownText.id)) stageText.value = null;
 });
 
-function openVideo(id: string, play: boolean) {
-  const msg = timeline.value.find(m => m.id === id);
-  if (!msg?.url) return;
-  viewerKind.value = "video";
-  viewerUrl.value = msg.url;
-  viewerName.value = msg.body || translate("视频");
-  viewerText.value = "";
-  if (play) playToken.value++;
-  viewerVisible.value = true;
+function onSelectVideo(id: string) {
+  stageImage.value = null;
+  stageText.value = null;
+  selectedVideoId.value = id;
 }
 
-function openImage(id: string) {
-  const msg = timeline.value.find(m => m.id === id);
-  if (!msg?.url) return;
-  viewerKind.value = "image";
-  viewerUrl.value = msg.url;
-  viewerName.value = msg.body || translate("图片");
-  viewerText.value = "";
-  viewerVisible.value = true;
+function onPlayVideo(id: string) {
+  stageImage.value = null;
+  stageText.value = null;
+  selectedVideoId.value = id;
+  playToken.value++;
 }
 
-async function openFile(id: string) {
+function onStageImage(id: string) {
+  const msg = timeline.value.find(m => m.id === id);
+  if (!msg?.url) return;
+  stageText.value = null;
+  stageImage.value = { id, url: msg.url, name: msg.body || translate("图片") };
+}
+
+// Attachment text preview: the blob is already an authenticated-media local URL, so
+// fetch it directly; the render form comes from previewKind (text/json/markdown/html).
+async function onStageFile(id: string) {
   const msg = timeline.value.find(m => m.id === id);
   if (!msg?.url) return;
   const kind = previewKind(msg.body || "", msg.mimetype);
@@ -76,12 +79,8 @@ async function openFile(id: string) {
     const resp = await fetch(msg.url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const content = await resp.text();
-    viewerKind.value = "text";
-    viewerUrl.value = msg.url;
-    viewerName.value = msg.body || translate("文件");
-    viewerText.value = content;
-    viewerTextKind.value = kind;
-    viewerVisible.value = true;
+    stageImage.value = null;
+    stageText.value = { id, name: msg.body || translate("文件"), content, kind };
   } catch {
     ElMessage.error(translate("读取文件失败，请稍后重试"));
   }
@@ -90,10 +89,47 @@ async function openFile(id: string) {
 function goLogin() {
   router.push({ path: "/account", query: { login: "1", redirect: "/chat" } });
 }
+
+// ── Draggable divider between the stage and the chat column ──
+// pointerdown records the start; pointermove derives the right-column width from
+// window width - clientX, clamped to [CHAT_MIN, vw*0.55].
+const CHAT_MIN = 320;
+const chatWidth = ref(400);
+const resizing = ref(false);
+const chatEl = ref<HTMLElement>();
+
+// Default right-column (chatbox) width is 1/3 of the main panel width, computed once
+// on mount; after the user drags, the dragged value wins.
+function applyDefaultChatWidth() {
+  const panel = chatEl.value?.clientWidth ?? 0;
+  if (!panel) return;
+  const max = Math.round(window.innerWidth * 0.55);
+  chatWidth.value = Math.min(max, Math.max(CHAT_MIN, Math.round(panel / 3)));
+}
+onMounted(applyDefaultChatWidth);
+
+function onResizeDown(event: PointerEvent) {
+  event.preventDefault();
+  resizing.value = true;
+  document.addEventListener("pointermove", onResizeMove);
+  document.addEventListener("pointerup", onResizeUp);
+}
+function onResizeMove(event: PointerEvent) {
+  if (!resizing.value) return;
+  const max = Math.round(window.innerWidth * 0.55);
+  chatWidth.value = Math.min(max, Math.max(CHAT_MIN, window.innerWidth - event.clientX));
+}
+function onResizeUp() {
+  if (!resizing.value) return;
+  resizing.value = false;
+  document.removeEventListener("pointermove", onResizeMove);
+  document.removeEventListener("pointerup", onResizeUp);
+}
+onBeforeUnmount(onResizeUp);
 </script>
 
 <template>
-  <main class="chat">
+  <main ref="chatEl" class="chat" :style="{ '--chat-w': chatWidth + 'px' }">
     <!-- Signed out: page-level guide only; login itself lives on the account page. -->
     <section v-if="!auth.signedIn" class="signedOut">
       <el-empty :description="translate('登录后即可参与群聊')">
@@ -101,54 +137,40 @@ function goLogin() {
       </el-empty>
     </section>
 
-    <!-- Signed in: the shared room-timeline chat fills the page. -->
-    <div v-else class="chatColumn">
-      <!-- ACT: In-place mode switcher (M3/M4): toggles one-shot (this page) ↔ step-by-step
-           (/studio), carrying the current room across. Centered in a slim toolbar above the
-           chat so it never overlaps the groupChat header. -->
-      <div class="modeBar">
-        <modeSwitcher mode="one-shot" />
-      </div>
-      <div class="chatFill">
+    <template v-else>
+      <!-- Left column: the video-play & screenshot stage; clicking an image or a
+           previewable attachment swaps the same slot to image / text display. -->
+      <videoStage :items="videoItems" v-model="selectedVideoId" :play-token="playToken" :image="stageImage" :text="stageText" />
+
+      <!-- In-place mode switcher: one-shot (this page) ↔ step-by-step (/studio),
+           floating over the horizontal center of the stage without affecting the grid. -->
+      <modeSwitcher class="modeSwitch" mode="one-shot" />
+
+      <!-- Draggable vertical divider: drag left/right to resize the chat column live. -->
+      <div class="chatResize" :class="{ dragging: resizing }" @pointerdown="onResizeDown" />
+
+      <!-- Right column: the shared room-timeline chatbox (same component as Studio).
+           Image/text preview now happens in the main panel, not overlaid here. -->
+      <div class="chatColumn">
         <groupChat
           mode="one-shot"
-          @select-video="openVideo($event, false)"
-          @play-video="openVideo($event, true)"
-          @stage-image="openImage"
-          @stage-file="openFile"
+          @select-video="onSelectVideo"
+          @play-video="onPlayVideo"
+          @stage-image="onStageImage"
+          @stage-file="onStageFile"
         />
       </div>
-    </div>
-
-    <!-- Lightweight media viewer: video / image / read-only text preview. -->
-    <el-dialog
-      v-model="viewerVisible"
-      :title="viewerName"
-      width="70%"
-      top="6vh"
-      append-to-body
-      destroy-on-close
-      class="viewerDialog"
-    >
-      <video
-        v-if="viewerKind === 'video'"
-        :src="viewerUrl"
-        class="viewerMedia"
-        controls
-        :autoplay="autoPlay"
-      />
-      <img v-else-if="viewerKind === 'image'" :src="viewerUrl" class="viewerMedia" :alt="viewerName" />
-      <pre v-else class="viewerText">{{ viewerText }}</pre>
-    </el-dialog>
+    </template>
   </main>
 </template>
 
 <style lang="scss" scoped>
 .chat {
   position: relative;
-  display: flex;
+  display: grid;
+  // Three columns: stage (flex fill) + 4px divider + chatbox (width from --chat-w).
+  grid-template-columns: minmax(0, 1fr) 4px var(--chat-w, 400px);
   height: 100%;
-  min-height: 0;
   background: var(--el-bg-color);
   color: var(--el-text-color-primary);
   // Pin the base font size to 14px for consistency across pages.
@@ -156,55 +178,53 @@ function goLogin() {
 }
 
 .signedOut {
-  flex: 1;
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 0;
 }
 
+// Right column container: the chatbox fills it.
 .chatColumn {
   position: relative;
-  flex: 1;
   min-width: 0;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
 }
 
-// ACT: Slim centered toolbar hosting the mode switcher; fixed height so the chat
-// below keeps a definite height for groupChat's height:100% panel.
-.modeBar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 8px 12px;
+// Mode switcher floats over the horizontal center of the stage (left column):
+// left-column width = 100% - divider(4px) - right column(--chat-w).
+.modeSwitch {
+  position: absolute;
+  top: 12px;
+  left: calc((100% - var(--chat-w, 400px) - 4px) / 2);
+  z-index: 6;
+  transform: translateX(-50%);
 }
 
-.chatFill {
-  flex: 1 1 auto;
-  min-height: 0;
-}
+// Same divider treatment as the Studio page: a 4px hit area with a centered 1px
+// vertical line that lights up primary on hover/drag.
+.chatResize {
+  position: relative;
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
 
-.viewerMedia {
-  display: block;
-  width: 100%;
-  max-height: 72vh;
-  object-fit: contain;
-  background: #000;
-}
+  &::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--el-border-color);
+    transition: background 0.15s ease;
+  }
 
-.viewerText {
-  max-height: 72vh;
-  overflow: auto;
-  margin: 0;
-  padding: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 13px;
-  line-height: 1.6;
-  background: var(--el-fill-color-light);
-  border-radius: var(--ui-radius, 8px);
+  &:hover,
+  &.dragging {
+    &::before { background: var(--el-color-primary); }
+  }
 }
 </style>
