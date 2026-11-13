@@ -4,11 +4,13 @@ import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
 import type { NodeRunStatus, WorkflowGraph, MovieStepResult, MovieStepStatus, MovieStepId } from "@dsh-movie/protocol";
+import { MOVIE_NODES } from "@dsh-movie/protocol";
 import groupChat from "@/components/groupChat.vue";
 import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
-import { useCanvasBridge } from "@/composables/useCanvasBridge";
+import { useVueFlowBridge } from "@/composables/useVueFlowBridge";
+import VueFlowCanvas from "@/canvas/VueFlowCanvas.vue";
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
 import { useRoomRole } from "@/composables/useRoomRole";
 import { useWorkspaceGraph } from "@/composables/useWorkspaceGraph";
@@ -28,27 +30,34 @@ const auth = useAuthStore();
 const router = useRouter();
 const { timeline, activeRoomId, teamMembers, sendText } = useMatrixChat();
 
-// ── 画布桥接（M5，design doc §3 Option 1）：舞台嵌入固定版本的 ComfyUI 前端 iframe
-//    （同源 /comfy/index.html），父页面通过版本化 postMessage 桥（@dsh-movie/protocol/bridge）
-//    驱动图加载、节点状态徽章与多人只读锁；iframe 内运行我们自有的桥接扩展。iframe 就绪后
-//    自动加载六步演示工作流；「运行演示生命周期」向网关 POST /comfy/api/prompt，由 Leg B 生命周期
-//    事件经 iframe 的 WS 回灌，实时给节点上色，验证 §3 决策门 (a)(b)(c)(d) 四条标准。──
-const canvasFrame = ref<HTMLIFrameElement>();
+// ── 画布桥接（P4-M3，Path B / design doc §3）：舞台改用应用内 Vue Flow 编辑器，取代固定版本的
+//    ComfyUI iframe。useVueFlowBridge 实现与旧 iframe 桥完全相同的 CanvasBridge 契约，但底层是
+//    一个共享的 Vue Flow store + 纯 graphMapper（VueFlow ⇄ ComfyUI WorkflowGraph），因此 useCanvasScript/
+//    useExecStatus/useWorkspaceGraph/useMovieRun/useRoomRole 全部无需改动。图加载、节点状态徽章与
+//    多人只读锁语义保持不变；「运行演示生命周期」仍向网关 POST /comfy/api/prompt，由 Leg B 生命周期
+//    事件经父页面侧 execStatus socket 回灌，实时给节点上色。──
 const canvasReady = ref(false);
 const selectedNode = ref<number | null>(null);
 const runningDemo = ref(false);
 const previewReadonly = ref(false);
 const paintedCount = ref(0);
-const bridge = useCanvasBridge(canvasFrame);
+const bridge = useVueFlowBridge();
 
 // ── M6：产物检视器 + 图持久化 + 实时状态。
-//    execStatus 打开一条父页面侧 Leg B /ws（与 iframe 自有 socket 并存于网关共享的 execClients），
-//    把 executing/progress/executed/execution_error 折叠成按节点 id 的状态与产物输出。
+//    execStatus 打开一条父页面侧 Leg B /ws，把 executing/progress/executed/execution_error 折叠成
+//    按节点 id 的状态与产物输出。P4-M3：Vue Flow 画布不再有 iframe 内部 socket，故把 execStatus
+//    的状态变化直接刷到画布节点徽章（bridge.setNodeStatus）。
 //    workflowStore 走 Leg C workflow/get|put：宿主是图的权威（内存、房间级、乐观并发 baseRev）。
 //    currentGraph 缓存最近一次加载/导出的图，供节点选中时解析 MOVIE_NODES 架构。──
 const execStatus = useExecStatus();
 const workflowStore = useWorkflowStore();
 const currentGraph = ref<WorkflowGraph | null>(null);
+
+// Paint Leg B lifecycle status onto the Vue Flow node badges (the iframe's own
+// socket is gone under Path B, so the parent-side socket now drives the canvas).
+watch(execStatus.statusById, (byId) => {
+  for (const [id, status] of byId) bridge.setNodeStatus(id, status);
+});
 
 // ── P3-M5：主机独占协作（design doc §4）。roomRole 解析 auth/role 并订阅唯一的
 //    workflow/watch mux（实时收敛 + 角色变更）；workspace 承载主机草稿自动保存
@@ -301,6 +310,22 @@ function reloadDemo() {
   void applyGraph(buildDemoWorkflow());
 }
 
+/**
+ * Add a movie-step node to the canvas from the palette (host-only). Routes
+ * through the bridge's `node.add` command so the change is applied to the shared
+ * Vue Flow store, coalesced into a `graphChanged`, and host-autosaved like any
+ * other manual edit. Nodes cascade slightly so repeats do not stack exactly.
+ */
+function addMovieNode(classType: string) {
+  if (!canvasReady.value || !roomRole.isHost.value) return;
+  const count = bridge.flow.getNodes.value.length;
+  const offset = (count % 8) * 48;
+  const pos: [number, number] = [120 + offset, 180 + offset];
+  void bridge.request("node.add", { nodeType: classType, pos }).catch(() => {
+    ElMessage.error(translate("添加节点失败"));
+  });
+}
+
 // ── P3-M5：主机治理（撤销/重做/提交/移交 + 版本历史）与成员只读交互。
 //    只读由角色驱动（useWorkspaceGraph 内 watch role.isHost → bridge.setReadonly(!isHost)）；
 //    主持人可选「只读预览」临时锁定自己的画布。移交从房间花名册挑选继任者，经
@@ -504,7 +529,7 @@ onScopeDispose(() => { onResizeUp(); });
     </section>
 
     <template v-else>
-      <!-- 左列：舞台（模式切换器 + ComfyUI iframe 画布，M5 已接入）。 -->
+      <!-- 左列：舞台（模式切换器 + Vue Flow 画布，P4-M3 已接入）。 -->
       <div class="stageCol">
         <div class="toolbar">
           <modeSwitcher mode="step-by-step" />
@@ -517,6 +542,24 @@ onScopeDispose(() => { onResizeUp(); });
             <el-button size="small" :disabled="!canvasReady || !roomRole.isHost.value" @click="reloadDemo">
               {{ translate("重载演示图") }}
             </el-button>
+            <el-dropdown
+              trigger="click"
+              :disabled="!canvasReady || !roomRole.isHost.value"
+              @command="addMovieNode">
+              <el-button size="small" :disabled="!canvasReady || !roomRole.isHost.value">
+                {{ translate("添加节点") }}
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-for="node in MOVIE_NODES"
+                    :key="node.classType"
+                    :command="node.classType">
+                    {{ node.step }} · {{ node.displayName }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <el-input
               v-model="aiIntent"
               class="aiInput"
@@ -660,11 +703,7 @@ onScopeDispose(() => { onResizeUp(); });
             </ol>
           </div>
           <div class="stageBody">
-            <iframe
-              ref="canvasFrame"
-              class="canvasFrame"
-              :src="bridge.iframeSrc"
-              :title="translate('工作流画布')" />
+            <VueFlowCanvas />
             <!-- M6 产物检视器：选中节点时展示其步骤、产物类型、实时状态与最近输出。 -->
             <aside v-if="selectedNode !== null" class="inspector">
               <div class="inspectorHead">

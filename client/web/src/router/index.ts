@@ -16,24 +16,27 @@ const router = createRouter({
     {
       path: "/chat",
       component: () => import("@/pages/chat/index.vue"),
-      meta: { requiresAuth: true },
+      meta: { requiresAuth: true, shell: true },
     },
     {
       path: "/account",
       component: () => import("@/pages/account/index.vue"),
+      meta: { shell: true },
     },
     {
       path: "/plaza",
       component: () => import("@/pages/plaza/index.vue"),
+      meta: { shell: true },
     },
     {
       path: "/settings",
       component: () => import("@/pages/settings/index.vue"),
+      meta: { shell: true },
     },
     {
       path: "/studio",
       component: () => import("@/pages/studio/index.vue"),
-      meta: { requiresAuth: true },
+      meta: { requiresAuth: true, shell: true },
     },
   ],
 });
