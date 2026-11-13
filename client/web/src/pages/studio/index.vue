@@ -19,6 +19,13 @@ import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvas
 import { useMovieRun } from "@/composables/useMovieRun";
 import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId, findMovieNode } from "@/utils/demoWorkflow";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
+import { IconArrowBackUp, IconArrowForwardUp, IconGitCommit, IconHistory } from "@tabler/icons-vue";
+// vidsay studioBar 工具图标：本地 svg 经 mask 渲染，跟随按钮文字颜色。
+import iconCanvasAdd from "@/icons/canvas_add.svg";
+import iconCanvasGrouping from "@/icons/canvas_grouping.svg";
+import iconCanvasMove from "@/icons/canvas_move.svg";
+import iconCanvasSearch from "@/icons/canvas_search.svg";
+import iconCanvasAsset from "@/icons/canvas_asset.svg";
 
 // ACT: 工作室框架外壳（design doc §4.3，M4）。这是「分步生成」模式的页面骨架：
 // 左侧是舞台槽位（当前为占位，M5 把 ComfyUI iframe 落进来）；右侧是常驻的停靠式聊天框，
@@ -42,6 +49,28 @@ const runningDemo = ref(false);
 const previewReadonly = ref(false);
 const paintedCount = ref(0);
 const bridge = useVueFlowBridge();
+
+// ── vidsay studioBar 工具态：分组/抓手工具、节点搜索、缩放菜单。缩放与视图直接走共享 Vue Flow store，
+//    与 vidsay canvasPanel 暴露的 zoomPercent/applyZoom/zoomIn/zoomOut 同语义。──
+const selectedTool = ref<"move" | "hand">("move");
+const searchVisible = ref(false);
+const searchQuery = ref("");
+const zoomMenuVisible = ref(false);
+const filteredNodes = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return MOVIE_NODES;
+  return MOVIE_NODES.filter(node => node.displayName.toLowerCase().includes(query) || node.classType.toLowerCase().includes(query));
+});
+const zoomPercent = computed(() => Math.round(bridge.flow.viewport.value.zoom * 100));
+function applyZoom(value: number | undefined) {
+  if (value !== undefined && Number.isFinite(value)) void bridge.flow.zoomTo(value / 100);
+}
+function zoomIn() {
+  void bridge.flow.zoomIn();
+}
+function zoomOut() {
+  void bridge.flow.zoomOut();
+}
 
 // ── M6：产物检视器 + 图持久化 + 实时状态。
 //    execStatus 打开一条父页面侧 Leg B /ws，把 executing/progress/executed/execution_error 折叠成
@@ -520,7 +549,7 @@ onScopeDispose(() => { onResizeUp(); });
 </script>
 
 <template>
-  <div ref="studioEl" class="studio">
+  <div ref="studioEl" class="studio" :style="{ '--chat-w': `${chatWidth}px` }">
     <!-- Signed out: the router guard normally bounces to /account, but keep a guide for safety. -->
     <section v-if="!auth.signedIn" class="signedOut">
       <el-empty :description="translate('登录后即可进入工作室')">
@@ -529,246 +558,287 @@ onScopeDispose(() => { onResizeUp(); });
     </section>
 
     <template v-else>
-      <!-- 左列：舞台（模式切换器 + Vue Flow 画布，P4-M3 已接入）。 -->
-      <div class="stageCol">
-        <div class="toolbar">
-          <modeSwitcher mode="step-by-step" />
-        </div>
-        <div class="stage">
-          <div class="canvasBar">
-            <el-button size="small" :disabled="!canvasReady" :loading="runningDemo" @click="runDemoLifecycle">
-              {{ translate("运行演示生命周期") }}
-            </el-button>
-            <el-button size="small" :disabled="!canvasReady || !roomRole.isHost.value" @click="reloadDemo">
-              {{ translate("重载演示图") }}
-            </el-button>
-            <el-dropdown
-              trigger="click"
-              :disabled="!canvasReady || !roomRole.isHost.value"
-              @command="addMovieNode">
-              <el-button size="small" :disabled="!canvasReady || !roomRole.isHost.value">
-                {{ translate("添加节点") }}
-              </el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item
-                    v-for="node in MOVIE_NODES"
-                    :key="node.classType"
-                    :command="node.classType">
-                    {{ node.step }} · {{ node.displayName }}
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-            <el-input
-              v-model="aiIntent"
-              class="aiInput"
-              size="small"
-              :placeholder="translate('用自然语言编排画布，例如：把剧本节点连到分镜节点')"
-              :disabled="!canvasReady || aiRunning || !roomRole.isHost.value"
-              @keyup.enter="submitAiIntent" />
-            <el-button
-              size="small"
-              type="primary"
-              :disabled="!canvasReady || aiIntent.trim() === '' || !roomRole.isHost.value"
-              :loading="aiRunning"
-              @click="submitAiIntent">
-              {{ translate("AI 编排画布") }}
-            </el-button>
-            <span v-if="aiRunning" class="aiStage">{{ stageLabel(canvasScript.stage.value) }}</span>
-            <span
-              class="liveDot"
-              :class="{ on: execStatus.connected.value }"
-              :title="execStatus.connected.value ? translate('实时状态已连接') : translate('实时状态未连接')" />
-            <span class="canvasHint">
-              <template v-if="!canvasReady">{{ translate("画布正在启动……") }}</template>
-              <template v-else-if="selectedNode !== null">{{ translate("已选中节点 #") }}{{ selectedNode }}</template>
-              <template v-else>{{ translate("点击画布节点以查看选中项") }}</template>
+      <!-- 网格 1/1：画布单元（Vue Flow 画布 + 检视器浮层 + 版本历史浮层）。 -->
+      <div class="canvasPanel">
+        <VueFlowCanvas :hand-mode="selectedTool === 'hand'" @create="addMovieNode" />
+        <!-- M6 产物检视器：选中节点时展示其步骤、产物类型、实时状态与最近输出。 -->
+        <aside v-if="selectedNode !== null" class="inspector">
+          <div class="inspectorHead">
+            <span class="inspectorTitle">
+              {{ selectedSchema?.displayName ?? translate("节点") }} · #{{ selectedNode }}
             </span>
+            <el-button text size="small" @click="selectedNode = null">{{ translate("关闭") }}</el-button>
           </div>
-          <!-- P3-M5：主机治理条。主持人：撤销/重做/提交/移交 + 只读预览；成员：只读横幅 + 请求移交。
-               右侧常驻当前修订号（含草稿标记）与版本历史开关。 -->
-          <div class="govBar">
-            <template v-if="roomRole.isHost.value">
-              <span class="hostBadge" :title="translate('当前主持人')">{{ translate("主持人") }}：{{ hostName }}</span>
-              <el-button size="small" :disabled="workspace.undoDepth.value === 0 || workspace.busy.value" @click="onUndo">
-                {{ translate("撤销") }}
-              </el-button>
-              <el-button size="small" :disabled="workspace.redoDepth.value === 0 || workspace.busy.value" @click="onRedo">
-                {{ translate("重做") }}
-              </el-button>
-              <el-button
-                size="small"
-                type="primary"
-                :disabled="!workspace.hasDraft.value || workspace.busy.value"
-                @click="onCommit">
-                {{ translate("提交版本") }}
-              </el-button>
-              <el-button size="small" :disabled="transferCandidates.length === 0" @click="openTransferDialog">
-                {{ translate("移交主持人") }}
-              </el-button>
-              <el-button size="small" text :disabled="!canvasReady" @click="togglePreview">
-                {{ previewReadonly ? translate("退出只读预览") : translate("只读预览") }}
-              </el-button>
-            </template>
-            <template v-else>
-              <span class="readonlyBanner">{{ translate("只读模式：仅主持人可编辑画布") }}</span>
-              <el-button size="small" :disabled="!roomRole.host.value" @click="onRequestHost">
-                {{ translate("请求成为主持人") }}
-              </el-button>
-            </template>
-            <span class="govSpacer" />
-            <span class="revBadge" :title="translate('图修订号')">
-              r{{ workspace.rev.value }}<template v-if="workspace.hasDraft.value"> · {{ translate("草稿") }}</template>
-            </span>
-            <el-button size="small" text @click="historyOpen = !historyOpen">
-              {{ historyOpen ? translate("收起历史") : translate("版本历史") }}
-            </el-button>
-          </div>
-          <!-- P3-M5：版本历史面板。点击查看把某个已提交快照载入画布（不移动 HEAD）；主持人可回滚。 -->
-          <div v-if="historyOpen" class="historyPanel">
-            <div class="historyHead">
-              <span class="historyTitle">{{ translate("版本历史") }}</span>
-              <span class="historyCount">{{ workspace.commits.value.length }} {{ translate("个版本") }}</span>
+          <dl class="inspectorList">
+            <div class="row">
+              <dt>{{ translate("步骤") }}</dt>
+              <dd>{{ selectedSchema ? `${selectedSchema.step} / 6` : "—" }}</dd>
             </div>
-            <ul v-if="workspace.commits.value.length > 0" class="historyList">
-              <li
-                v-for="entry in [...workspace.commits.value].reverse()"
-                :key="entry.rev"
-                class="historyItem">
-                <span class="historyRev" :class="{ head: entry.rev === workspace.rev.value }">r{{ entry.rev }}</span>
-                <span class="historyMsg">{{ entry.message || translate("（无说明）") }}</span>
-                <span class="historyMeta">{{ formatCommitTime(entry.timestamp) }}</span>
-                <span class="historyActions">
-                  <el-button size="small" text @click="onViewCommit(entry.rev)">{{ translate("查看") }}</el-button>
-                  <el-button
-                    v-if="roomRole.isHost.value"
-                    size="small"
-                    text
-                    type="warning"
-                    :disabled="entry.rev === workspace.rev.value || workspace.busy.value"
-                    @click="onRevert(entry.rev)">
-                    {{ translate("回滚") }}
-                  </el-button>
-                </span>
-              </li>
-            </ul>
-            <p v-else class="historyEmpty">{{ translate("尚无提交版本") }}</p>
+            <div class="row">
+              <dt>{{ translate("类型") }}</dt>
+              <dd>{{ selectedSchema?.classType ?? "—" }}</dd>
+            </div>
+            <div class="row">
+              <dt>{{ translate("产物") }}</dt>
+              <dd>{{ outputTypes }}</dd>
+            </div>
+            <div class="row">
+              <dt>{{ translate("状态") }}</dt>
+              <dd>
+                <el-tag :type="statusTagType(selectedStatus)" size="small" disable-transitions>
+                  {{ statusLabel(selectedStatus) }}
+                </el-tag>
+              </dd>
+            </div>
+          </dl>
+          <p v-if="selectedSchema?.description" class="inspectorDesc">{{ selectedSchema.description }}</p>
+          <div class="outputBlock">
+            <div class="outputLabel">{{ translate("最近产物输出") }}</div>
+            <pre class="outputPre">{{ outputSummary || translate("尚无输出，运行演示生命周期后查看") }}</pre>
           </div>
-          <!-- P3-M3：最近一次 AI 编排的逐条操作结果（成功/失败/跳过）。 -->
-          <div v-if="canvasScript.opResults.value.length > 0" class="aiResults">
-            <span class="aiResultsTitle">{{ translate("AI 操作结果") }}</span>
-            <ul class="aiResultsList">
-              <li
-                v-for="entry in canvasScript.opResults.value"
-                :key="entry.index"
-                :class="entry.ok ? 'ok' : 'bad'">
-                #{{ entry.index }} · {{ entry.op.op }}<template v-if="!entry.ok"> — {{ entry.error }}</template>
-              </li>
-            </ul>
+          <div v-if="selectedMovieStep?.artifact" class="outputBlock">
+            <div class="outputLabel">
+              {{ translate("影片步骤产物") }}
+              <template v-if="selectedMovieStep.media">（{{ translate("占位") }}）</template>
+            </div>
+            <pre class="outputPre">{{ selectedMovieStep.artifact }}</pre>
           </div>
-          <!-- P3-M4：影片流水线控制条 + 六步进度带。 -->
-          <div class="movieBar">
-            <el-input
-              v-model="movieIntent"
-              class="movieInput"
-              size="small"
-              :placeholder="translate('描述你想生成的影片，例如：一只猫在月球上跳舞')"
-              :disabled="!canvasReady || movieRunning || !roomRole.isHost.value"
-              @keyup.enter="submitMovieIntent" />
-            <el-button
-              size="small"
-              type="primary"
-              :disabled="!canvasReady || movieIntent.trim() === '' || !roomRole.isHost.value"
-              :loading="movieRunning"
-              @click="submitMovieIntent">
-              {{ translate("运行影片") }}
-            </el-button>
-            <span v-if="movieRunning" class="movieStage">
-              {{ movieStageLabel(movieRun.stage.value) }} · {{ movieDoneCount }}/6
-            </span>
+        </aside>
+        <!-- P3-M5：版本历史浮层（画布右上）：查看把某个已提交快照载入画布（不移动 HEAD）；主持人可回滚。 -->
+        <div v-if="historyOpen" class="historyPanel">
+          <div class="historyHead">
+            <span class="historyTitle">{{ translate("版本历史") }}</span>
+            <span class="historyCount">{{ workspace.commits.value.length }} {{ translate("个版本") }}</span>
           </div>
-          <div v-if="movieRun.steps.value.length > 0" class="movieStrip">
-            <span class="movieStripTitle">{{ translate("影片流水线") }}</span>
-            <ol class="movieSteps">
-              <li
-                v-for="step in movieRun.steps.value"
-                :key="step.step"
-                :class="step.status">
-                <span class="movieStepIdx">{{ step.step }}</span>
-                <span class="movieStepName">{{ movieStepName(step.classType) }}</span>
-                <span class="movieStepStatus">{{ movieStepStatusLabel(step.status) }}</span>
-                <span v-if="step.media" class="movieStepMedia">{{ translate("占位") }}</span>
-              </li>
-            </ol>
-          </div>
-          <div class="stageBody">
-            <VueFlowCanvas />
-            <!-- M6 产物检视器：选中节点时展示其步骤、产物类型、实时状态与最近输出。 -->
-            <aside v-if="selectedNode !== null" class="inspector">
-              <div class="inspectorHead">
-                <span class="inspectorTitle">
-                  {{ selectedSchema?.displayName ?? translate("节点") }} · #{{ selectedNode }}
-                </span>
-                <el-button text size="small" @click="selectedNode = null">{{ translate("关闭") }}</el-button>
-              </div>
-              <dl class="inspectorList">
-                <div class="row">
-                  <dt>{{ translate("步骤") }}</dt>
-                  <dd>{{ selectedSchema ? `${selectedSchema.step} / 6` : "—" }}</dd>
-                </div>
-                <div class="row">
-                  <dt>{{ translate("类型") }}</dt>
-                  <dd>{{ selectedSchema?.classType ?? "—" }}</dd>
-                </div>
-                <div class="row">
-                  <dt>{{ translate("产物") }}</dt>
-                  <dd>{{ outputTypes }}</dd>
-                </div>
-                <div class="row">
-                  <dt>{{ translate("状态") }}</dt>
-                  <dd>
-                    <el-tag :type="statusTagType(selectedStatus)" size="small" disable-transitions>
-                      {{ statusLabel(selectedStatus) }}
-                    </el-tag>
-                  </dd>
-                </div>
-              </dl>
-              <p v-if="selectedSchema?.description" class="inspectorDesc">{{ selectedSchema.description }}</p>
-              <div class="outputBlock">
-                <div class="outputLabel">{{ translate("最近产物输出") }}</div>
-                <pre class="outputPre">{{ outputSummary || translate("尚无输出，运行演示生命周期后查看") }}</pre>
-              </div>
-              <div v-if="selectedMovieStep?.artifact" class="outputBlock">
-                <div class="outputLabel">
-                  {{ translate("影片步骤产物") }}
-                  <template v-if="selectedMovieStep.media">（{{ translate("占位") }}）</template>
-                </div>
-                <pre class="outputPre">{{ selectedMovieStep.artifact }}</pre>
-              </div>
-            </aside>
-          </div>
+          <ul v-if="workspace.commits.value.length > 0" class="historyList">
+            <li
+              v-for="entry in [...workspace.commits.value].reverse()"
+              :key="entry.rev"
+              class="historyItem">
+              <span class="historyRev" :class="{ head: entry.rev === workspace.rev.value }">r{{ entry.rev }}</span>
+              <span class="historyMsg">{{ entry.message || translate("（无说明）") }}</span>
+              <span class="historyMeta">{{ formatCommitTime(entry.timestamp) }}</span>
+              <span class="historyActions">
+                <el-button size="small" text @click="onViewCommit(entry.rev)">{{ translate("查看") }}</el-button>
+                <el-button
+                  v-if="roomRole.isHost.value"
+                  size="small"
+                  text
+                  type="warning"
+                  :disabled="entry.rev === workspace.rev.value || workspace.busy.value"
+                  @click="onRevert(entry.rev)">
+                  {{ translate("回滚") }}
+                </el-button>
+              </span>
+            </li>
+          </ul>
+          <p v-else class="historyEmpty">{{ translate("尚无提交版本") }}</p>
         </div>
       </div>
 
-      <!-- 可拖拽分隔条：调整右侧停靠聊天框宽度。 -->
+      <!-- vidsay workspaceTools：模式切换器在画布列内水平居中，不遮挡画布交互。 -->
+      <div class="workspaceTools">
+        <modeSwitcher class="modeSwitch" mode="step-by-step" />
+      </div>
+
+      <!-- vidsay studioBar：底部按钮条（第二行第一列），左治理卡 + 右工具卡。 -->
+      <div class="studioBar">
+        <el-card class="syncMenu" shadow="never" :body-style="{ padding: '4px' }">
+          <div class="barRow" role="group" aria-label="画布治理">
+            <el-tooltip content="撤销" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton"
+                :disabled="workspace.undoDepth.value === 0 || workspace.busy.value"
+                aria-label="撤销"
+                @click="onUndo">
+                <IconArrowBackUp :size="18" aria-hidden="true" />
+                <span class="barLabel">撤销</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="重做" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton"
+                :disabled="workspace.redoDepth.value === 0 || workspace.busy.value"
+                aria-label="重做"
+                @click="onRedo">
+                <IconArrowForwardUp :size="18" aria-hidden="true" />
+                <span class="barLabel">重做</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="提交版本" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton"
+                :disabled="!workspace.hasDraft.value || workspace.busy.value"
+                aria-label="提交版本"
+                @click="onCommit">
+                <IconGitCommit :size="18" aria-hidden="true" />
+                <span class="barLabel">提交版本</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip
+              :content="historyOpen ? '收起历史' : '版本历史'"
+              placement="top"
+              :show-arrow="false"
+              :hide-after="0"
+              :enterable="false">
+              <button
+                type="button"
+                class="barButton"
+                :aria-pressed="historyOpen"
+                aria-label="版本历史"
+                @click="historyOpen = !historyOpen">
+                <IconHistory :size="18" aria-hidden="true" />
+                <span class="barLabel">版本历史</span>
+              </button>
+            </el-tooltip>
+          </div>
+        </el-card>
+
+        <el-card class="toolMenu" shadow="never" :body-style="{ padding: '4px' }">
+          <div class="barRow" role="toolbar" aria-label="画布工具">
+            <el-tooltip content="添加节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <span class="dropTrigger">
+                <el-dropdown trigger="click" :disabled="!canvasReady || !roomRole.isHost.value" @command="addMovieNode">
+                  <button
+                    type="button"
+                    class="barButton iconOnly"
+                    :disabled="!canvasReady || !roomRole.isHost.value"
+                    aria-label="添加节点"
+                    aria-haspopup="menu">
+                    <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasAdd}&quot;)` }" aria-hidden="true" />
+                  </button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item
+                        v-for="node in MOVIE_NODES"
+                        :key="node.classType"
+                        :command="node.classType">
+                        {{ node.step }} · {{ node.displayName }}
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </span>
+            </el-tooltip>
+            <el-tooltip content="分组节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton iconOnly"
+                :aria-pressed="selectedTool === 'move'"
+                aria-label="分组节点"
+                @click="selectedTool = 'move'">
+                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasGrouping}&quot;)` }" aria-hidden="true" />
+              </button>
+            </el-tooltip>
+            <el-tooltip content="搜索节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <span class="popTrigger">
+                <el-popover v-model:visible="searchVisible" trigger="click" placement="top-end" :width="240">
+                  <template #reference>
+                    <button type="button" class="barButton iconOnly" :disabled="!canvasReady" aria-label="搜索节点">
+                      <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasSearch}&quot;)` }" aria-hidden="true" />
+                    </button>
+                  </template>
+                  <div class="searchMenu">
+                    <el-input v-model="searchQuery" size="small" placeholder="搜索节点" clearable />
+                    <ul class="searchList">
+                      <li v-for="node in filteredNodes" :key="node.classType">
+                        <button
+                          type="button"
+                          class="searchItem"
+                          @click="
+                            searchVisible = false;
+                            addMovieNode(node.classType);
+                          ">
+                          {{ node.step }} · {{ node.displayName }}
+                        </button>
+                      </li>
+                      <li v-if="filteredNodes.length === 0" class="searchEmpty">无匹配节点</li>
+                    </ul>
+                  </div>
+                </el-popover>
+              </span>
+            </el-tooltip>
+            <el-tooltip content="素材库" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <span class="popTrigger">
+                <el-popover trigger="click" placement="top-end" :width="220">
+                  <template #reference>
+                    <button type="button" class="barButton iconOnly" aria-label="素材库">
+                      <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasAsset}&quot;)` }" aria-hidden="true" />
+                    </button>
+                  </template>
+                  <p class="assetStub">素材库依赖 vidsay 后端能力，dsh_movie 当前未接入。</p>
+                </el-popover>
+              </span>
+            </el-tooltip>
+            <el-tooltip content="移动画布" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton iconOnly"
+                :aria-pressed="selectedTool === 'hand'"
+                aria-label="移动画布"
+                @click="selectedTool = selectedTool === 'hand' ? 'move' : 'hand'">
+                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasMove}&quot;)` }" aria-hidden="true" />
+              </button>
+            </el-tooltip>
+            <el-tooltip
+              content="缩放菜单（滚轮调整缩放）"
+              placement="top"
+              :show-arrow="false"
+              :hide-after="0"
+              :enterable="false"
+              :disabled="zoomMenuVisible">
+              <span class="zoomTrigger">
+                <el-popover v-model:visible="zoomMenuVisible" trigger="click" placement="top-end" :width="216">
+                  <template #reference>
+                    <button
+                      type="button"
+                      class="barButton zoomButton"
+                      aria-label="缩放菜单"
+                      @wheel.stop.prevent="$event.deltaY && applyZoom(Math.min(800, Math.max(20, zoomPercent - Math.sign($event.deltaY))))">
+                      {{ zoomPercent }}%
+                    </button>
+                  </template>
+                  <div class="zoomMenu">
+                    <el-input-number
+                      class="zoomInput"
+                      :model-value="zoomPercent"
+                      :min="20"
+                      :max="800"
+                      :controls="false"
+                      aria-label="缩放百分比"
+                      @change="applyZoom">
+                      <template #suffix>%</template>
+                    </el-input-number>
+                    <button type="button" class="zoomAction" @click="zoomIn()">放大</button>
+                    <button type="button" class="zoomAction" @click="zoomOut()">缩小</button>
+                  </div>
+                </el-popover>
+              </span>
+            </el-tooltip>
+          </div>
+        </el-card>
+      </div>
+
+      <!-- 可拖拽分隔条（第二列，跨两行）：4px 命中区居中常显 1px 竖直分割线。 -->
       <div
-        class="divider"
-        :class="{ active: resizing }"
+        class="chatResize"
+        :class="{ dragging: resizing }"
         role="separator"
         aria-orientation="vertical"
         @pointerdown="onResizeDown" />
 
-      <!-- 右列：常驻停靠聊天框，复用群聊组件（分步模式）。 -->
-      <div class="chatCol" :style="{ width: `${chatWidth}px` }">
-        <groupChat
-          embedded
-          mode="step-by-step"
-          @select-video="openVideo($event, false)"
-          @play-video="openVideo($event, true)"
-          @stage-image="openImage"
-          @stage-file="openFile" />
-      </div>
+      <!-- 右列：常驻停靠聊天框（第三列，跨两行），复用群聊组件（分步模式）。 -->
+      <groupChat
+        class="studioChat"
+        embedded
+        mode="step-by-step"
+        @select-video="openVideo($event, false)"
+        @play-video="openVideo($event, true)"
+        @stage-image="openImage"
+        @stage-file="openFile" />
 
       <!-- P3-M5：主持人移交选择器（从房间花名册挑选继任者）。 -->
       <el-dialog
@@ -808,11 +878,14 @@ onScopeDispose(() => { onResizeUp(); });
 <style lang="scss" scoped>
 .studio {
   position: relative;
-  display: flex;
+  display: grid;
+  // vidsay：三列（画布/工具叠加单元 + 4px 分隔条 + 聊天框）两行（面板 + 57px 底部按钮条）。
+  grid-template-columns: minmax(0, 1fr) 4px var(--chat-w, 400px);
+  grid-template-rows: minmax(0, 1fr) 57px;
+  width: 100%;
   height: 100%;
-  min-height: 0;
   overflow: hidden;
-  background: var(--el-bg-color);
+  background-color: var(--el-bg-color);
   color: var(--el-text-color-primary);
   font-size: 14px;
 }
@@ -825,39 +898,119 @@ onScopeDispose(() => { onResizeUp(); });
   min-height: 0;
 }
 
-.stageCol {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
+// vidsay：画布/工具叠加单元（网格 1/1）。
+.canvasPanel {
+  grid-area: 1 / 1;
+  position: relative;
   min-width: 0;
   min-height: 0;
 }
 
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 48px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  flex: 0 0 auto;
+// vidsay workspaceTools：与画布同网格单元，指针穿透，仅模式切换器可点。
+.workspaceTools {
+  grid-area: 1 / 1;
+  position: relative;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+
+  .modeSwitch {
+    position: absolute;
+    top: 15px;
+    left: 50%;
+    z-index: 5;
+    transform: translateX(-50%);
+    pointer-events: auto;
+  }
 }
 
-.stage {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: color-mix(in srgb, var(--el-bg-color) 96%, var(--el-text-color-primary));
-}
-
-.canvasBar {
-  flex: 0 0 auto;
+// vidsay studioBar：底部按钮条（第二行第一列）；顶边 1px 描边即水平分割线。
+.studioBar {
+  grid-area: 2 / 1;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
+  min-width: 0;
+  padding: 0 15px;
+  border-top: 1px solid var(--el-border-color);
+  background: var(--el-bg-color);
+
+  .syncMenu,
+  .toolMenu {
+    flex-shrink: 0;
+    background: color-mix(in srgb, var(--el-bg-color-overlay) 70%, transparent);
+    backdrop-filter: blur(6px);
+    border-color: var(--el-border-color-light);
+    box-shadow: var(--el-box-shadow-light);
+  }
+
+  .barRow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .dropTrigger,
+  .popTrigger,
+  .zoomTrigger {
+    display: inline-flex;
+  }
+
+  .barButton {
+    position: relative;
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    margin: 0;
+    padding: 0 10px;
+    gap: 6px;
+    border: 1px solid var(--el-border-color);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--el-text-color-primary);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+
+    &:hover:not(:disabled) { background: var(--el-fill-color); color: var(--el-text-color-primary); }
+    &:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    &.iconOnly { width: 32px; padding: 0; }
+
+    &[aria-pressed="true"] {
+      border-color: var(--el-color-primary);
+      background: var(--el-color-primary-light-9);
+      color: var(--el-color-primary);
+    }
+
+    .barLabel { font-size: 12px; line-height: 1; }
+
+    .toolIcon {
+      display: block;
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      background-color: currentColor;
+      mask-image: var(--tool-icon);
+      mask-repeat: no-repeat;
+      mask-position: center;
+      mask-size: contain;
+      -webkit-mask-image: var(--tool-icon);
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      -webkit-mask-size: contain;
+    }
+  }
+
+  .zoomButton {
+    min-width: 46px;
+    font-variant-numeric: tabular-nums;
+  }
 }
 
 .canvasHint {
@@ -909,12 +1062,19 @@ onScopeDispose(() => { onResizeUp(); });
 }
 
 .historyPanel {
-  flex: 0 0 auto;
-  max-height: 220px;
+  position: absolute;
+  top: 56px;
+  left: 12px;
+  z-index: 6;
+  width: 320px;
+  max-height: 260px;
   overflow: auto;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: var(--ui-radius, 8px);
+  background: color-mix(in srgb, var(--el-bg-color-overlay) 88%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--el-box-shadow-light);
 }
 
 .historyHead {
@@ -1124,30 +1284,21 @@ onScopeDispose(() => { onResizeUp(); });
   color: var(--el-text-color-placeholder);
 }
 
-.stageBody {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-
-.canvasFrame {
-  flex: 1 1 auto;
-  display: block;
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  border: 0;
-  background: #202124;
-}
-
+// 检视器：画布右上浮层卡（不挤占画布视口）。
 .inspector {
-  flex: 0 0 300px;
+  position: absolute;
+  top: 56px;
+  right: 12px;
+  z-index: 6;
   width: 300px;
-  min-height: 0;
+  max-height: calc(100% - 72px);
   overflow: auto;
   padding: 12px;
-  border-inline-start: 1px solid var(--el-border-color-lighter);
-  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: var(--ui-radius, 8px);
+  background: color-mix(in srgb, var(--el-bg-color-overlay) 88%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--el-box-shadow-light);
 }
 
 .inspectorHead {
@@ -1219,25 +1370,37 @@ onScopeDispose(() => { onResizeUp(); });
   border-radius: var(--ui-radius, 8px);
 }
 
-.divider {
-  flex: 0 0 auto;
-  width: 6px;
+// vidsay：4px 命中区居中常显 1px 竖直分割线；悬停/拖拽亮主色。
+.chatResize {
+  grid-area: 1 / 2 / 3 / 3;
+  position: relative;
+  width: 4px;
   cursor: col-resize;
-  background: var(--el-border-color-lighter);
-  transition: background 0.15s ease;
+  background: transparent;
+
+  &::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--el-border-color);
+    transition: background 0.15s ease;
+  }
 
   &:hover,
-  &.active {
-    background: var(--el-color-primary-light-5);
+  &.dragging {
+    &::before { background: var(--el-color-primary); }
   }
 }
 
-.chatCol {
-  flex: 0 0 auto;
+// vidsay：停靠式聊天框（第三列，跨两行）。
+.studioChat {
+  grid-area: 1 / 3 / 3 / 4;
   min-width: 0;
   min-height: 0;
-  position: relative;
-  border-inline-start: 1px solid var(--el-border-color-lighter);
 }
 
 .viewerMedia {
@@ -1259,5 +1422,75 @@ onScopeDispose(() => { onResizeUp(); });
   line-height: 1.6;
   background: var(--el-fill-color-light);
   border-radius: var(--ui-radius, 8px);
+}
+
+// vidsay：缩放菜单 / 节点搜索 / 素材库占位 渲染在 teleport 到 body 的 popover 内，作用域样式需置于根级。
+.zoomMenu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  .zoomInput {
+    width: 100%;
+  }
+
+  .zoomAction {
+    margin: 0;
+    padding: 5px 6px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--el-text-color-primary);
+    font-size: 12px;
+    line-height: 1;
+    text-align: left;
+    cursor: pointer;
+
+    &:hover { background: var(--el-fill-color); }
+  }
+}
+
+.searchMenu {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  .searchList {
+    margin: 0;
+    padding: 0;
+    max-height: 220px;
+    overflow: auto;
+    list-style: none;
+  }
+
+  .searchItem {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--el-text-color-primary);
+    font-size: 12px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+
+    &:hover { background: var(--el-fill-color); }
+  }
+
+  .searchEmpty {
+    padding: 6px 8px;
+    color: var(--el-text-color-placeholder);
+    font-size: 12px;
+  }
+}
+
+.assetStub {
+  margin: 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

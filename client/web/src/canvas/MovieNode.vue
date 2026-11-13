@@ -1,24 +1,26 @@
 <script setup lang="ts">
 /**
- * Generic Vue Flow node for every movie step (Phase-4 P4-M3, Path B).
+ * Generic Vue Flow node for every movie step, skinned to the vidsay
+ * `nodeSkeleton` card chrome (Path B / Phase 4).
  *
- * A single component renders all six `MOVIE_NODES` types: it reads the node's
- * {@link MovieNodeData} (title, input/output slots, widgets, run status) that the
- * {@link graphMapper} produced from the ComfyUI `WorkflowGraph`, and paints
- * handles + widgets. Handle ids are `in-<slot>` / `out-<slot>` so the mapper can
- * round-trip edges back into ComfyUI link tuples.
+ * Visual language copied from vidsay `packages/nodeScaffold/src/nodeSkeleton.vue`:
+ * a 220px node with a title bar (16px type icon + grab-cursor label) sitting above
+ * a bordered content card, and 18px circular dot/dashed handles floated at ±12px on
+ * the card's left/right edges (revealed on hover / when connected).
  *
- * Widget edits write straight back into the shared Vue Flow store via
- * `updateNodeData`; the bridge's deep watch coalesces that into a `graphChanged`
- * emission (host-only autosave). Inputs carry `nodrag`/`nowheel` so editing does
- * not drag the node or pan the canvas.
+ * Data wiring is unchanged from P4-M3: it reads {@link MovieNodeData} produced by the
+ * {@link graphMapper} and writes widget edits back through `updateNodeData`.
  */
 import { computed } from "vue";
 import { Handle, Position, useVueFlow, type NodeProps } from "@vue-flow/core";
+import {
+  IconCircleDashed, IconCircleDot, IconFileText, IconLayoutGrid, IconListDetails,
+  IconMovie, IconPhoto, IconVideo,
+} from "@tabler/icons-vue";
 import { schemaFor, type MovieNodeData, type NodeWidgetView } from "@/canvas/graphMapper";
 
 const props = defineProps<NodeProps<MovieNodeData>>();
-const { updateNodeData } = useVueFlow();
+const { updateNodeData, edges } = useVueFlow();
 
 const data = computed<MovieNodeData>(() => props.data ?? ({} as MovieNodeData));
 const schema = computed(() => schemaFor(data.value.classType));
@@ -28,7 +30,29 @@ const inputs = computed(() => data.value.inputs ?? []);
 const outputs = computed(() => data.value.outputs ?? []);
 const widgets = computed(() => data.value.widgets ?? []);
 const status = computed(() => data.value.status ?? "idle");
-const isOutputNode = computed(() => schema.value?.outputNode === true);
+
+/** Per-class_type icon + accent hue (Toonflow-style typed node headers). */
+const TYPE_SKIN: Record<string, { icon: typeof IconFileText; accent: string }> = {
+  MovieScript: { icon: IconFileText, accent: "#409eff" },
+  MovieShotPlan: { icon: IconListDetails, accent: "#36cfc9" },
+  MovieAsset: { icon: IconPhoto, accent: "#52c41a" },
+  MovieStoryboard: { icon: IconLayoutGrid, accent: "#faad14" },
+  MovieClip: { icon: IconVideo, accent: "#9254de" },
+  MovieAssemble: { icon: IconMovie, accent: "#f759ab" },
+};
+const skin = computed(() => TYPE_SKIN[data.value.classType] ?? { icon: IconFileText, accent: "#409eff" });
+const typeIcon = computed(() => skin.value.icon);
+const accent = computed(() => skin.value.accent);
+
+/** Handle ids that currently have an edge attached (dot vs dashed glyph). */
+const connectedHandles = computed(() => {
+  const set = new Set<string>();
+  for (const edge of edges.value) {
+    if (edge.target === props.id && edge.targetHandle) set.add(edge.targetHandle);
+    if (edge.source === props.id && edge.sourceHandle) set.add(edge.sourceHandle);
+  }
+  return set;
+});
 
 /** Write a single widget value back into the store by index. */
 function setWidget(index: number, value: unknown): void {
@@ -39,7 +63,6 @@ function setWidget(index: number, value: unknown): void {
   } as Partial<MovieNodeData>);
 }
 
-/** Coerce a text/number input event into the widget's value. */
 function onText(index: number, event: Event): void {
   setWidget(index, (event.target as HTMLInputElement).value);
 }
@@ -55,7 +78,6 @@ function onBool(index: number, event: Event): void {
   setWidget(index, (event.target as HTMLInputElement).checked);
 }
 
-/** Bind an input's value as a string regardless of the underlying type. */
 function asText(value: unknown): string {
   if (value === null || value === undefined) return "";
   return typeof value === "string" ? value : String(value);
@@ -63,98 +85,187 @@ function asText(value: unknown): string {
 </script>
 
 <template>
-  <div class="movieNode" :class="[`status-${status}`, { output: isOutputNode, selected }]">
-    <header class="nodeHead">
-      <span class="statusDot" :class="`dot-${status}`" :title="status" />
-      <span class="nodeTitle">{{ title }}</span>
+  <div class="movieNode" :class="[`status-${status}`, { selected }]" :style="{ '--node-accent': accent }">
+    <!-- vidsay nodeSkeleton titleBar: type icon + grab label above the content card. -->
+    <div class="titleBar">
+      <component :is="typeIcon" class="titleIcon" :size="16" aria-hidden="true" />
+      <span class="labelText" :title="title">{{ title }}</span>
       <span v-if="schema" class="nodeStep">{{ schema.step }}/6</span>
-    </header>
-
-    <div v-if="inputs.length > 0" class="ports portsIn">
-      <div v-for="(slot, i) in inputs" :key="`in-${i}`" class="portRow">
-        <Handle type="target" :position="Position.Left" :id="`in-${i}`" class="port portIn" />
-        <span class="portName">{{ slot.name || `in ${i}` }}</span>
-        <span class="portType">{{ slot.type }}</span>
-      </div>
     </div>
 
-    <div v-if="widgets.length > 0" class="widgets">
-      <div v-for="(widget, i) in widgets" :key="widget.name" class="widgetRow">
-        <label class="widgetLabel">{{ widget.name }}</label>
-        <textarea
-          v-if="widget.type === 'STRING' && widget.multiline"
-          class="widget nodrag nowheel"
-          rows="3"
-          :value="asText(widget.value)"
-          @input="onText(i, $event)" />
-        <select
-          v-else-if="widget.type === 'COMBO'"
-          class="widget nodrag nowheel"
-          :value="asText(widget.value)"
-          @change="onSelect(i, $event)">
-          <option v-for="opt in widget.options ?? []" :key="opt" :value="opt">{{ opt }}</option>
-        </select>
-        <input
-          v-else-if="widget.type === 'INT' || widget.type === 'FLOAT'"
-          class="widget nodrag nowheel"
-          type="number"
-          :step="widget.type === 'INT' ? 1 : 0.1"
-          :min="widget.min"
-          :max="widget.max"
-          :value="asText(widget.value)"
-          @input="onNumber(i, $event)" />
-        <input
-          v-else-if="widget.type === 'BOOLEAN'"
-          class="widget nodrag nowheel"
-          type="checkbox"
-          :checked="widget.value === true"
-          @change="onBool(i, $event)" />
-        <input
-          v-else
-          class="widget nodrag nowheel"
-          type="text"
-          :value="asText(widget.value)"
-          @input="onText(i, $event)" />
-      </div>
-    </div>
+    <div class="cardContainer">
+      <div class="contentCard" :class="{ selected }">
+        <div class="cardBody">
+          <div class="statusRow">
+            <span class="statusDot" :class="`dot-${status}`" />
+            <span class="statusText">{{ status }}</span>
+          </div>
 
-    <div v-if="outputs.length > 0" class="ports portsOut">
-      <div v-for="(slot, i) in outputs" :key="`out-${i}`" class="portRow">
-        <span class="portType">{{ slot.type }}</span>
-        <span class="portName">{{ slot.name || `out ${i}` }}</span>
-        <Handle type="source" :position="Position.Right" :id="`out-${i}`" class="port portOut" />
-      </div>
-    </div>
+          <div v-if="widgets.length > 0" class="widgets">
+            <div v-for="(widget, i) in widgets" :key="widget.name" class="widgetRow">
+              <label class="widgetLabel">{{ widget.name }}</label>
+              <textarea
+                v-if="widget.type === 'STRING' && widget.multiline"
+                class="widget nodrag nowheel"
+                rows="3"
+                :value="asText(widget.value)"
+                @input="onText(i, $event)" />
+              <select
+                v-else-if="widget.type === 'COMBO'"
+                class="widget nodrag nowheel"
+                :value="asText(widget.value)"
+                @change="onSelect(i, $event)">
+                <option v-for="opt in widget.options ?? []" :key="opt" :value="opt">{{ opt }}</option>
+              </select>
+              <input
+                v-else-if="widget.type === 'INT' || widget.type === 'FLOAT'"
+                class="widget nodrag nowheel"
+                type="number"
+                :step="widget.type === 'INT' ? 1 : 0.1"
+                :min="widget.min"
+                :max="widget.max"
+                :value="asText(widget.value)"
+                @input="onNumber(i, $event)" />
+              <input
+                v-else-if="widget.type === 'BOOLEAN'"
+                class="widget nodrag nowheel"
+                type="checkbox"
+                :checked="widget.value === true"
+                @change="onBool(i, $event)" />
+              <input
+                v-else
+                class="widget nodrag nowheel"
+                type="text"
+                :value="asText(widget.value)"
+                @input="onText(i, $event)" />
+            </div>
+          </div>
 
-    <p v-if="description" class="nodeDesc">{{ description }}</p>
+          <div v-if="inputs.length > 0" class="portList">
+            <div v-for="(slot, i) in inputs" :key="`in-${i}`" class="portRow">
+              <span class="portName">{{ slot.name || `in ${i}` }}</span>
+              <span class="portType">{{ slot.type }}</span>
+            </div>
+          </div>
+          <div v-if="outputs.length > 0" class="portList out">
+            <div v-for="(slot, i) in outputs" :key="`out-${i}`" class="portRow">
+              <span class="portName">{{ slot.name || `out ${i}` }}</span>
+              <span class="portType">{{ slot.type }}</span>
+            </div>
+          </div>
+
+          <p v-if="description" class="nodeDesc">{{ description }}</p>
+        </div>
+      </div>
+
+      <!-- vidsay nodeSkeleton handles: 18px circular glyphs at ±12px, distributed by index. -->
+      <Handle
+        v-for="(slot, i) in inputs" :key="`hin-${i}`"
+        :id="`in-${i}`" type="target" :position="Position.Left"
+        class="nodeHandle" :class="{ connected: connectedHandles.has(`in-${i}`) }"
+        :style="{ top: `${((i + 1) / (inputs.length + 1)) * 100}%` }"
+        :title="`${slot.name || `in ${i}`} · ${slot.type}`">
+        <component :is="connectedHandles.has(`in-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
+      </Handle>
+      <Handle
+        v-for="(slot, i) in outputs" :key="`hout-${i}`"
+        :id="`out-${i}`" type="source" :position="Position.Right"
+        class="nodeHandle" :class="{ connected: connectedHandles.has(`out-${i}`) }"
+        :style="{ top: `${((i + 1) / (outputs.length + 1)) * 100}%` }"
+        :title="`${slot.name || `out ${i}`} · ${slot.type}`">
+        <component :is="connectedHandles.has(`out-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
+      </Handle>
+    </div>
   </div>
 </template>
 
 <style lang="scss" scoped>
 .movieNode {
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--ui-radius, 8px);
-  background: var(--el-bg-color-overlay, #2b2d31);
+  position: relative;
+  width: 220px;
   color: var(--el-text-color-primary);
-  font-size: 12px;
-  box-shadow: 0 2px 8px rgb(0 0 0 / 24%);
+  text-align: left;
 
-  &.selected {
-    border-color: var(--el-color-primary);
-  }
-
-  &.status-running { border-color: var(--el-color-warning); }
-  &.status-progress { border-color: var(--el-color-warning); }
-  &.status-success { border-color: var(--el-color-success); }
-  &.status-error { border-color: var(--el-color-danger); }
+  &:hover .nodeHandle .handleIcon { opacity: 1; }
 }
 
-.nodeHead {
+.titleBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 8px;
+  font-size: 14px;
+  line-height: 20px;
+
+  .titleIcon { flex-shrink: 0; color: var(--node-accent); }
+
+  .labelText {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: grab;
+    user-select: none;
+
+    &:active { cursor: grabbing; }
+  }
+
+  .nodeStep {
+    flex-shrink: 0;
+    color: var(--el-text-color-secondary);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.cardContainer {
+  position: relative;
+
+  .contentCard {
+    border: 1px solid var(--el-border-color-light);
+    border-radius: var(--ui-radius-large, var(--el-border-radius-base));
+    background: var(--el-bg-color-overlay);
+    box-shadow: var(--el-box-shadow-lighter);
+
+    &.selected {
+      border-color: color-mix(in srgb, var(--el-color-primary) 50%, var(--el-border-color-light));
+    }
+  }
+
+  .cardBody {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    font-size: 12px;
+  }
+
+  .nodeHandle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: 0;
+    background: transparent;
+    color: var(--el-text-color-secondary);
+
+    &.vue-flow__handle-left { left: -12px; }
+    &.vue-flow__handle-right { right: -12px; }
+
+    .handleIcon {
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 120ms ease-out;
+    }
+
+    &.connected .handleIcon { opacity: 1; }
+    &:hover, &.connected { color: var(--el-color-primary); }
+  }
+}
+
+.statusRow {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -174,61 +285,16 @@ function asText(value: unknown): string {
   &.dot-error { background: var(--el-color-danger); }
 }
 
-.nodeTitle {
-  flex: 1 1 auto;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.nodeStep {
-  flex: 0 0 auto;
-  font-size: 10px;
+.statusText {
   color: var(--el-text-color-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.ports {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.portRow {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 20px;
-}
-
-.portsOut .portRow {
-  justify-content: flex-end;
-}
-
-.portName {
-  color: var(--el-text-color-regular);
-}
-
-.portType {
-  font-size: 10px;
-  color: var(--el-text-color-placeholder);
-  text-transform: uppercase;
-}
-
-.port {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--el-color-primary-light-3);
-  border: 1px solid var(--el-bg-color);
+  font-size: 11px;
+  text-transform: capitalize;
 }
 
 .widgets {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .widgetRow {
@@ -238,27 +304,56 @@ function asText(value: unknown): string {
 }
 
 .widgetLabel {
-  font-size: 10px;
   color: var(--el-text-color-secondary);
+  font-size: 11px;
 }
 
 .widget {
   width: 100%;
   box-sizing: border-box;
-  padding: 3px 6px;
+  padding: 4px 6px;
   border: 1px solid var(--el-border-color);
-  border-radius: 4px;
-  background: var(--el-fill-color-blank, #1e1f22);
+  border-radius: var(--el-border-radius-small, 4px);
+  background: var(--el-fill-color-blank);
   color: var(--el-text-color-primary);
-  font-size: 11px;
+  font-size: 12px;
   font-family: inherit;
   resize: vertical;
 }
 
+.portList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  .portRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-height: 18px;
+  }
+
+  &.out .portRow { flex-direction: row-reverse; }
+}
+
+.portName { color: var(--el-text-color-regular); font-size: 11px; }
+
+.portType {
+  color: var(--el-text-color-placeholder);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
 .nodeDesc {
   margin: 0;
-  font-size: 10px;
-  line-height: 1.4;
   color: var(--el-text-color-secondary);
+  font-size: 11px;
+  line-height: 1.4;
 }
+
+.status-running .contentCard,
+.status-progress .contentCard { border-color: var(--el-color-warning); }
+.status-success .contentCard { border-color: var(--el-color-success); }
+.status-error .contentCard { border-color: var(--el-color-danger); }
 </style>
