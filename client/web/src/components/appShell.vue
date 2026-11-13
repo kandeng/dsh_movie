@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { locale, translate } from "@dsh-movie/i18n/vue";
+import { translate } from "@dsh-movie/i18n/vue";
 // ACT: 左栏与顶栏图标统一取自 src/icons（以 CSS mask 着色，跟随 currentColor）。
 import iconPlaza from "@/icons/photo.svg";
 // ACT: 一键生成/分步生成的左栏图标与模式切换器共用同一对 generator SVG；mask 只取 alpha，
@@ -11,6 +10,8 @@ import iconOneShot from "@/icons/generator_one_shot.svg";
 import iconStepByStep from "@/icons/generator_step_by_step.svg";
 import iconAccount from "@/icons/user.svg";
 import iconSettings from "@/icons/settings.svg";
+// ACT: 顶栏品牌 logo 与标题作为一个整体居中；mask 只取 alpha，颜色随 currentColor。
+import iconLogo from "@/icons/logo_dsh_movie.svg";
 import languageSelect from "@/components/languageSelect.vue";
 import { useAuthStore } from "@/stores/auth";
 
@@ -44,37 +45,6 @@ async function onAccountCommand(command: string) {
   if (route.meta.requiresAuth === true) void router.replace({ path: "/account", query: { login: "1" } });
 }
 
-// ACT: 品牌区取「主面板左边界 ↔ host 账户图标最左缘」的中点：host 图标位置随语言按钮宽度变化，
-// 用 ResizeObserver 实测后写入 --brand-x（绝对定位 + translateX(-50%) 落点）。
-// 注意只能观测顶栏与右侧区：若观测品牌自身，定位→尺寸变化→重算会形成反馈环。
-const topbarRef = ref<HTMLElement>();
-const topbarRightRef = ref<HTMLElement>();
-const brandX = ref<number | null>(null);
-let topbarObserver: ResizeObserver | null = null;
-
-function updateBrandX() {
-  const topbar = topbarRef.value;
-  // ACT: 登录态切换会替换账户按钮（v-if/v-else），每次实时查询而非缓存 ref。
-  const account = topbar?.querySelector<HTMLElement>("[data-account-button]");
-  if (!topbar || !account) return;
-  const topbarRect = topbar.getBoundingClientRect();
-  const accountRect = account.getBoundingClientRect();
-  // ACT: 中点 = (主面板左边界 + host 图标最左缘) / 2；顶栏左缘即主面板左边界。
-  brandX.value = (accountRect.left - topbarRect.left) / 2;
-}
-
-onMounted(() => {
-  updateBrandX();
-  if (typeof ResizeObserver !== "undefined" && topbarRef.value) {
-    topbarObserver = new ResizeObserver(updateBrandX);
-    topbarObserver.observe(topbarRef.value);
-    // ACT: 右侧区宽度变化（语言按钮换图标/窗口变窄）会推移 host 图标，需靠它触发重算。
-    if (topbarRightRef.value) topbarObserver.observe(topbarRightRef.value);
-  }
-});
-onBeforeUnmount(() => { topbarObserver?.disconnect(); topbarObserver = null; });
-// ACT: 登录/退出会替换账户按钮，头像异步加载也会改变右侧布局；顶栏自身尺寸不变时需额外补算。
-watch([() => auth.signedIn, () => auth.avatarHttpUrl, locale], () => { void nextTick(updateBrandX); });
 </script>
 
 <template>
@@ -128,12 +98,13 @@ watch([() => auth.signedIn, () => auth.avatarHttpUrl, locale], () => { void next
 
     <!-- 右列：顶栏 + 主面板 -->
     <div class="shellRight">
-      <header ref="topbarRef" class="shellTopbar">
+      <header class="shellTopbar">
         <div class="shellTopbarLeft" aria-hidden="true" />
 
-        <!-- ACT: 品牌标识水平中心落在「主面板左边界 ↔ host 图标最左缘」的中点。 -->
-        <div class="shellTopbarCenter" :style="brandX !== null ? { '--brand-x': `${brandX}px` } : undefined">
+        <!-- ACT: 品牌标识（logo + 标题）作为一个整体，水平居中于顶栏正中。 -->
+        <div class="shellTopbarCenter">
           <div class="shellBrand">
+            <span class="navIcon brandLogo" :style="{ '--nav-icon': `url(&quot;${iconLogo}&quot;)` }" aria-hidden="true" />
             <span class="brandName">DSH Movie</span>
           </div>
           <div class="shellTopbarNotices">
@@ -141,7 +112,7 @@ watch([() => auth.signedIn, () => auth.avatarHttpUrl, locale], () => { void next
           </div>
         </div>
 
-        <div ref="topbarRightRef" class="shellTopbarRight">
+        <div class="shellTopbarRight">
           <!-- ACT: 已登录显示头像（无头像时回落 icons/user.svg）并挂下拉菜单；未登录则点击跳转账户页登录。 -->
           <el-dropdown v-if="auth.signedIn" trigger="click" @command="onAccountCommand">
             <button class="shellRound" type="button" data-account-button :aria-label="translate('账户')" :title="auth.displayName">
@@ -202,9 +173,16 @@ watch([() => auth.signedIn, () => auth.avatarHttpUrl, locale], () => { void next
 .shellBrand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  // ACT: logo 与标题的水平间距按要求加倍（9px → 18px）。
+  gap: 18px;
   min-width: 0;
   height: 32px;
+
+  // ACT: logo 与标题作为一个整体；按 viewBox 867:898.7 等比取 25×26px，与 20px 标题光学平衡。
+  .brandLogo {
+    width: 25px;
+    height: 26px;
+  }
 
   .brandName {
     overflow: hidden;
@@ -312,12 +290,12 @@ watch([() => auth.signedIn, () => auth.avatarHttpUrl, locale], () => { void next
   gap: 12px;
 }
 
-// ACT: 品牌区绝对定位：水平中心落在 --brand-x；未测得前回落 50%（顶栏正中）。
+// ACT: 品牌区（logo + 标题）绝对定位，水平中心落在顶栏正中。
 .shellTopbarCenter {
   position: absolute;
   top: 0;
   bottom: 1px; // ACT: 避开顶栏下边框，保持垂直居中。
-  left: var(--brand-x, 50%);
+  left: 50%;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
