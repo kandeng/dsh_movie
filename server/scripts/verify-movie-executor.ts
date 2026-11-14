@@ -1,34 +1,47 @@
 /**
- * Leg B movie-executor verifier (Phase-3 P3-M4, design doc §6).
+ * Leg B movie-executor verifier (Phase-3 P3-M4 §6, Phase-5 P5-M1).
  *
  * Two layers:
  *
  *  1. OFFLINE / deterministic (no network, no LLM): the executor registry,
  *     prompt validator, and topological sort that back the rewired
  *     `POST /prompt`:
- *     - `registry` advertises all six {@link MOVIE_NODES} class types;
+ *     - `registry` advertises all six {@link MOVIE_NODES} class types plus the
+ *       fifteen functional class types (Phase-5 D3);
  *     - `validatePromptGraph` accepts the demo graph, rejects an unknown
- *       `class_type`, a link to a missing node, and an out-of-range slot;
+ *       `class_type`, a link to a missing node, an out-of-range slot, and —
+ *       new in Phase-5 D2 — a link whose source/target slot types are
+ *       incompatible, while a subtype link (SCRIPT → TEXT) stays valid;
+ *     - a functional join graph (image input + text input → image generator)
+ *       and a fork graph (one source feeding two consumers) validate and
+ *       topo-sort sources-first;
+ *     - the D1 handler registry resolves functional class types to their
+ *       family adapter, and leaves legacy step types on the fallback path;
  *     - `topoSort` orders a linked chain 1->6 regardless of insertion order and
  *       detects a cycle.
  *
  *  2. LIVE gateway (movie-profile host up: gateway 8788): `POST /prompt`
- *     validates first (400 + `node_errors` on a bad class_type / bad link) and,
- *     when accepted, is scheduled as a `movie-exec` job that drives the `/ws`
- *     execution lifecycle across all six node ids in topological order
- *     (executing -> progress -> executed -> execution_success).
+ *     validates first (400 + `node_errors` on a bad class_type / bad link /
+ *     type mismatch) and, when accepted, is scheduled as a `movie-exec` job
+ *     that drives the `/ws` execution lifecycle across all node ids in
+ *     topological order (executing -> progress -> executed ->
+ *     execution_success) — for both the legacy six-step chain and the
+ *     functional join/fork graphs.
  *
  * Run from the `server/` directory:
  *   node scripts/verify-movie-executor.ts
  */
 
 import {
+  FUNCTIONAL_NODES,
   MOVIE_NODES,
   isExecMessage,
   type ExecMessage,
   type PromptGraph,
 } from '../../protocol/src/index.ts'
-import { classTypeOutputs, isKnownClassType, objectInfoFromMovieNodes } from '../plugins/dsh-movie-gateway/src/movie-executor/registry.ts'
+import { classTypeOutputs, handlerFor, isKnownClassType, objectInfoFromMovieNodes } from '../plugins/dsh-movie-gateway/src/movie-executor/registry.ts'
+// Activation: registers the built-in family adapters (Phase-5 D4).
+import '../plugins/dsh-movie-gateway/src/movie-executor/adapters/index.ts'
 import { validatePromptGraph } from '../plugins/dsh-movie-gateway/src/movie-executor/validate.ts'
 import { topoSort } from '../plugins/dsh-movie-gateway/src/movie-executor/topo.ts'
 
@@ -43,7 +56,7 @@ function check(label: string, ok: boolean, detail = ''): void {
 
 /** The six movie class types in pipeline (step) order. */
 const ORDERED_CLASS_TYPES: string[] = [...MOVIE_NODES]
-  .sort((a, b): number => a.step - b.step)
+  .sort((a, b): number => (a.step ?? 0) - (b.step ?? 0))
   .map((node): string => node.classType)
 
 /** The flattened six-node demo prompt (keys "1".."6", no links). */
@@ -53,6 +66,35 @@ function demoPrompt(): PromptGraph {
     graph[String(index + 1)] = { class_type: classType, inputs: {} }
   })
   return graph
+}
+
+/**
+ * The Phase-5 join graph: image input + text request → image generator
+ * (`image_to_image`), inserted generator-first so topo sort must reorder.
+ */
+function joinPrompt(): PromptGraph {
+  return {
+    '3': { class_type: 'ImageGenerator', inputs: { prompt: ['2', 0], image: ['1', 0], mode: 'image_to_image' } },
+    '1': { class_type: 'ImageInput', inputs: { image: 'asset-ref.png' } },
+    '2': { class_type: 'TextInput', inputs: { text: 'make the sky teal' } },
+  }
+}
+
+/** The Phase-5 fork graph: one text source feeding two consumers. */
+function forkPrompt(): PromptGraph {
+  return {
+    '1': { class_type: 'TextInput', inputs: { text: 'a logline' } },
+    '2': { class_type: 'TextGenerator', inputs: { context: ['1', 0], prompt: 'write the script' } },
+    '3': { class_type: 'TextReviewer', inputs: { text: ['1', 0], criteria: 'must mention the sea' } },
+  }
+}
+
+/** A type-mismatched link: AUDIO output into an IMAGE input (D2 rejects). */
+function mismatchPrompt(): PromptGraph {
+  return {
+    '1': { class_type: 'AudioInput', inputs: { audio: 'bgm.mp3' } },
+    '2': { class_type: 'ImageGenerator', inputs: { image: ['1', 0] } },
+  }
 }
 
 /**
@@ -82,6 +124,17 @@ function offlineChecks(): void {
   check('registry rejects an unknown class type', !isKnownClassType('MovieBogus'))
   const scriptOutputs = classTypeOutputs('MovieScript')
   check('registry exposes MovieScript output slots', scriptOutputs !== undefined && scriptOutputs.length > 0, `${scriptOutputs?.length ?? 0} outputs`)
+
+  // Phase-5: the merged catalog also advertises the functional classes.
+  const missingFunctional = FUNCTIONAL_NODES
+    .map((node): string => node.classType)
+    .filter((classType): boolean => !(classType in catalog))
+  check('registry advertises all fifteen functional class types', missingFunctional.length === 0, missingFunctional.length === 0 ? '15 classes' : `missing: ${missingFunctional.join(', ')}`)
+
+  // Phase-5 D1: handler registry resolves functional classes; legacy steps stay
+  // on the fallback path (no registered handler).
+  check('every functional class type resolves to a registered handler', FUNCTIONAL_NODES.every((node): boolean => handlerFor(node.classType) !== undefined))
+  check('legacy step class types keep the fallback path (no handler)', ORDERED_CLASS_TYPES.every((classType): boolean => handlerFor(classType) === undefined))
 
   // Validation: the demo graph is accepted verbatim.
   check('validate accepts the six-node demo graph', validatePromptGraph(demoPrompt()).ok)
@@ -114,6 +167,35 @@ function offlineChecks(): void {
     'validate rejects an out-of-range link slot',
     !badSlot.ok && badSlot.nodeErrors['2']?.errors.some((e): boolean => e.includes('out-of-range slot')) === true,
     badSlot.ok ? 'accepted' : JSON.stringify(badSlot.nodeErrors['2']?.errors ?? []),
+  )
+
+  // Phase-5 D2: link type compatibility.
+  check('validate accepts the functional join graph', validatePromptGraph(joinPrompt()).ok)
+  check('validate accepts the functional fork graph', validatePromptGraph(forkPrompt()).ok)
+  const mismatch = validatePromptGraph(mismatchPrompt())
+  check(
+    'validate rejects an AUDIO → IMAGE type mismatch (D2)',
+    !mismatch.ok && mismatch.nodeErrors['2']?.errors.some((e): boolean => e.includes('type mismatch')) === true,
+    mismatch.ok ? 'accepted' : JSON.stringify(mismatch.nodeErrors['2']?.errors ?? []),
+  )
+  const subtypeLink = validatePromptGraph({
+    '1': { class_type: 'MovieScript', inputs: {} },
+    '2': { class_type: 'TextReviewer', inputs: { text: ['1', 0] } },
+  })
+  check('validate accepts a legacy SCRIPT → TEXT subtype link (R2)', subtypeLink.ok)
+
+  // Phase-5: functional join/fork graphs topo-sort sources-first.
+  const joinSorted = topoSort(joinPrompt())
+  check(
+    'topoSort orders the join graph sources-first',
+    joinSorted.ok && joinSorted.order.indexOf('3') === 2 && joinSorted.order.slice(0, 2).sort().join(',') === '1,2',
+    joinSorted.ok ? joinSorted.order.join(' -> ') : `cycle: ${joinSorted.cycle.join(', ')}`,
+  )
+  const forkSorted = topoSort(forkPrompt())
+  check(
+    'topoSort orders the fork graph source-first',
+    forkSorted.ok && forkSorted.order[0] === '1',
+    forkSorted.ok ? forkSorted.order.join(' -> ') : `cycle: ${forkSorted.cycle.join(', ')}`,
   )
 
   // Topo: the reverse-inserted chain still sorts to 1..6.
@@ -209,6 +291,14 @@ async function liveChecks(): Promise<void> {
     `status ${badLink.status} ${badLink.body.error ?? ''}`,
   )
 
+  // Phase-5 D2: a type-mismatched link is rejected 400 with node_errors.
+  const badType = await postPrompt(mismatchPrompt())
+  check(
+    'POST /prompt rejects a type-mismatched link with 400 node_errors',
+    badType.status === 400 && badType.body.error === 'invalid_prompt' && badType.body.node_errors !== undefined,
+    `status ${badType.status} ${badType.body.error ?? ''}`,
+  )
+
   // A cyclic graph is rejected 400 (cycle detected in topo-sort).
   const cyclic = await postPrompt({
     '1': { class_type: 'MovieScript', inputs: { a: ['2', 0] } },
@@ -239,6 +329,32 @@ async function liveChecks(): Promise<void> {
     check('every node emits an executed result', executedCount === 6, `${executedCount}/6`)
   } catch (error) {
     check('Leg B /ws lifecycle completed', false, String(error))
+  }
+
+  // Phase-5: the functional join graph runs in topo order through the family
+  // adapters (D4), and the fork graph fans out from one source.
+  for (const [label, prompt, expectedCount] of [
+    ['join', joinPrompt(), 3],
+    ['fork', forkPrompt(), 3],
+  ] as [string, PromptGraph, number][]) {
+    try {
+      const messages = await collectLifecycle(prompt)
+      const executingOrder = messages
+        .filter((message): boolean => message.type === 'executing')
+        .map((message): string | null => (message.type === 'executing' ? message.data.node : null))
+        .filter((node): node is string => typeof node === 'string')
+      const executedCount = messages.filter((message): boolean => message.type === 'executed').length
+      check(
+        `POST /prompt drives the ${label} graph lifecycle (${String(expectedCount)} nodes)`,
+        executingOrder.length === expectedCount
+          && executedCount === expectedCount
+          && executingOrder[executingOrder.length - 1] !== '1'
+          && messages.some((message): boolean => message.type === 'execution_success'),
+        `executing: ${executingOrder.join(' -> ') || 'none'}`,
+      )
+    } catch (error) {
+      check(`Leg B ${label}-graph lifecycle completed`, false, String(error))
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 /**
- * Leg B executor job runner (Phase-3 P3-M4, design doc §6).
+ * Leg B executor job runner (Phase-3 P3-M4 §6, Phase-5 D4).
  *
  * Turns a validated, topologically-ordered prompt graph into ONE background job
  * on `ctx.jobs` (kind `movie-exec`). The job walks the nodes in topo order and
@@ -9,12 +9,14 @@
  * failure emits `execution_error` and settles the job `failed`; a cancel emits
  * `execution_interrupted` and settles `killed`.
  *
- * Artifact production is split by step kind: the two *text* steps
- * (`MovieScript`, `MovieShotPlan`) call an optional {@link StepTextGenerator}
- * (real Bailian text via the Task-4 director) when one is supplied; every other
- * step — the media steps and any non-movie class_type — goes through the
- * {@link MediaProvider} seam, whose only shipped impl is the canned placeholder
- * (Bailian is chat-only, so no GPU inference runs on the DSH host).
+ * Artifact production dispatches through the D1 handler registry: functional
+ * class types resolve to their registered family adapter (D4, `adapters/`),
+ * which reads upstream artifacts from the per-run output table keyed by
+ * `(nodeId, slotIndex)`. Legacy step class types have no registered handler and
+ * keep the Phase-3 path: the two *text* steps (`MovieScript`, `MovieShotPlan`)
+ * call the optional {@link StepTextGenerator} when supplied; everything else
+ * goes through the {@link MediaProvider} seam (canned placeholder — Bailian is
+ * chat-only, so no GPU inference runs on the DSH host).
  *
  * @module dsh-movie-gateway/movie-executor/runner
  */
@@ -22,6 +24,7 @@
 import type { ExecMessage, PromptGraph } from '@dsh-movie/protocol'
 import type { JobHooks, JobId, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MediaProvider } from './media-provider.ts'
+import { handlerFor, modalityOf, type NodeHandler, type NodeHandlerContext } from './registry.ts'
 
 /** Register the `movie-exec` producer kind with the jobs subsystem. */
 declare module '@deepseek-ai/dsh-jobs/view' {
@@ -109,6 +112,8 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
 
       const done = (async (): Promise<JobOutcome> => {
         const executed: string[] = []
+        /** Per-run output table: `nodeId -> slotIndex -> artifact` (D4). */
+        const outputsByNode = new Map<string, unknown[]>()
         let currentId = ''
         let currentType = ''
         let currentInputs: Record<string, unknown> = {}
@@ -130,7 +135,27 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
             job.updateProgress(`${executed.length + 1}/${order.length} ${currentType}`)
 
             let output: Record<string, unknown>
-            if (isTextStep(currentType, deps.stepText)) {
+            const handler: NodeHandler | undefined = handlerFor(currentType)
+            if (handler !== undefined) {
+              // D4 family dispatch: the registered adapter resolves upstream
+              // artifacts from the run's output table (topo order guarantees
+              // producers already ran).
+              const ctx: NodeHandlerContext = {
+                inputs: currentInputs,
+                resolve: (sourceId: string, slotIndex: number): unknown => outputsByNode.get(sourceId)?.[slotIndex],
+                ...(deps.stepText === undefined ? {} : { text: deps.stepText }),
+                media: deps.mediaProvider,
+              }
+              const result = await handler.run(ctx)
+              outputsByNode.set(id, result.outputs)
+              const modality = modalityOf(currentType)
+              output = {
+                artifact: result.artifact ?? '',
+                media: result.media ?? 'canned',
+                outputs: result.outputs,
+                ...(modality === undefined ? {} : { modality }),
+              }
+            } else if (isTextStep(currentType, deps.stepText)) {
               const text = await deps.stepText?.(currentType, currentInputs)
               output = { artifact: text ?? '', media: false }
             } else {

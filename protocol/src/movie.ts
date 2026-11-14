@@ -104,9 +104,10 @@ export function isMovieStepId(value: unknown): value is MovieStepId {
  */
 export function initialPipelineStatus(runId: string, roomId: MatrixRoomId): MoviePipelineStatus {
   const steps: MovieStepResult[] = [...MOVIE_NODES]
-    .sort((a, b): number => a.step - b.step)
+    .filter((node): boolean => node.step !== undefined)
+    .sort((a, b): number => (a.step ?? 0) - (b.step ?? 0))
     .map((node): MovieStepResult => ({
-      step: node.step,
+      step: node.step ?? 0,
       classType: node.classType as MovieStepId,
       status: 'pending',
     }))

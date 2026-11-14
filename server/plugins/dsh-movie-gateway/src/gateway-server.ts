@@ -51,7 +51,7 @@ import type {
   MatrixUserId,
   RoomRole,
 } from '@dsh-movie/protocol'
-import { IMPLEMENTED_METHODS, methodFromApiPath, buildObjectInfo, initialPipelineStatus } from '@dsh-movie/protocol'
+import { IMPLEMENTED_METHODS, methodFromApiPath, initialPipelineStatus } from '@dsh-movie/protocol'
 import type { MatrixIdentity, MatrixPrincipal } from 'dsh-matrix-identity/types'
 import {
   CANNED_ASSETS,
@@ -62,6 +62,8 @@ import {
 } from './fixtures.ts'
 import { createWorkspaceStore } from './workspace-store.ts'
 import { objectInfoFromMovieNodes } from './movie-executor/registry.ts'
+// Activation: registers the built-in functional-node handlers (Phase-5 D1/D4).
+import './movie-executor/adapters/index.ts'
 import { validatePromptGraph } from './movie-executor/validate.ts'
 import { topoSort } from './movie-executor/topo.ts'
 import { startPromptJob, type StepTextGenerator } from './movie-executor/runner.ts'
@@ -1244,7 +1246,9 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       return
     }
     switch (endpoint) {
-      case '/object_info': sendRaw(res, 200, buildObjectInfo()); return
+      // Merged catalog (P5-M1): legacy step nodes + functional nodes + canned
+      // demo nodes, same registry the Leg B validator/runner dispatch against.
+      case '/object_info': sendRaw(res, 200, objectInfoFromMovieNodes()); return
       case '/system_stats': sendRaw(res, 200, CANNED_SYSTEM_STATS); return
       case '/extensions': sendRaw(res, 200, [BRIDGE_EXTENSION_URL]); return
       case '/queue': sendRaw(res, 200, { queue_running: [], queue_pending: [] }); return

@@ -1,18 +1,21 @@
 /**
- * Leg B executor prompt validation (Phase-3 P3-M4, design doc §6).
+ * Leg B executor prompt validation (Phase-3 P3-M4 §6, Phase-5 D2).
  *
  * Validates a flattened ComfyUI prompt graph before it is scheduled: every
  * `class_type` must be in the executor {@link registry}, node specs may carry
  * only the known keys (`class_type`, `inputs`, `_meta`), and every link input
  * `[sourceId, slotIndex]` must reference an existing node and an in-range output
- * slot. The result mirrors the ComfyUI `/prompt` `node_errors` shape so the
- * gateway can return it verbatim on a 400.
+ * slot. Phase-5 D2 adds the link *type-compatibility* check: when both endpoint
+ * slots are declared by protocol schemas, the source output type must be
+ * assignable to the target input type per `slotCompatible` (subtypes flow up,
+ * the wildcard `*` matches anything). The result mirrors the ComfyUI `/prompt`
+ * `node_errors` shape so the gateway can return it verbatim on a 400.
  *
  * @module dsh-movie-gateway/movie-executor/validate
  */
 
-import type { PromptGraph, PromptGraphNode } from '@dsh-movie/protocol'
-import { classTypeOutputs, isKnownClassType } from './registry.ts'
+import { slotCompatible, type PromptGraph, type PromptGraphNode } from '@dsh-movie/protocol'
+import { classTypeOutputs, inputSlotSchema, isKnownClassType, outputSlotSchema } from './registry.ts'
 
 /** The per-node error bundle returned in a failed validation. */
 export interface NodeError {
@@ -98,6 +101,14 @@ export function validatePromptGraph(graph: PromptGraph): PromptValidation {
       const sourceOutputs = sourceNode === undefined ? undefined : classTypeOutputs(sourceNode.class_type)
       if (sourceOutputs !== undefined && (slot < 0 || slot >= sourceOutputs.length)) {
         addError(id, classType, `input "${inputKey}" links to out-of-range slot ${slot} on node "${sourceId}"`)
+        continue
+      }
+      // D2 type compatibility: only when both endpoints are protocol-declared
+      // slots (canned demo nodes and free-form input keys stay range-checked).
+      const sourceType = sourceNode === undefined ? undefined : outputSlotSchema(sourceNode.class_type, slot)?.type
+      const targetType = inputSlotSchema(classType, inputKey)?.type
+      if (sourceType !== undefined && targetType !== undefined && !slotCompatible(sourceType, targetType)) {
+        addError(id, classType, `input "${inputKey}" type mismatch: ${sourceType} (node "${sourceId}" slot ${slot}) is not assignable to ${targetType}`)
       }
     }
   }

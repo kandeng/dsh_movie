@@ -80,7 +80,7 @@ const LATENCY_BUDGET_MS = 10_000
 
 /** The six movie class types in pipeline (step) order. */
 const ORDERED_CLASS_TYPES: string[] = [...MOVIE_NODES]
-  .sort((a, b): number => a.step - b.step)
+  .sort((a, b): number => (a.step ?? 0) - (b.step ?? 0))
   .map((node): string => node.classType)
 
 /** A Leg C call result: the HTTP status plus the parsed `ApiResult` envelope. */

@@ -18,6 +18,7 @@
     "test:matrix-chat": "node plugins/dsh-matrix-chat/test/smoke.ts",
     "seed:demo": "node scripts/seed-demo.ts",
     "verify:principal": "node scripts/verify-principal.ts",
+    "verify:node-registry": "node scripts/verify-node-registry.ts",
     "verify:two-user": "node scripts/verify-two-user.ts",
     "verify:gateway": "node scripts/verify-gateway.ts"
   },

@@ -90,7 +90,8 @@ function asText(value: unknown): string {
     <div class="titleBar">
       <component :is="typeIcon" class="titleIcon" :size="16" aria-hidden="true" />
       <span class="labelText" :title="title">{{ title }}</span>
-      <span v-if="schema" class="nodeStep">{{ schema.step }}/6</span>
+      <span v-if="schema && schema.step !== undefined" class="nodeStep">{{ schema.step }}/6</span>
+      <span v-else-if="schema && schema.family" class="nodeStep">{{ schema.family }}</span>
     </div>
 
     <div class="cardContainer">

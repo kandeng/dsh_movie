@@ -28,7 +28,7 @@ const NODE_SIZE: [number, number] = [240, 140];
 
 /** The six movie nodes ordered by pipeline step. */
 function orderedNodes() {
-  return [...MOVIE_NODES].sort((a, b) => a.step - b.step);
+  return [...MOVIE_NODES].sort((a, b) => (a.step ?? 0) - (b.step ?? 0));
 }
 
 /**

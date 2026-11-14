@@ -1,0 +1,23 @@
+# Verifier overlay: run a SECOND disposable movie-profile host alongside the
+# development instance. Port shifts: webserver via app arg `--port 13080`,
+# gateway 8788 -> 18788, identity /auth listener disabled (0), matrix-chat
+# disabled so the bot is not double-logged-in. Used by the verify-* scripts:
+#   DSH_HOME=$PWD/.dsh dsh --profile movie --patch .dsh/cordis.verify.yml --no-open --port 13080
+#   GATEWAY_URL=http://127.0.0.1:18788 node scripts/verify-movie-executor.ts
+# NOTE: --patch config blocks REPLACE the targeted entry's config, so patched
+# entries carry their full config here.
+- id: matrix-identity
+  config:
+    homeserverUrl: http://127.0.0.1:8008
+    serverName: localhost
+    adminTokenRef: SYNAPSE_ADMIN_TOKEN
+    botUserId: '@vidsay_bot:localhost'
+    whoamiCacheMs: 60000
+    principalListenerPort: 0
+- id: matrix-chat
+  disabled: true
+- id: movie-gateway
+  config:
+    port: 18788
+    comfyStaticDir: ''
+    workspaceRoot: ''

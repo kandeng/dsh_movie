@@ -47,7 +47,7 @@ function check(label: string, ok: boolean, detail = ''): void {
 /** Build the flattened six-node demo prompt (keys "1".."6" by step order). */
 function demoPrompt(): PromptGraph {
   const graph: PromptGraph = {}
-  const ordered = [...MOVIE_NODES].sort((a, b) => a.step - b.step)
+  const ordered = [...MOVIE_NODES].sort((a, b) => (a.step ?? 0) - (b.step ?? 0))
   ordered.forEach((node, index) => {
     graph[String(index + 1)] = { class_type: node.classType, inputs: {} }
   })
