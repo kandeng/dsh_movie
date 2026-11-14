@@ -9,8 +9,13 @@
  *                  link) becomes the node's single output artifact.
  *  - `generator/text` → the LLM seam (`ctx.text`, the generalized
  *                  `StepTextGenerator`); canned text fallback when absent.
- *  - `generator/image|video|audio` → the media seam (`ctx.media`, the existing
- *                  `MediaProvider`); canned fallback when absent.
+ *  - `generator/image|video|audio` → first the D15 availability gate
+ *                  (`ctx.availability`): an unbacked modality throws
+ *                  {@link ModelUnavailableError} so the runner posts the
+ *                  `customer_service` notice instead of a silent placeholder. An
+ *                  available modality calls the media seam (`ctx.media`) — video
+ *                  rides Bailian "Happyhorse" (`video-provider.ts`); the canned
+ *                  fallback remains only as an offline/dev affordance.
  *  - `reviewer`  → the review seam (`ctx.review`); canned PASS verdict when
  *                  absent. Output 0 is the VERDICT, output 1 forwards the
  *                  reviewed artifact unchanged (D5 — no loops, fail never
@@ -19,13 +24,14 @@
  *                  slot order, `MediaConcat` forwards slot-ordered references,
  *                  `SaveOutput` passes the media through as the run output.
  *
- * Real Bailian-backed implementations arrive in P5-M2 behind the same seams;
- * nothing here changes the per-node lifecycle broadcast.
+ * Real Bailian-backed text/video implementations are wired in P5-M2 behind these
+ * same seams; nothing here changes the per-node lifecycle broadcast.
  *
  * @module dsh-movie-gateway/movie-executor/adapters
  */
 
 import { FUNCTIONAL_NODES, type MovieNodeSchema } from '@dsh-movie/protocol'
+import { ModelUnavailableError } from '../errors.ts'
 import {
   registerNodeHandlers,
   type NodeHandler,
@@ -92,6 +98,12 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
           ? cannedText(schema.classType, `generated text from ${sections.length} linked section(s)`)
           : await ctx.text(schema.classType, inputs)
         return { outputs: [artifact], artifact, media: ctx.text === undefined ? 'canned' : 'llm' }
+      }
+      // D15 availability gate: a non-text generator whose modality has no
+      // configured model never emits a silent placeholder — throw so the runner
+      // posts the customer_service notice and fails the node `model-unavailable`.
+      if (ctx.availability.for(schema.modality) === 'unavailable') {
+        throw new ModelUnavailableError(schema.modality ?? 'media', schema.classType)
       }
       if (ctx.media === undefined) {
         const artifact = cannedText(schema.classType, `placeholder ${schema.modality ?? 'media'} artifact`)

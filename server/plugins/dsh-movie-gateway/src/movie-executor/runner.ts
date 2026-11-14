@@ -25,6 +25,10 @@ import type { ExecMessage, PromptGraph } from '@dsh-movie/protocol'
 import type { JobHooks, JobId, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MediaProvider } from './media-provider.ts'
 import { handlerFor, modalityOf, type NodeHandler, type NodeHandlerContext } from './registry.ts'
+import { isModelUnavailable } from './errors.ts'
+import type { ModelAvailability } from './model-catalog.ts'
+import type { ReviewFn } from './llm-text.ts'
+import type { EchoKind, RoomNotifier } from './room-notifier.ts'
 
 /** Register the `movie-exec` producer kind with the jobs subsystem. */
 declare module '@deepseek-ai/dsh-jobs/view' {
@@ -61,6 +65,14 @@ export interface RunPromptDeps {
   mediaProvider: MediaProvider
   /** Real text generator for the text steps; canned fallback when absent. */
   stepText?: StepTextGenerator | undefined
+  /** Real reviewer seam (D5); canned verdict when absent. */
+  review?: ReviewFn | undefined
+  /** The D15 model-availability gate consulted before any model call. */
+  availability: ModelAvailability
+  /** The room this run was triggered from; empty/undefined → no room notices. */
+  roomId?: string | undefined
+  /** The `customer_service` room notifier (D15 notice + D8 artifact echo). */
+  notifier?: RoomNotifier | undefined
   /** Diagnostics sink. */
   logger: RunnerLogger
   /** The assigned execution id. */
@@ -143,7 +155,9 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
               const ctx: NodeHandlerContext = {
                 inputs: currentInputs,
                 resolve: (sourceId: string, slotIndex: number): unknown => outputsByNode.get(sourceId)?.[slotIndex],
+                availability: deps.availability,
                 ...(deps.stepText === undefined ? {} : { text: deps.stepText }),
+                ...(deps.review === undefined ? {} : { review: deps.review }),
                 media: deps.mediaProvider,
               }
               const result = await handler.run(ctx)
@@ -166,6 +180,14 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
             deps.broadcast([{ type: 'executed', data: { prompt_id: promptId, node: id, output } }])
             job.append(`[${currentType}] ${String(output['artifact'] ?? '')}\n`, { channel: 'log' })
             executed.push(id)
+            // D8 artifact echo: post the executed representation into the room.
+            // A no-op when the run carries no room/poster (the room-agnostic
+            // ComfyUI `/prompt` path), so it never breaks offline verification.
+            if (deps.notifier !== undefined && deps.roomId !== undefined && deps.roomId !== '') {
+              const echoModality = modalityOf(currentType)
+              const kind: EchoKind = echoModality === 'text' || output['media'] === false || output['media'] === 'llm' ? 'text' : 'media'
+              await deps.notifier.echoArtifact(deps.roomId, currentType, String(output['artifact'] ?? ''), kind)
+            }
           }
           deps.broadcast([
             { type: 'executing', data: { prompt_id: promptId, node: null } },
@@ -173,6 +195,30 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
           ])
           return { status: 'completed', result: `${executed.length} node(s) executed in topo order` }
         } catch (error) {
+          if (isModelUnavailable(error)) {
+            // D15: an unbacked modality. `customer_service` posts the notice into
+            // the room and the node fails honestly with reason `model-unavailable`
+            // (never a silent canned placeholder).
+            const modality = error.modality
+            logger.warn('[movie-executor] prompt %s node %s: model unavailable (%s)', promptId, currentId, modality)
+            if (deps.notifier !== undefined && deps.roomId !== undefined && deps.roomId !== '') {
+              await deps.notifier.notifyModelUnavailable(deps.roomId, currentType, modality)
+            }
+            deps.broadcast([{
+              type: 'execution_error',
+              data: {
+                prompt_id: promptId,
+                node_id: currentId,
+                node_type: currentType,
+                exception_type: 'ModelUnavailableError',
+                exception_message: `${error.message} (reason: ${error.reason}, modality: ${modality})`,
+                executed,
+                current_inputs: currentInputs,
+                current_outputs: {},
+              },
+            }])
+            return { status: 'failed', detail: `${error.reason}: no ${modality} model configured` }
+          }
           const message = error instanceof Error ? error.message : String(error)
           logger.warn('[movie-executor] prompt %s failed at node %s: %s', promptId, currentId, message)
           deps.broadcast([{

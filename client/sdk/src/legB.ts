@@ -136,10 +136,15 @@ export function connectExecSocket(
  * @param config - the SDK config carrying the gateway URL.
  * @param prompt - the execution graph.
  * @param clientId - optional client id used to route lifecycle events.
+ * @param roomId - optional Matrix room id. The Leg B surface is room-agnostic,
+ *   but threading the active room lets the gateway land the D15 "no such model"
+ *   notice and the D8 artifact echo in the chatbox (P5-M2).
  * @returns the gateway's prompt response (execution id + queue number).
  */
-export async function submitPrompt(config: SdkConfig, prompt: PromptGraph, clientId?: string): Promise<PromptResponse> {
-  const body = clientId !== undefined ? { prompt, client_id: clientId } : { prompt }
+export async function submitPrompt(config: SdkConfig, prompt: PromptGraph, clientId?: string, roomId?: string): Promise<PromptResponse> {
+  const body: Record<string, unknown> = { prompt }
+  if (clientId !== undefined) body['client_id'] = clientId
+  if (roomId !== undefined && roomId !== '') body['room_id'] = roomId
   const response = await fetch(`${trimTrailingSlash(config.gatewayUrl)}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

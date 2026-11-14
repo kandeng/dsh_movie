@@ -68,6 +68,9 @@ import { validatePromptGraph } from './movie-executor/validate.ts'
 import { topoSort } from './movie-executor/topo.ts'
 import { startPromptJob, type StepTextGenerator } from './movie-executor/runner.ts'
 import { cannedMediaProvider, type MediaProvider } from './movie-executor/media-provider.ts'
+import { createRoomNotifier, type RoomPoster } from './movie-executor/room-notifier.ts'
+import { availabilityFromInventory, type ModelAvailability } from './movie-executor/model-catalog.ts'
+import type { ReviewFn } from './movie-executor/llm-text.ts'
 import type { JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MovieGatewayInfo } from './types.ts'
 import type { CanvasScriptAgent, CanvasGenerateResult } from './canvas-agent.ts'
@@ -115,7 +118,9 @@ export interface GatewayServerDeps {
   jobs?: JobRegistry | undefined
   /**
    * Optional media-artifact seam for the executor's non-text steps. Defaults to
-   * {@link cannedMediaProvider} (Bailian is chat-only; no GPU inference here).
+   * {@link cannedMediaProvider}; in production the gateway injects a routing
+   * provider that sends the functional `VideoGenerator` to Bailian "Happyhorse"
+   * when configured and everything else to the canned fallback (D15).
    */
   mediaProvider?: MediaProvider | undefined
   /**
@@ -124,6 +129,24 @@ export interface GatewayServerDeps {
    * text steps fall back to the canned provider.
    */
   stepText?: StepTextGenerator | undefined
+  /**
+   * Optional real reviewer seam (D5) for functional `*Reviewer` nodes, wired to
+   * the Bailian LLM. When absent, reviewers fall back to a canned PASS verdict.
+   */
+  review?: ReviewFn | undefined
+  /**
+   * Optional D15 model-availability gate. When absent the gateway derives a
+   * conservative gate (text only when {@link GatewayServerDeps.stepText} is
+   * wired; image/video/audio unavailable) so an unbacked modality never silently
+   * succeeds.
+   */
+  availability?: ModelAvailability | undefined
+  /**
+   * Optional room-posting seam (`ctx.matrixChat`) for the `customer_service`
+   * notices (D15) and artifact echo (D8). When absent — or when a run carries no
+   * `room_id` — every room post degrades to a log line.
+   */
+  matrixChat?: RoomPoster | undefined
   /**
    * Optional six-step movie pipeline director (Phase-3 P3-M4). When present,
    * `movie/run` is accepted and streamed over the mux; when absent it answers
@@ -316,8 +339,15 @@ const MAX_REPLANS = 2
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, director, workspaceRoot } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot } = deps
   const execClients = new Set<WebSocket>()
+  // D15/D8: the `customer_service` room notifier (posts the unavailable-model
+  // notice and echoes executed artifacts) and the model-availability gate. Both
+  // degrade safely: no matrixChat → log-only notices; no availability → a
+  // conservative gate (text only when a text seam is wired).
+  const notifier = createRoomNotifier(matrixChat, logger)
+  const executorAvailability: ModelAvailability = availability
+    ?? availabilityFromInventory({ text: stepText !== undefined, video: false, image: false, audio: false })
   // P3-M5: the host-authoritative, file-backed per-room workspace replaces the
   // volatile in-memory store. When no root is injected (verifiers/tests), fall
   // back to a throwaway temp dir so the gateway still boots.
@@ -1152,6 +1182,9 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
    */
   async function handlePromptPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
     let prompt: PromptGraph
+    // The Leg B `/prompt` surface is room-agnostic; the client may optionally
+    // thread the active room so D15 notices / D8 echoes land somewhere.
+    let roomId = ''
     try {
       const params = await readParams(req)
       const raw = params['prompt']
@@ -1160,6 +1193,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
         return
       }
       prompt = raw as PromptGraph
+      roomId = stringParam(params, 'room_id') ?? stringParam(params, 'roomId') ?? ''
     } catch (error) {
       logger.warn('[movie-gateway] /prompt bad body: %s', String(error))
       sendRaw(res, 400, { error: 'bad-request', message: 'invalid JSON body' })
@@ -1191,6 +1225,10 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           broadcast: broadcastExec,
           mediaProvider: mediaProvider ?? cannedMediaProvider,
           ...(stepText === undefined ? {} : { stepText }),
+          ...(review === undefined ? {} : { review }),
+          availability: executorAvailability,
+          ...(roomId === '' ? {} : { roomId }),
+          notifier,
           logger,
           promptId,
           number,

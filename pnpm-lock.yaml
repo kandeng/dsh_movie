@@ -257,6 +257,9 @@ importers:
       '@types/ws':
         specifier: ^8.5.0
         version: 8.18.2
+      dsh-matrix-chat:
+        specifier: workspace:*
+        version: link:../dsh-matrix-chat
       typescript:
         specifier: ^6.0.3
         version: 6.0.3

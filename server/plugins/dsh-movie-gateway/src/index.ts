@@ -26,8 +26,14 @@ import { fileURLToPath } from 'node:url'
 import { startGatewayServer, type GatewayHandle } from './gateway-server.ts'
 import { CanvasScriptAgent } from './canvas-agent.ts'
 import { MovieDirector } from './movie-team/director.ts'
-import { cannedMediaProvider } from './movie-executor/media-provider.ts'
+import { cannedMediaProvider, createRoutingMediaProvider } from './movie-executor/media-provider.ts'
+import { LlmTextAgent } from './movie-executor/llm-text.ts'
+import { createVideoProvider, videoConfigFromEnv } from './movie-executor/video-provider.ts'
+import { availabilityFromInventory } from './movie-executor/model-catalog.ts'
 import type { MovieGateway, MovieGatewayInfo } from './types.ts'
+// Pulls the optional `ctx.matrixChat` service-key merge used for the D15 room
+// notice + D8 artifact echo (type-only; the poster is fetched with `ctx.get`).
+import type {} from 'dsh-matrix-chat/types'
 
 export type { MovieGateway, MovieGatewayInfo } from './types.ts'
 
@@ -148,6 +154,49 @@ export function apply(ctx: Context, config: Config): void {
       logger: ctx.logger,
       mediaProvider: cannedMediaProvider,
     })
+    // P5-M2: the real modality adapters + the D15 availability gate.
+    //  - text  -> a shared Bailian LLM turn (LlmTextAgent), gated on subagents.
+    //  - video -> the Bailian "Happyhorse" DashScope seam, gated on env config.
+    //  - image/audio -> no model on the current Bailian-only inventory: the gate
+    //    fails the node and `customer_service` posts the "no such model" notice.
+    const subagents = ctx.get('subagents')
+    const bailianKey = (process.env['BAILIAN_API_KEY'] ?? '').trim()
+    // The real text/review seams activate only with BOTH the subagent runtime and
+    // a Bailian key; without either the adapters fall back to their honest canned
+    // text (mirroring the director's key-free degrade), so the key-free verifier
+    // stays deterministic and D15 text availability reflects reality.
+    const llmText = subagents === undefined || bailianKey === ''
+      ? undefined
+      : new LlmTextAgent({
+        agents: ctx.agents,
+        agentDefaultModel: ctx.agentDefaultModel,
+        sessions: ctx.sessions,
+        subagents,
+        cwd: process.cwd(),
+        logger: ctx.logger,
+      })
+    const videoConfig = videoConfigFromEnv()
+    const videoProvider = videoConfig === undefined ? undefined : createVideoProvider(videoConfig, ctx.logger)
+    // Route functional `VideoGenerator` to the real Happyhorse seam when it is
+    // configured; everything else stays on the canned offline fallback so the
+    // legacy six-step pipeline + verify bridges are unchanged.
+    const routingMediaProvider = createRoutingMediaProvider({
+      ...(videoProvider === undefined ? {} : { video: videoProvider }),
+      fallback: cannedMediaProvider,
+    })
+    // The D15 availability snapshot: text is available only with a live LLM,
+    // video only with a configured Happyhorse endpoint; image/audio are never
+    // backed on the current Bailian-only inventory.
+    const availability = availabilityFromInventory({
+      text: llmText !== undefined,
+      video: videoProvider !== undefined,
+      image: false,
+      audio: false,
+    })
+    // Optional `customer_service` room poster (D15 notice + D8 echo). Absent in
+    // the isolated verifier (matrix-chat disabled) -> the notifier degrades to
+    // log-only.
+    const matrixChat = ctx.get('matrixChat')
     ctx.effect(() => {
       // The Leg B executor schedules prompts as `movie-exec` background jobs.
       // `ctx.jobs.start` refuses work unless an attached controller serves the
@@ -163,6 +212,11 @@ export function apply(ctx: Context, config: Config): void {
         canvasAgent,
         director,
         workspaceRoot,
+        mediaProvider: routingMediaProvider,
+        availability,
+        ...(llmText === undefined ? {} : { stepText: (classType: string, inputs: Record<string, unknown>): Promise<string> => llmText.text(classType, inputs) }),
+        ...(llmText === undefined ? {} : { review: (classType: string, artifact: unknown, criteria: string): Promise<string> => llmText.review(classType, artifact, criteria) }),
+        ...(matrixChat === undefined ? {} : { matrixChat }),
         ...(ctx.jobs === undefined ? {} : { jobs: ctx.jobs }),
       })
       ctx.logger.info('[movie-gateway] Leg B/C gateway active on port %d', config.port)
@@ -171,6 +225,7 @@ export function apply(ctx: Context, config: Config): void {
         handle = null
         if (current !== null) await current.stop()
         detachController?.()
+        llmText?.dispose()
         director.dispose()
         canvasAgent.dispose()
       }

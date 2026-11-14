@@ -61,7 +61,7 @@ The catalog is exactly these **15 classes**. A 16th candidate, `IntentAnalyzer` 
 - `reviewer` → judge adapter: an LLM call given the reviewed artifact + review criteria widget; emits a verdict (D5).
 - `combiner` → pure function (concat/merge/save), no model call.
 
-Adapters read model endpoints from server settings (Bailian), exactly as the current text generator does. The per-node lifecycle broadcast (`executing → progress → executed`) is unchanged.
+Adapters read model endpoints from server settings (Bailian), exactly as the current text generator does; a modality with no configured model is handled by the availability gate in D15 (not a silent placeholder). The per-node lifecycle broadcast (`executing → progress → executed`) is unchanged.
 
 ### D5 — Reviewers emit verdicts; no loops in the DAG
 A reviewer's outputs are `VERDICT` (a `TEXT` subtype: pass/fail + notes) and, on pass, the reviewed artifact forwarded unchanged. Because a DAG cannot loop, **fail does not retry automatically**: retry is a manual re-run or a director-driven re-run over chat. Conditional/switch nodes are explicitly out of scope (§9). Reviewers therefore add QC visibility without adding control flow to the engine.
@@ -118,6 +118,26 @@ The 分组节点 button **arms** a single rectangle draw: pointer-drag on the ca
 ### D14 — Move canvas is one-shot, not a toggle
 The 移动画布 button arms hand mode for **one** pan gesture and disarms on the gesture's pointerup; moving again requires re-clicking (today it is a sticky toggle). Same arm/disarm interaction model as D13, so the two tools behave consistently.
 
+### D15 — Model inventory & the unavailable-modality fallback
+**Bailian-only inventory (today).** Every backing model lives on Bailian and is reached over HTTPS through DSH `ctx.llm`/`ctx.credentials`/`ctx.subagents` — no GPU/model code runs on the DSH host (§9-1, R3). The configured inventory is deliberately small:
+
+| Modality | Role | Backing model | Status |
+| --- | --- | --- | --- |
+| text | generator / reviewer | Bailian LLM (`qwen3.8-max` via `ctx.subagents`) | **available** |
+| video | generator | Bailian **"Happyhorse"** video-generation model | **available** |
+| image | generator | — none configured — | **unavailable** |
+| audio | generator | — none configured — | **unavailable** |
+
+Sources and combiners never call a model (D4), so they are unaffected; reviewers are LLM calls, so they ride the text row.
+
+**Unavailable-modality fallback.** When a generator whose modality has *no* configured model is executed, the node must **not** silently emit a canned placeholder — that would misrepresent a missing capability as a result. Instead:
+- `customer_service` posts one Leg A chat message into the room, via `ctx.matrixChat` (`RoomPoster.sendText`), worded like: *"There is no this type AI model available now, please configure the settings to provide the AI model first."*
+- the node's job settles `error` with reason `model-unavailable`, so the runner short-circuits its dependents to `skipped` (existing failure semantics) and the client inspector shows *why* the branch stopped.
+
+**Settings-gated activation.** The inventory is read from server settings (`@deepseek-ai/dsh-client-ui-settings-models`). Adding an image or audio model endpoint there flips that modality to *available* with no code change: the gate re-checks per run, the notice stops, and the real adapter path (D4) takes over. The canned `MediaProvider` survives only as an offline/dev affordance for the verifier, never as a user-facing result.
+
+**Relationship to D7/D9.** The notice is posted by the same `customer_service` surface that mines intents (D7); it is a system-originated room message, not a graph edit, so it never triggers ops or txn narration (D9).
+
 ## 4. Protocol changes (`protocol/src/`)
 
 - `nodes.ts`: add `family` + `modality` to `MovieNodeSchema`; add `FUNCTIONAL_NODES` catalog (D3 table); add `MEDIA_SLOT_TYPES`, `SUBTYPE_OF`, and `slotCompatible(sourceType, targetType)`; mark the six step entries `deprecated: true` (D1); `buildObjectInfo` renders both catalogs unchanged in shape.
@@ -130,6 +150,7 @@ The 移动画布 button arms hand mode for **one** pan gesture and disarms on th
 - `validate.ts`: add the D2 link type-compatibility check via `slotCompatible`; errors keyed per node in the existing `node_errors` shape.
 - `runner.ts`: replace `TEXT_STEPS`/`isTextStep` with the D4 family dispatch; add input-resolution → prompt-assembly helper (ordered linked texts, media artifact references, widget values) shared by the text and reviewer adapters.
 - `adapters/` (new): `llm-text.ts` (generalizes `StepTextGenerator`), `image.ts`, `video.ts`, `audio.ts`, `reviewer.ts`, `combiner.ts`, `source.ts`; each implements the `MediaProvider`-shaped seam with canned fallback.
+- **Availability gate (D15):** before a generator calls a model, its adapter checks the modality against the configured-model inventory (Bailian text + "Happyhorse" video today). An unbacked modality (image/audio) short-circuits: `customer_service` posts the unavailable-model notice into the room via `ctx.matrixChat` and the node fails with reason `model-unavailable` so dependents skip.
 - `movie-team/director.ts`: chat-path orchestration unchanged; its text steps call the generalized text adapter (skill-embedded prompts arrive with the skill-template phase, cross-referenced, not here).
 - Executed-output payload gains `modality` so the client inspector can render it (additive field).
 - **Artifact echo (D8):** every `executed` output is posted to the room as a Leg A media/text message (as the director's chat-path runs already do), so the Chat stage shows each step's immediate representation regardless of which page triggered the run.
@@ -152,7 +173,7 @@ The 移动画布 button arms hand mode for **one** pan gesture and disarms on th
 
 - **P5-M0 — Protocol registry v2.** `nodes.ts` family/modality + functional catalog + slot-type system; `templates.ts`. Acceptance: `pnpm -r --if-present typecheck` green; `buildObjectInfo()` advertises all functional class types; new pure verifier `server/scripts/verify-node-registry.ts` asserts catalog completeness, subtype table acyclicity, and template referential integrity (every template class type + slot link exists and type-checks); the catalog contains exactly the 15 functional classes (no router class); the pipeline's last step displayName is `Montage`.
 - **P5-M1 — Server dispatch + validation.** `validate.ts` type-compat; `runner.ts` family dispatch with canned adapters. Acceptance: `verify-movie-executor.ts` extended with a join graph (image input + text input → image generator) and a fork graph, both executing in topo order; a mismatched-type link is rejected with `node_errors`; `verify-comfy-bridge.ts` and `verify-canvas-scale.ts` stay green.
-- **P5-M2 — Real modality adapters.** Bailian-backed text adapter; image/video/audio adapters behind settings with canned fallback when keys absent. Acceptance: a functional 3-node graph produces a real text artifact and (with keys) a real image; without keys the canned path completes and the job settles `completed`; executed artifacts are echoed into the room (D8).
+- **P5-M2 — Real modality adapters + availability gate.** Bailian-backed text adapter (LLM) and video adapter ("Happyhorse"); image/audio have no configured model (D15). A generator whose modality has no model does not emit a silent placeholder — `customer_service` posts the unavailable-model notice into the room and the node settles `error` (`model-unavailable`) with dependents `skipped`. Acceptance: a functional 3-node text graph produces a real LLM artifact; a video generator with "Happyhorse" configured produces a real clip; an image/audio generator with no model posts the D15 notice to the room and fails the node honestly; executed artifacts are echoed into the room (D8).
 - **P5-M3 — Client palette + macros + Studio interaction model.** Cascade palette (D12), `expandTemplate.ts`, group overlay + one-shot tools (D13/D14), empty initial canvas (D11), node UI badges/slot colors. Acceptance: browser E2E — a fresh room opens on an empty canvas; cascade `source → ImageInput` + `source → TextInput` + `generator → ImageGenerator` drop, wire, run, badges paint per node; one group rectangle is drawn, renamed and recolored, and survives a room reload; 移动画布 disarms after a single pan; dropping the "Script" template yields a subgraph matching `step-script`.
 - **P5-M4 — Reviewers + combiners + pipeline parity.** Reviewer/combiner adapters + verdict UI + audio player; `movie-pipeline` template reproduces the old six-step run end-to-end. Acceptance: one-click run on the expanded template yields the same artifact sequence as the pre-Phase-5 pipeline (`verify-movie-pipeline.ts` green against both); a reviewer fail shows the verdict and does not block unrelated branches; a chat turn distilled by `customer_service` patches the graph via op-script (D7) and the commit is narrated once in the timeline (D9).
 - **P5-M5 — Deprecation + docs.** Step class types flagged deprecated in `/object_info`; load-time notice for persisted graphs still using them (they remain executable this phase); `doc/architecture.md` §8 updated to describe the two-layer palette and the family dispatch.
@@ -178,7 +199,7 @@ The 移动画布 button arms hand mode for **one** pan gesture and disarms on th
 
 - **R1 — Persisted-graph compatibility.** Rooms' drafts contain step class types; mitigated by D1 (deprecated but executable for one phase) and load-time notice.
 - **R2 — Slot-type migration.** Introducing subtyping changes which links validate; mitigated by `SUBTYPE_OF` covering all six legacy types as subtypes, so every previously-valid link stays valid.
-- **R3 — Model keys/quota.** Real image/video/audio adapters depend on Bailian endpoints; mitigated by canned fallback per adapter (today's behavior) and settings-gated activation.
+- **R3 — Model availability/quota.** Only Bailian text (LLM) and video ("Happyhorse") models exist today; image/audio have none (D15). Mitigated by an availability gate: an unbacked modality surfaces a `customer_service` "configure a model first" notice rather than a misleading canned artifact, and activates automatically once an endpoint is added in Settings.
 - **R4 — Template/director drift.** The chat path (director) and the canvas path (templates) must produce equivalent pipelines; mitigated by M4 parity verification and by sourcing both from the same functional catalog.
 - **R5 — Intent-mining false positives.** A misread utterance could patch the graph; mitigated by router confidence gating, txn postconditions, and unified undo (agent and user ops share one history).
 - **R6 — Narration noise.** Mitigated by one batched collapsible system message per txn (D9), never per-op or per-keystroke.

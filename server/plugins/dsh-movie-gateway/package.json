@@ -31,6 +31,7 @@
     "@deepseek-ai/dsh-subagent": "0.2.2-rc.1",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.0",
+    "dsh-matrix-chat": "workspace:*",
     "typescript": "^6.0.3"
   }
 }

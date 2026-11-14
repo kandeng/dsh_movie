@@ -28,6 +28,7 @@ import {
   type ObjectInfoEntry,
 } from '@dsh-movie/protocol'
 import { CANNED_OBJECT_INFO } from '../fixtures.ts'
+import type { ModelAvailability } from './model-catalog.ts'
 
 /** One `/object_info` entry, loosely typed for the merged canned + movie map. */
 type ObjectInfoMap = Record<string, unknown>
@@ -134,6 +135,8 @@ export interface NodeHandlerContext {
   inputs: Record<string, unknown>
   /** Resolves link tuples to upstream artifacts (topo order guarantees presence). */
   resolve: UpstreamResolver
+  /** The D15 model-availability gate consulted before any model call. */
+  availability: ModelAvailability
   /** Real LLM text seam (generalizes the legacy `StepTextGenerator`). */
   text?: ((classType: string, inputs: Record<string, unknown>) => Promise<string>) | undefined
   /** Real reviewer seam: judges one artifact against criteria. */
