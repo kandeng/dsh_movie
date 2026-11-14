@@ -11,7 +11,7 @@
  *  - click-an-edge → floating disconnect bubble,
  *  - empty-canvas quick-create overlay (`canvasEmpty`).
  */
-import { markRaw, nextTick, onMounted, ref, watch } from "vue";
+import { computed, markRaw, nextTick, onMounted, ref, watch } from "vue";
 import {
   VueFlow,
   useVueFlow,
@@ -22,23 +22,47 @@ import {
   type EdgeMouseEvent,
 } from "@vue-flow/core";
 import { IconUnlink } from "@tabler/icons-vue";
-import { MOVIE_NODES } from "@dsh-movie/protocol";
+import { FUNCTIONAL_NODES, MOVIE_NODES, type WorkflowGroup } from "@dsh-movie/protocol";
 import MovieNode from "@/canvas/MovieNode.vue";
 import canvasEmpty from "@/canvas/canvasEmpty.vue";
+import { boundingFromDrag, groupColor } from "@/canvas/groupOverlay";
 
 import "@vue-flow/core/dist/style.css";
 import "@vue-flow/core/dist/theme-default.css";
 
-const props = withDefaults(defineProps<{ handMode?: boolean }>(), { handMode: false });
-const emit = defineEmits<{ create: [classType: string] }>();
+const props = withDefaults(
+  defineProps<{
+    /** Hand (pan) tool armed for one gesture (Phase-5 D14). */
+    handMode?: boolean;
+    /** Group-draw tool armed for one rectangle (Phase-5 D13). */
+    groupMode?: boolean;
+    /** Live drawn group boxes rendered under the nodes (Phase-5 D13). */
+    groups?: WorkflowGroup[];
+  }>(),
+  { handMode: false, groupMode: false, groups: () => [] },
+);
+const emit = defineEmits<{
+  create: [classType: string];
+  /** A completed one-shot group rectangle draw (D13). */
+  "group-draw": [bounding: WorkflowGroup["bounding"]];
+  /** A group's title chip was clicked; carries the screen anchor for the popover. */
+  "group-click": [payload: { index: number; x: number; y: number }];
+  /** The one-shot hand gesture finished, so the parent disarms (D14). */
+  "hand-done": [];
+}>();
 
-/** Map every registered movie `class_type` to the generic node component. */
+/**
+ * Map every registered `class_type` to the generic node component: the six
+ * deprecated movie steps ({@link MOVIE_NODES}) plus the Phase-5 functional
+ * primitives ({@link FUNCTIONAL_NODES}). The catalogs are disjoint, so one loop
+ * registers the whole two-layer palette (D1/D3/D12).
+ */
 const nodeTypes: NodeTypesObject = {};
-for (const node of MOVIE_NODES) {
+for (const node of [...MOVIE_NODES, ...FUNCTIONAL_NODES]) {
   nodeTypes[node.classType] = markRaw(MovieNode);
 }
 
-const { nodes, fitView, viewport, zoomTo, removeEdges, findEdge } = useVueFlow();
+const { nodes, fitView, viewport, zoomTo, removeEdges, findEdge, screenToFlowCoordinate } = useVueFlow();
 
 // Center the graph the first time nodes appear (workspace hydrate / demo reload from
 // empty). fit-view-on-init runs before the async graph lands, so we fit here instead.
@@ -81,6 +105,73 @@ function disconnect(edgeId: string) {
   removeEdges(edgeId);
   edgeDisconnect.value = undefined;
 }
+
+// ── Group overlay (Phase-5 D13). Boxes render in the transformed `zoom-pane`
+//    slot at graph coordinates, so they pan/zoom with the nodes and sit under
+//    them (z-index -1). Drawing is a ONE-SHOT pointer-drag on a screen-space
+//    catcher armed by the 分组节点 tool: the two corners are projected into graph
+//    space (`screenToFlowCoordinate`) and normalized into a `bounding` box, then
+//    handed to the parent, which owns the group store and disarms the tool. ──
+const drawing = ref(false);
+const drawStart = ref<{ x: number; y: number }>();
+const drawEnd = ref<{ x: number; y: number }>();
+
+/** The live preview rectangle (graph coords) while a draw drag is in flight. */
+const drawPreview = computed<WorkflowGroup["bounding"] | undefined>(() => {
+  const start = drawStart.value;
+  const end = drawEnd.value;
+  if (start === undefined || end === undefined) return undefined;
+  return [
+    Math.min(start.x, end.x),
+    Math.min(start.y, end.y),
+    Math.abs(end.x - start.x),
+    Math.abs(end.y - start.y),
+  ];
+});
+
+/** Project a pointer event's client position into graph coordinates. */
+function toFlow(event: PointerEvent): { x: number; y: number } {
+  return screenToFlowCoordinate({ x: event.clientX, y: event.clientY });
+}
+
+function onDrawDown(event: PointerEvent): void {
+  if (!props.groupMode || event.button !== 0) return;
+  event.preventDefault();
+  drawing.value = true;
+  drawStart.value = toFlow(event);
+  drawEnd.value = drawStart.value;
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+function onDrawMove(event: PointerEvent): void {
+  if (!drawing.value) return;
+  drawEnd.value = toFlow(event);
+}
+function onDrawUp(event: PointerEvent): void {
+  if (!drawing.value) return;
+  drawing.value = false;
+  const start = drawStart.value;
+  drawStart.value = undefined;
+  drawEnd.value = undefined;
+  if (start === undefined) return;
+  const bounding = boundingFromDrag(start, toFlow(event));
+  if (bounding !== undefined) emit("group-draw", bounding);
+}
+
+/** Click a group's title chip → give the parent the screen anchor for its popover. */
+function onGroupTitle(event: MouseEvent, index: number): void {
+  emit("group-click", { index, x: event.clientX, y: event.clientY });
+}
+
+// ── One-shot hand (Phase-5 D14): a completed PAN gesture disarms the tool. A
+//    real drag carries a mouse/pointer/touch `sourceEvent`; a wheel or programmatic
+//    zoom does not, so only genuine pans notify the parent to disarm. ──
+function onMoveEnd(payload: { event?: unknown }): void {
+  if (!props.handMode) return;
+  const event = payload?.event as { sourceEvent?: Event | null; type?: string } | undefined;
+  const source = event?.sourceEvent ?? undefined;
+  const type = source?.type ?? event?.type ?? "";
+  if (/^(mouse|pointer|touch)/.test(type)) emit("hand-done");
+}
 </script>
 
 <template>
@@ -114,7 +205,48 @@ function disconnect(edgeId: string) {
       :selection-mode="SelectionMode.Partial"
       :default-edge-options="{ type: 'default' }"
       @edge-click="onEdgeClick"
-      @pane-click="edgeDisconnect = undefined" />
+      @move-end="onMoveEnd"
+      @pane-click="edgeDisconnect = undefined">
+      <!-- Group boxes (D13): a graph-space layer under the nodes (zoom-pane is
+           inside the transformed viewport, so boxes pan/zoom with the graph). -->
+      <template #zoom-pane>
+        <div class="groupLayer">
+          <div
+            v-for="(group, index) in groups"
+            :key="`group-${index}`"
+            class="groupBox"
+            :style="{
+              left: `${group.bounding[0]}px`,
+              top: `${group.bounding[1]}px`,
+              width: `${group.bounding[2]}px`,
+              height: `${group.bounding[3]}px`,
+              '--group-color': groupColor(group.color),
+            }">
+            <button type="button" class="groupTitle" :title="group.title" @click.stop="onGroupTitle($event, index)">
+              {{ group.title }}
+            </button>
+          </div>
+          <div
+            v-if="drawPreview"
+            class="groupBox preview"
+            :style="{
+              left: `${drawPreview[0]}px`,
+              top: `${drawPreview[1]}px`,
+              width: `${drawPreview[2]}px`,
+              height: `${drawPreview[3]}px`,
+            }" />
+        </div>
+      </template>
+    </VueFlow>
+    <!-- One-shot group-draw catcher (D13): a screen-space overlay, armed only
+         while the 分组节点 tool is active, that turns a pointer-drag into a box. -->
+    <div
+      v-if="groupMode"
+      class="groupDrawCatcher"
+      @pointerdown="onDrawDown"
+      @pointermove="onDrawMove"
+      @pointerup="onDrawUp"
+      @pointercancel="onDrawUp" />
     <canvasEmpty v-if="emptyVisible && nodes.length === 0" @create="classType => emit('create', classType)" />
     <teleport to="body">
       <el-button
@@ -165,6 +297,59 @@ function disconnect(edgeId: string) {
     margin: -8px;
     border-radius: 4px;
   }
+}
+
+.groupLayer {
+  // Drawn under the nodes: the transformed pane is the stacking context, so a
+  // negative z-index paints the boxes above the canvas grid but below nodes/edges.
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.groupBox {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--group-color, var(--el-color-primary));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--group-color, var(--el-color-primary)) 12%, transparent);
+
+  &.preview {
+    border-style: dashed;
+    background: color-mix(in srgb, var(--el-color-primary) 10%, transparent);
+  }
+}
+
+.groupTitle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: calc(100% - 8px);
+  padding: 2px 10px;
+  border: 0;
+  border-radius: 8px 0 8px 0;
+  background: var(--group-color, var(--el-color-primary));
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  // The title chip is the only interactive part of a group, so the box body
+  // never blocks panning or node dragging.
+  pointer-events: auto;
+}
+
+.groupDrawCatcher {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  cursor: crosshair;
+  touch-action: none;
 }
 
 .edgeDisconnect {

@@ -3,14 +3,17 @@ import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
-import type { NodeRunStatus, WorkflowGraph, MovieStepResult, MovieStepStatus, MovieStepId } from "@dsh-movie/protocol";
-import { MOVIE_NODES } from "@dsh-movie/protocol";
+import type { NodeRunStatus, WorkflowGraph, WorkflowGroup, MovieStepResult, MovieStepStatus, MovieStepId } from "@dsh-movie/protocol";
+import { FUNCTIONAL_NODES, MOVIE_NODES, templateById } from "@dsh-movie/protocol";
 import groupChat from "@/components/groupChat.vue";
 import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useVueFlowBridge } from "@/composables/useVueFlowBridge";
 import VueFlowCanvas from "@/canvas/VueFlowCanvas.vue";
+import NodeCascade, { type CascadeSelection } from "@/canvas/NodeCascade.vue";
+import { expandTemplate } from "@/canvas/expandTemplate";
+import { DEFAULT_GROUP_COLOR, GROUP_COLOR_KEYS, groupColor } from "@/canvas/groupOverlay";
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
 import { useRoomRole } from "@/composables/useRoomRole";
 import { useWorkspaceGraph } from "@/composables/useWorkspaceGraph";
@@ -18,8 +21,9 @@ import { useExecStatus } from "@/composables/useExecStatus";
 import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
 import { useMovieRun } from "@/composables/useMovieRun";
 import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId, findMovieNode } from "@/utils/demoWorkflow";
+import { workflowToPrompt } from "@/canvas/graphMapper";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
-import { IconArrowBackUp, IconArrowForwardUp, IconGitCommit, IconHistory } from "@tabler/icons-vue";
+import { IconArrowBackUp, IconArrowForwardUp, IconGitCommit, IconHistory, IconPlayerPlay } from "@tabler/icons-vue";
 // vidsay studioBar 工具图标：本地 svg 经 mask 渲染，跟随按钮文字颜色。
 import iconCanvasAdd from "@/icons/canvas_add.svg";
 import iconCanvasGrouping from "@/icons/canvas_grouping.svg";
@@ -52,14 +56,21 @@ const bridge = useVueFlowBridge();
 
 // ── vidsay studioBar 工具态：分组/抓手工具、节点搜索、缩放菜单。缩放与视图直接走共享 Vue Flow store，
 //    与 vidsay canvasPanel 暴露的 zoomPercent/applyZoom/zoomIn/zoomOut 同语义。──
-const selectedTool = ref<"move" | "hand">("move");
+// Phase-5 D13/D14: the group-draw and hand (move) tools are ONE-SHOT — each arms
+// for a single gesture and disarms when the canvas reports the gesture finished.
+const groupArmed = ref(false);
+const handArmed = ref(false);
 const searchVisible = ref(false);
 const searchQuery = ref("");
 const zoomMenuVisible = ref(false);
+const addNodeVisible = ref(false);
+// The searchable palette spans both catalogs: the Phase-5 functional primitives
+// and the six deprecated movie steps (D1/D12).
+const PALETTE_NODES = [...FUNCTIONAL_NODES, ...MOVIE_NODES];
 const filteredNodes = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
-  if (!query) return MOVIE_NODES;
-  return MOVIE_NODES.filter(node => node.displayName.toLowerCase().includes(query) || node.classType.toLowerCase().includes(query));
+  if (!query) return PALETTE_NODES;
+  return PALETTE_NODES.filter(node => node.displayName.toLowerCase().includes(query) || node.classType.toLowerCase().includes(query));
 });
 const zoomPercent = computed(() => Math.round(bridge.flow.viewport.value.zoom * 100));
 function applyZoom(value: number | undefined) {
@@ -102,25 +113,35 @@ async function applyGraph(graph: WorkflowGraph): Promise<void> {
   await workspace.applyGraph(graph);
 }
 
-/** Load the room's graph (host draft / committed HEAD, or seed the demo) into the canvas. */
+/** An empty graph for a fresh room (Phase-5 D11: nothing is seeded). */
+function emptyWorkflow(): WorkflowGraph {
+  return {
+    last_node_id: 0,
+    last_link_id: 0,
+    nodes: [],
+    links: [],
+    groups: [],
+    config: {},
+    extra: { ds: { scale: 1, offset: [0, 0] } },
+    version: 0.4,
+  };
+}
+
+/** Load the room's graph (host draft / committed HEAD) into the canvas. */
 async function hydrate(roomId: string): Promise<void> {
   workspace.reset();
   execStatus.reset();
   if (!roomId) {
-    await applyGraph(buildDemoWorkflow());
+    await applyGraph(emptyWorkflow());
     return;
   }
   // Ensure the role is fresh before choosing draft (host) vs HEAD (viewer).
   await roomRole.refresh();
   const graph = await workspace.hydrate();
-  if (graph) {
-    await applyGraph(graph);
-    return;
-  }
-  // Empty room: show the demo locally; only the host seeds it as revision 1.
-  const demo = buildDemoWorkflow();
-  await applyGraph(demo);
-  if (roomRole.isHost.value) await workflowStore.save(roomId, demo).catch(() => {});
+  // Phase-5 D11: a fresh room opens on an EMPTY canvas — no demo seed, no host
+  // revision 1. The empty-canvas overlay points the user at the Add-node cascade.
+  // Existing rooms keep their persisted graph unchanged.
+  await applyGraph(graph ?? emptyWorkflow());
 }
 
 bridge.onReady(() => {
@@ -315,6 +336,42 @@ function statusLabel(status: NodeRunStatus): string {
   }
 }
 
+/**
+ * Run the CURRENT canvas graph over Leg B (Phase-5 P5-M3 acceptance: drop, wire,
+ * run, badges paint). The live {@link WorkflowGraph} is flattened to a
+ * {@link PromptGraph} (`workflowToPrompt`) and POSTed to `/comfy/api/prompt` with
+ * the active `room_id`, so the gateway can echo executed artifacts (D8) and post
+ * the D15 "no such model" notice into the room for an unbacked generator. The
+ * shared Leg B `/ws` lifecycle frames paint the node badges via `execStatus`.
+ */
+async function runCurrentGraph() {
+  if (runningDemo.value) return;
+  const graph = currentGraph.value;
+  if (graph === null || graph.nodes.length === 0) {
+    ElMessage.warning(translate("画布为空，请先添加节点"));
+    return;
+  }
+  runningDemo.value = true;
+  paintedCount.value = 0;
+  execStatus.reset();
+  try {
+    const body: Record<string, unknown> = { prompt: workflowToPrompt(graph) };
+    const roomId = activeRoomId.value;
+    if (roomId) body["room_id"] = roomId;
+    const resp = await fetch("/comfy/api/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    ElMessage.success(translate("已提交工作流，观察节点状态徽章"));
+  } catch {
+    ElMessage.error(translate("工作流提交失败"));
+  } finally {
+    runningDemo.value = false;
+  }
+}
+
 async function runDemoLifecycle() {
   if (runningDemo.value) return;
   runningDemo.value = true;
@@ -339,20 +396,109 @@ function reloadDemo() {
   void applyGraph(buildDemoWorkflow());
 }
 
+/** Drop position for a palette/template insert (cascades so repeats don't stack). */
+function nextDropPos(): [number, number] {
+  const count = bridge.flow.getNodes.value.length;
+  const offset = (count % 8) * 48;
+  return [120 + offset, 180 + offset];
+}
+
 /**
- * Add a movie-step node to the canvas from the palette (host-only). Routes
- * through the bridge's `node.add` command so the change is applied to the shared
- * Vue Flow store, coalesced into a `graphChanged`, and host-autosaved like any
- * other manual edit. Nodes cascade slightly so repeats do not stack exactly.
+ * Add a node to the canvas from the palette (host-only). Routes through the
+ * bridge's `node.add` command so the change is applied to the shared Vue Flow
+ * store, coalesced into a `graphChanged`, and host-autosaved like any other
+ * manual edit. Works for both functional primitives and legacy movie steps.
  */
 function addMovieNode(classType: string) {
   if (!canvasReady.value || !roomRole.isHost.value) return;
-  const count = bridge.flow.getNodes.value.length;
-  const offset = (count % 8) * 48;
-  const pos: [number, number] = [120 + offset, 180 + offset];
-  void bridge.request("node.add", { nodeType: classType, pos }).catch(() => {
+  void bridge.request("node.add", { nodeType: classType, pos: nextDropPos() }).catch(() => {
     ElMessage.error(translate("添加节点失败"));
   });
+}
+
+/**
+ * Handle a cascade leaf pick (D12): a class type drops one node; a template id
+ * expands the pre-wired functional subgraph at the drop point (D6). The server
+ * never sees templates — expansion rides the same bridge `node.add`/`edge.add`
+ * commands as a manual edit.
+ */
+async function onCascadeSelect(selection: CascadeSelection) {
+  if (!canvasReady.value || !roomRole.isHost.value) return;
+  if (selection.classType !== undefined) {
+    addMovieNode(selection.classType);
+    return;
+  }
+  if (selection.templateId === undefined) return;
+  const template = templateById(selection.templateId);
+  if (template === undefined) return;
+  try {
+    const result = await expandTemplate(bridge, template, nextDropPos());
+    ElMessage.success(`${translate("已展开模板")} ${template.displayName}（${result.nodeIds.length} ${translate("节点")}）`);
+  } catch {
+    ElMessage.error(translate("展开模板失败"));
+  }
+}
+
+/** Pick from the cascade popover: close it, then drop/expand. */
+function onCascadePicked(selection: CascadeSelection) {
+  addNodeVisible.value = false;
+  void onCascadeSelect(selection);
+}
+
+// ── Phase-5 D13: group boxes. The 分组节点 tool arms ONE rectangle draw; the
+//    canvas reports the finished box, which the bridge stores and serializes into
+//    `WorkflowGraph.groups` so it survives a room reload. Clicking a group's title
+//    chip opens a rename/recolor popover anchored at the click. ──
+function armGroup() {
+  if (!canvasReady.value || !roomRole.isHost.value) return;
+  handArmed.value = false;
+  groupArmed.value = true;
+}
+
+function onGroupDraw(bounding: WorkflowGroup["bounding"]) {
+  bridge.addGroup({ title: translate("新分组"), bounding, color: DEFAULT_GROUP_COLOR, collapsed: false });
+  groupArmed.value = false;
+}
+
+const groupPopover = ref<{ index: number; x: number; y: number } | null>(null);
+const groupTitleDraft = ref("");
+
+function onGroupClick(payload: { index: number; x: number; y: number }) {
+  if (!roomRole.isHost.value) return;
+  groupTitleDraft.value = bridge.groups.value[payload.index]?.title ?? "";
+  groupPopover.value = payload;
+}
+
+function commitGroupTitle() {
+  if (groupPopover.value === null) return;
+  bridge.updateGroup(groupPopover.value.index, { title: groupTitleDraft.value.trim() || translate("新分组") });
+}
+
+function recolorGroup(color: string) {
+  if (groupPopover.value === null) return;
+  bridge.updateGroup(groupPopover.value.index, { color });
+}
+
+function deleteGroup() {
+  if (groupPopover.value === null) return;
+  bridge.removeGroup(groupPopover.value.index);
+  groupPopover.value = null;
+}
+
+function closeGroupPopover() {
+  commitGroupTitle();
+  groupPopover.value = null;
+}
+
+// ── Phase-5 D14: 移动画布 arms hand mode for ONE pan gesture; the canvas reports
+//    the finished gesture (`hand-done`) and we disarm, so it is not a sticky toggle. ──
+function armHand() {
+  if (!canvasReady.value) return;
+  groupArmed.value = false;
+  handArmed.value = true;
+}
+function onHandDone() {
+  handArmed.value = false;
 }
 
 // ── P3-M5：主机治理（撤销/重做/提交/移交 + 版本历史）与成员只读交互。
@@ -560,7 +706,14 @@ onScopeDispose(() => { onResizeUp(); });
     <template v-else>
       <!-- 网格 1/1：画布单元（Vue Flow 画布 + 检视器浮层 + 版本历史浮层）。 -->
       <div class="canvasPanel">
-        <VueFlowCanvas :hand-mode="selectedTool === 'hand'" @create="addMovieNode" />
+        <VueFlowCanvas
+          :hand-mode="handArmed"
+          :group-mode="groupArmed"
+          :groups="bridge.groups.value"
+          @create="addMovieNode"
+          @group-draw="onGroupDraw"
+          @group-click="onGroupClick"
+          @hand-done="onHandDone" />
         <!-- M6 产物检视器：选中节点时展示其步骤、产物类型、实时状态与最近输出。 -->
         <aside v-if="selectedNode !== null" class="inspector">
           <div class="inspectorHead">
@@ -572,7 +725,8 @@ onScopeDispose(() => { onResizeUp(); });
           <dl class="inspectorList">
             <div class="row">
               <dt>{{ translate("步骤") }}</dt>
-              <dd>{{ selectedSchema ? `${selectedSchema.step} / 6` : "—" }}</dd>
+              <dd v-if="selectedSchema?.step !== undefined">{{ selectedSchema.step }} / 6</dd>
+              <dd v-else>{{ selectedSchema?.family ?? "—" }}</dd>
             </div>
             <div class="row">
               <dt>{{ translate("类型") }}</dt>
@@ -594,7 +748,7 @@ onScopeDispose(() => { onResizeUp(); });
           <p v-if="selectedSchema?.description" class="inspectorDesc">{{ selectedSchema.description }}</p>
           <div class="outputBlock">
             <div class="outputLabel">{{ translate("最近产物输出") }}</div>
-            <pre class="outputPre">{{ outputSummary || translate("尚无输出，运行演示生命周期后查看") }}</pre>
+            <pre class="outputPre">{{ outputSummary || translate("尚无输出，运行工作流后查看") }}</pre>
           </div>
           <div v-if="selectedMovieStep?.artifact" class="outputBlock">
             <div class="outputLabel">
@@ -699,37 +853,47 @@ onScopeDispose(() => { onResizeUp(); });
 
         <el-card class="toolMenu" shadow="never" :body-style="{ padding: '4px' }">
           <div class="barRow" role="toolbar" aria-label="画布工具">
+            <el-tooltip content="运行工作流" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton runButton"
+                :disabled="!canvasReady || !roomRole.isHost.value || runningDemo || (currentGraph?.nodes.length ?? 0) === 0"
+                aria-label="运行工作流"
+                @click="runCurrentGraph">
+                <IconPlayerPlay :size="18" aria-hidden="true" />
+                <span class="barLabel">{{ runningDemo ? translate("运行中…") : translate("运行") }}</span>
+              </button>
+            </el-tooltip>
             <el-tooltip content="添加节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
-              <span class="dropTrigger">
-                <el-dropdown trigger="click" :disabled="!canvasReady || !roomRole.isHost.value" @command="addMovieNode">
-                  <button
-                    type="button"
-                    class="barButton iconOnly"
-                    :disabled="!canvasReady || !roomRole.isHost.value"
-                    aria-label="添加节点"
-                    aria-haspopup="menu">
-                    <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasAdd}&quot;)` }" aria-hidden="true" />
-                  </button>
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item
-                        v-for="node in MOVIE_NODES"
-                        :key="node.classType"
-                        :command="node.classType">
-                        {{ node.step }} · {{ node.displayName }}
-                      </el-dropdown-item>
-                    </el-dropdown-menu>
+              <span class="popTrigger">
+                <el-popover
+                  v-model:visible="addNodeVisible"
+                  trigger="click"
+                  placement="top-start"
+                  :width="380"
+                  :disabled="!canvasReady || !roomRole.isHost.value">
+                  <template #reference>
+                    <button
+                      type="button"
+                      class="barButton iconOnly"
+                      :disabled="!canvasReady || !roomRole.isHost.value"
+                      aria-label="添加节点"
+                      aria-haspopup="menu">
+                      <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasAdd}&quot;)` }" aria-hidden="true" />
+                    </button>
                   </template>
-                </el-dropdown>
+                  <NodeCascade @select="onCascadePicked" />
+                </el-popover>
               </span>
             </el-tooltip>
             <el-tooltip content="分组节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton iconOnly"
-                :aria-pressed="selectedTool === 'move'"
+                :aria-pressed="groupArmed"
+                :disabled="!canvasReady || !roomRole.isHost.value"
                 aria-label="分组节点"
-                @click="selectedTool = 'move'">
+                @click="armGroup">
                 <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasGrouping}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
@@ -752,7 +916,7 @@ onScopeDispose(() => { onResizeUp(); });
                             searchVisible = false;
                             addMovieNode(node.classType);
                           ">
-                          {{ node.step }} · {{ node.displayName }}
+                          {{ node.displayName }}
                         </button>
                       </li>
                       <li v-if="filteredNodes.length === 0" class="searchEmpty">无匹配节点</li>
@@ -777,9 +941,10 @@ onScopeDispose(() => { onResizeUp(); });
               <button
                 type="button"
                 class="barButton iconOnly"
-                :aria-pressed="selectedTool === 'hand'"
+                :aria-pressed="handArmed"
+                :disabled="!canvasReady"
                 aria-label="移动画布"
-                @click="selectedTool = selectedTool === 'hand' ? 'move' : 'hand'">
+                @click="armHand">
                 <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasMove}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
@@ -872,6 +1037,39 @@ onScopeDispose(() => { onResizeUp(); });
       <img v-else-if="viewerKind === 'image'" :src="viewerUrl" class="viewerMedia" :alt="viewerName" />
       <pre v-else class="viewerText">{{ viewerText }}</pre>
     </el-dialog>
+
+    <!-- Phase-5 D13: group rename/recolor popover, anchored at the title-chip click. -->
+    <teleport to="body">
+      <div
+        v-if="groupPopover"
+        class="groupEdit"
+        :style="{ left: `${groupPopover.x}px`, top: `${groupPopover.y}px` }"
+        @click.stop>
+        <div class="groupEditHead">
+          <span>{{ translate("编辑分组") }}</span>
+          <button type="button" class="groupEditClose" aria-label="关闭" @click="closeGroupPopover">×</button>
+        </div>
+        <input
+          v-model="groupTitleDraft"
+          class="groupEditTitle"
+          type="text"
+          :placeholder="translate('分组名称')"
+          @change="commitGroupTitle" />
+        <div class="groupSwatches">
+          <button
+            v-for="key in GROUP_COLOR_KEYS"
+            :key="key"
+            type="button"
+            class="groupSwatch"
+            :style="{ background: groupColor(key) }"
+            :aria-label="`color-${key}`"
+            @click="recolorGroup(key)" />
+        </div>
+        <div class="groupEditActions">
+          <el-button size="small" type="danger" text @click="deleteGroup">{{ translate("删除分组") }}</el-button>
+        </div>
+      </div>
+    </teleport>
   </div>
 </template>
 
@@ -896,6 +1094,75 @@ onScopeDispose(() => { onResizeUp(); });
   align-items: center;
   justify-content: center;
   min-height: 0;
+}
+
+// Phase-5 D13: the floating group rename/recolor popover (teleported to body,
+// anchored at the title-chip click point).
+.groupEdit {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 220px;
+  padding: 10px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 10px;
+  background: var(--el-bg-color-overlay);
+  box-shadow: var(--el-box-shadow-light);
+  transform: translate(-50%, 8px);
+}
+
+.groupEditHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.groupEditClose {
+  border: 0;
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.groupEditTitle {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--el-border-radius-small, 4px);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.groupSwatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.groupSwatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--el-border-color);
+  border-radius: 50%;
+  cursor: pointer;
+
+  &:hover { outline: 2px solid var(--el-color-primary); outline-offset: 1px; }
+}
+
+.groupEditActions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 // vidsay：画布/工具叠加单元（网格 1/1）。
@@ -981,6 +1248,15 @@ onScopeDispose(() => { onResizeUp(); });
     &:disabled { opacity: 0.45; cursor: not-allowed; }
 
     &.iconOnly { width: 32px; padding: 0; }
+
+    // Phase-5 P5-M3: the run action is the primary toolbar verb, so it carries a
+    // persistent primary-color accent (not just the aria-pressed state).
+    &.runButton {
+      border-color: var(--el-color-primary);
+      color: var(--el-color-primary);
+
+      &:hover:not(:disabled) { background: var(--el-color-primary-light-9); color: var(--el-color-primary); }
+    }
 
     &[aria-pressed="true"] {
       border-color: var(--el-color-primary);

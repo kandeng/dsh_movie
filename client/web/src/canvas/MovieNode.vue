@@ -15,9 +15,9 @@ import { computed } from "vue";
 import { Handle, Position, useVueFlow, type NodeProps } from "@vue-flow/core";
 import {
   IconCircleDashed, IconCircleDot, IconFileText, IconLayoutGrid, IconListDetails,
-  IconMovie, IconPhoto, IconVideo,
+  IconMovie, IconPhoto, IconVideo, IconVolume2,
 } from "@tabler/icons-vue";
-import { schemaFor, type MovieNodeData, type NodeWidgetView } from "@/canvas/graphMapper";
+import { schemaFor, slotColor, type MovieNodeData, type NodeWidgetView } from "@/canvas/graphMapper";
 
 const props = defineProps<NodeProps<MovieNodeData>>();
 const { updateNodeData, edges } = useVueFlow();
@@ -31,7 +31,7 @@ const outputs = computed(() => data.value.outputs ?? []);
 const widgets = computed(() => data.value.widgets ?? []);
 const status = computed(() => data.value.status ?? "idle");
 
-/** Per-class_type icon + accent hue (Toonflow-style typed node headers). */
+/** Per-class_type icon + accent hue for the six legacy movie steps. */
 const TYPE_SKIN: Record<string, { icon: typeof IconFileText; accent: string }> = {
   MovieScript: { icon: IconFileText, accent: "#409eff" },
   MovieShotPlan: { icon: IconListDetails, accent: "#36cfc9" },
@@ -40,9 +40,39 @@ const TYPE_SKIN: Record<string, { icon: typeof IconFileText; accent: string }> =
   MovieClip: { icon: IconVideo, accent: "#9254de" },
   MovieAssemble: { icon: IconMovie, accent: "#f759ab" },
 };
-const skin = computed(() => TYPE_SKIN[data.value.classType] ?? { icon: IconFileText, accent: "#409eff" });
+
+/** Functional-node icon by modality (Phase-5 D3). */
+const MODALITY_ICON: Record<string, typeof IconFileText> = {
+  text: IconFileText,
+  image: IconPhoto,
+  video: IconVideo,
+  audio: IconVolume2,
+};
+
+/** Functional-node accent hue by family (role). */
+const FAMILY_ACCENT: Record<string, string> = {
+  source: "#13c2c2",
+  generator: "#409eff",
+  reviewer: "#fa8c16",
+  combiner: "#722ed1",
+};
+
+const skin = computed(() => {
+  const legacy = TYPE_SKIN[data.value.classType];
+  if (legacy !== undefined) return legacy;
+  const family = schema.value?.family;
+  if (family !== undefined) {
+    return {
+      icon: MODALITY_ICON[schema.value?.modality ?? "text"] ?? IconFileText,
+      accent: FAMILY_ACCENT[family] ?? "#409eff",
+    };
+  }
+  return { icon: IconFileText, accent: "#409eff" };
+});
 const typeIcon = computed(() => skin.value.icon);
 const accent = computed(() => skin.value.accent);
+const family = computed(() => schema.value?.family);
+const modality = computed(() => schema.value?.modality);
 
 /** Handle ids that currently have an edge attached (dot vs dashed glyph). */
 const connectedHandles = computed(() => {
@@ -91,7 +121,10 @@ function asText(value: unknown): string {
       <component :is="typeIcon" class="titleIcon" :size="16" aria-hidden="true" />
       <span class="labelText" :title="title">{{ title }}</span>
       <span v-if="schema && schema.step !== undefined" class="nodeStep">{{ schema.step }}/6</span>
-      <span v-else-if="schema && schema.family" class="nodeStep">{{ schema.family }}</span>
+      <span v-else-if="family" class="familyBadge" :class="`fam-${family}`">{{ family }}</span>
+    </div>
+    <div v-if="modality" class="modalityRow">
+      <span class="modalityChip" :style="{ '--slot-color': slotColor((schema?.modality ?? 'text').toUpperCase()) }">{{ modality }}</span>
     </div>
 
     <div class="cardContainer">
@@ -145,13 +178,13 @@ function asText(value: unknown): string {
           <div v-if="inputs.length > 0" class="portList">
             <div v-for="(slot, i) in inputs" :key="`in-${i}`" class="portRow">
               <span class="portName">{{ slot.name || `in ${i}` }}</span>
-              <span class="portType">{{ slot.type }}</span>
+              <span class="portType" :style="{ color: slotColor(slot.type) }">{{ slot.type }}</span>
             </div>
           </div>
           <div v-if="outputs.length > 0" class="portList out">
             <div v-for="(slot, i) in outputs" :key="`out-${i}`" class="portRow">
               <span class="portName">{{ slot.name || `out ${i}` }}</span>
-              <span class="portType">{{ slot.type }}</span>
+              <span class="portType" :style="{ color: slotColor(slot.type) }">{{ slot.type }}</span>
             </div>
           </div>
 
@@ -164,7 +197,7 @@ function asText(value: unknown): string {
         v-for="(slot, i) in inputs" :key="`hin-${i}`"
         :id="`in-${i}`" type="target" :position="Position.Left"
         class="nodeHandle" :class="{ connected: connectedHandles.has(`in-${i}`) }"
-        :style="{ top: `${((i + 1) / (inputs.length + 1)) * 100}%` }"
+        :style="{ top: `${((i + 1) / (inputs.length + 1)) * 100}%`, color: slotColor(slot.type) }"
         :title="`${slot.name || `in ${i}`} · ${slot.type}`">
         <component :is="connectedHandles.has(`in-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>
@@ -172,7 +205,7 @@ function asText(value: unknown): string {
         v-for="(slot, i) in outputs" :key="`hout-${i}`"
         :id="`out-${i}`" type="source" :position="Position.Right"
         class="nodeHandle" :class="{ connected: connectedHandles.has(`out-${i}`) }"
-        :style="{ top: `${((i + 1) / (outputs.length + 1)) * 100}%` }"
+        :style="{ top: `${((i + 1) / (outputs.length + 1)) * 100}%`, color: slotColor(slot.type) }"
         :title="`${slot.name || `out ${i}`} · ${slot.type}`">
         <component :is="connectedHandles.has(`out-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>
@@ -217,6 +250,35 @@ function asText(value: unknown): string {
     color: var(--el-text-color-secondary);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+  }
+
+  .familyBadge {
+    flex-shrink: 0;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--node-accent);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 15px;
+    text-transform: capitalize;
+  }
+}
+
+.modalityRow {
+  display: flex;
+  padding: 0 4px 6px;
+
+  .modalityChip {
+    padding: 0 6px;
+    border: 1px solid var(--slot-color, var(--el-border-color));
+    border-radius: 4px;
+    color: var(--slot-color, var(--el-text-color-secondary));
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 }
 

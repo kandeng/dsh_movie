@@ -32,6 +32,7 @@ import type {
   BridgeCommandType,
   NodeRunStatus,
   WorkflowGraph,
+  WorkflowGroup,
 } from "@dsh-movie/protocol";
 import {
   inHandle,
@@ -61,6 +62,19 @@ export interface VueFlowBridge extends CanvasBridge {
   flowId: string;
   /** The current multi-user read-only lock state. */
   readonly: Ref<boolean>;
+  /**
+   * The live drawn group boxes (Phase-5 D13). Groups are aesthetic-only
+   * bookkeeping kept out of the Vue Flow node store, so the bridge owns them:
+   * they are hydrated from `graph.load`, mutated in place by the group tools,
+   * and serialized back into the exported {@link WorkflowGraph}.
+   */
+  groups: Ref<WorkflowGroup[]>;
+  /** Append a drawn group box (D13). */
+  addGroup: (group: WorkflowGroup) => void;
+  /** Patch the group at `index` (rename / recolor / collapse). */
+  updateGroup: (index: number, patch: Partial<WorkflowGroup>) => void;
+  /** Remove the group at `index`. */
+  removeGroup: (index: number) => void;
 }
 
 /** Options for {@link useVueFlowBridge}. */
@@ -147,6 +161,8 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
 
   const ready = ref(false);
   const readonly = ref(false);
+  /** Live drawn group boxes (D13), hydrated from each `graph.load`. */
+  const groups = ref<WorkflowGroup[]>([]);
 
   const readyHandlers: Array<() => void> = [];
   const selectHandlers: Array<(id: number | null) => void> = [];
@@ -178,6 +194,7 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
       flow.getEdges.value as MovieFlowEdge[],
       flow.viewport.value,
       baseGraph,
+      groups.value,
     );
     baseGraph = graph;
     return graph;
@@ -212,6 +229,37 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
     flow.setInteractive(!value);
   }
 
+  // ── Group boxes (D13): aesthetic-only, owned by the bridge, serialized on
+  //    export. Mutations replace the array so the overlay re-renders, then
+  //    coalesce into one debounced `graphChanged` (host autosave/commit). ──
+  function addGroup(group: WorkflowGroup): void {
+    groups.value = [...groups.value, { ...group, bounding: [...group.bounding] as [number, number, number, number] }];
+    scheduleGraphChanged();
+  }
+
+  function updateGroup(index: number, patch: Partial<WorkflowGroup>): void {
+    if (index < 0 || index >= groups.value.length) return;
+    const next = groups.value.slice();
+    const current = next[index];
+    next[index] = {
+      ...current,
+      ...patch,
+      bounding: (patch.bounding !== undefined
+        ? [...patch.bounding]
+        : [...current.bounding]) as [number, number, number, number],
+    };
+    groups.value = next;
+    scheduleGraphChanged();
+  }
+
+  function removeGroup(index: number): void {
+    if (index < 0 || index >= groups.value.length) return;
+    const next = groups.value.slice();
+    next.splice(index, 1);
+    groups.value = next;
+    scheduleGraphChanged();
+  }
+
   /** Paint a run-status badge onto a node (and echo `execPainted`). */
   function paintStatus(id: number, status: NodeRunStatus): void {
     // Status is view-only (never serialized back into the WorkflowGraph), so
@@ -234,6 +282,14 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
         const graph = (payload as BridgeCommandPayloads["graph.load"]).graph;
         const mapped = workflowToVueFlow(graph);
         baseGraph = graph;
+        // Hydrate the live group boxes (D13) from the loaded graph so drawn
+        // rectangles survive a room reload.
+        groups.value = (graph.groups ?? []).map((group): WorkflowGroup => ({
+          title: group.title,
+          bounding: [...group.bounding] as [number, number, number, number],
+          ...(group.color === undefined ? {} : { color: group.color }),
+          collapsed: group.collapsed === true,
+        }));
         suppressUntil = Date.now() + loadSuppressMs;
         flow.setNodes(mapped.nodes);
         flow.setEdges(mapped.edges);
@@ -310,6 +366,9 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
       }
       case "group.collapse": {
         const p = payload as BridgeCommandPayloads["group.collapse"];
+        for (const group of groups.value) {
+          if (group.title === p.title) group.collapsed = p.collapsed;
+        }
         if (baseGraph?.groups !== undefined) {
           for (const group of baseGraph.groups) {
             if (group.title === p.title) group.collapsed = p.collapsed;
@@ -417,6 +476,10 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
     flow,
     flowId,
     readonly,
+    groups,
+    addGroup,
+    updateGroup,
+    removeGroup,
     ready,
     iframeSrc: "",
     whenReady: (): Promise<void> => readyPromise,

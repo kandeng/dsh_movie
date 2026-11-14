@@ -24,9 +24,14 @@
 
 import type { Edge, Node, ViewportTransform } from "@vue-flow/core";
 import {
+  FUNCTIONAL_NODES,
   MOVIE_NODES,
+  SUBTYPE_OF,
   type MovieNodeSchema,
+  type PromptGraph,
+  type PromptGraphNode,
   type WorkflowGraph,
+  type WorkflowGroup,
   type WorkflowLinkTuple,
   type WorkflowNode,
   type WorkflowSlot,
@@ -93,10 +98,51 @@ export interface VueFlowGraph {
   viewport: ViewportTransform;
 }
 
-/** `class_type` -> schema lookup built from {@link MOVIE_NODES}. */
+/**
+ * `class_type` -> schema lookup built from BOTH catalogs: the six deprecated
+ * movie steps ({@link MOVIE_NODES}) and the Phase-5 functional primitives
+ * ({@link FUNCTIONAL_NODES}). The two catalogs have disjoint class types, so
+ * the merged map resolves legacy and functional nodes alike (D1/D3).
+ */
 const SCHEMA_BY_TYPE = new Map<string, MovieNodeSchema>(
-  MOVIE_NODES.map((node): [string, MovieNodeSchema] => [node.classType, node]),
+  [...MOVIE_NODES, ...FUNCTIONAL_NODES].map((node): [string, MovieNodeSchema] => [node.classType, node]),
 );
+
+/**
+ * Modality color table for slot handles / badges (Phase-5 §6). Keyed by the
+ * four base media types; a legacy subtype (SCRIPT, CLIP, …) resolves to its
+ * base color via {@link SUBTYPE_OF}, and the wildcard `*` gets a neutral hue.
+ */
+const BASE_SLOT_COLORS: Readonly<Record<string, string>> = {
+  TEXT: "#409eff",
+  IMAGE: "#52c41a",
+  VIDEO: "#9254de",
+  AUDIO: "#faad14",
+};
+/** Neutral color for the wildcard (`*`) and any unknown slot type. */
+const ANY_SLOT_COLOR = "#909399";
+
+/** Resolve a slot type to its base media type (SCRIPT -> TEXT, CLIP -> VIDEO). */
+export function baseSlotType(type: string): string {
+  let current = type;
+  let guard = 0;
+  while (SUBTYPE_OF[current] !== undefined && guard < 8) {
+    current = SUBTYPE_OF[current];
+    guard += 1;
+  }
+  return current;
+}
+
+/**
+ * The display color for a slot type: its base media type's hue, or a neutral
+ * color for the wildcard / unknown types.
+ * @param type - the slot type string, e.g. `TEXT`, `SCRIPT`, `*`.
+ * @returns a CSS color string.
+ */
+export function slotColor(type: string | undefined): string {
+  if (type === undefined || type === "" || type === "*") return ANY_SLOT_COLOR;
+  return BASE_SLOT_COLORS[baseSlotType(type)] ?? ANY_SLOT_COLOR;
+}
 
 /** Default node body size when a graph omits it. */
 const DEFAULT_SIZE: [number, number] = [230, 130];
@@ -210,6 +256,9 @@ export function workflowToVueFlow(graph: WorkflowGraph): VueFlowGraph {
  * @param edges - the Vue Flow edges.
  * @param viewport - the Vue Flow viewport.
  * @param base - the previously loaded graph, used to preserve groups/config/version.
+ * @param groups - the live drawn group boxes (D13). When provided they replace
+ *   `base.groups` so drawn/renamed/recolored rectangles persist on export; when
+ *   omitted the previously loaded groups are preserved unchanged.
  * @returns the ComfyUI-style workflow graph.
  */
 export function vueFlowToWorkflow(
@@ -217,6 +266,7 @@ export function vueFlowToWorkflow(
   edges: MovieFlowEdge[],
   viewport: ViewportTransform,
   base?: WorkflowGraph,
+  groups?: WorkflowGroup[],
 ): WorkflowGraph {
   let lastLinkId = base?.last_link_id ?? 0;
   const linkTuples: WorkflowLinkTuple[] = [];
@@ -295,7 +345,7 @@ export function vueFlowToWorkflow(
     last_link_id: lastLinkId,
     nodes: workflowNodes,
     links: linkTuples,
-    groups: base?.groups ?? [],
+    groups: groups ?? base?.groups ?? [],
     config: base?.config ?? {},
     extra: { ...(base?.extra ?? {}), ds: { scale: viewport.zoom, offset: [viewport.x, viewport.y] } },
     version: base?.version ?? 0.4,
@@ -315,4 +365,57 @@ export function nextNodeId(nodes: MovieFlowNode[], base?: WorkflowGraph): number
     if (Number.isFinite(id)) max = Math.max(max, id);
   }
   return max + 1;
+}
+
+/**
+ * Flatten an editor {@link WorkflowGraph} into an execution {@link PromptGraph}
+ * (Phase-5 P5-M3: the link/widget resolution the SDK's M1 skeleton defers to the
+ * canvas milestone). This is the client counterpart to the server verifier's
+ * hand-built join/fork prompts, so a wired canvas graph runs exactly as its
+ * equivalent fixture.
+ *
+ * Each node becomes a prompt entry keyed by `String(id)`. A linked input resolves
+ * to a `[sourceNodeId, sourceSlotIndex]` tuple named from the node's input-slot
+ * schema; widget values are zipped positionally with the type's widget schema.
+ * Unlinked optional inputs are omitted — the gateway validator reports any
+ * missing required link in its `node_errors` shape (D2), and the D15 availability
+ * gate handles an unbacked generator modality at run time.
+ * @param graph - the editor workflow graph (the live canvas snapshot).
+ * @returns the flattened prompt graph to `POST /comfy/api/prompt`.
+ */
+export function workflowToPrompt(graph: WorkflowGraph): PromptGraph {
+  // `${toNode}:in:${toSlot}` -> `[sourceNodeId, sourceSlotIndex]`.
+  const linkInputs = new Map<string, [string, number]>();
+  for (const tuple of graph.links ?? []) {
+    const [, fromNode, fromSlot, toNode, toSlot] = tuple as WorkflowLinkTuple;
+    linkInputs.set(`${toNode}:in:${toSlot}`, [String(fromNode), Number(fromSlot)]);
+  }
+
+  const prompt: PromptGraph = {};
+  for (const node of graph.nodes ?? []) {
+    const schema = schemaFor(node.type);
+    const inputs: Record<string, unknown> = {};
+
+    // Linked inputs, named from the input-slot schema (fall back to the
+    // serialized slot names for an unknown class type).
+    const inputDefs: readonly { name: string }[] =
+      schema?.inputs ?? (node.inputs ?? []).map((slot): { name: string } => ({ name: slot.name ?? "" }));
+    inputDefs.forEach((slot, index) => {
+      const link = linkInputs.get(`${node.id}:in:${index}`);
+      if (link !== undefined && slot.name !== "") inputs[slot.name] = link;
+    });
+
+    // Widget values zipped positionally with the widget schema (a widget is never
+    // a link target on the functional catalog, so the two input kinds stay distinct).
+    const values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+    (schema?.widgets ?? []).forEach((widget, index) => {
+      const fallback = widget.default ?? (widget.type === "COMBO" ? widget.options?.[0] ?? "" : "");
+      inputs[widget.name] = values[index] ?? fallback;
+    });
+
+    const spec: PromptGraphNode = { class_type: node.type, inputs };
+    if (node.title !== undefined) spec._meta = { title: node.title };
+    prompt[String(node.id)] = spec;
+  }
+  return prompt;
 }

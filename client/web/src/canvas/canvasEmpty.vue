@@ -2,18 +2,18 @@
   <div class="canvasEmpty">
     <div class="emptyHint">
       <IconClick :size="24" aria-hidden="true" />
-      <span>点击下方按钮创建节点</span>
+      <span>从下方快捷创建，或点击工具栏「添加节点」打开家族级联面板</span>
     </div>
     <div class="emptyActions">
       <button
-        v-for="item in MOVIE_NODES"
+        v-for="item in QUICK_CREATE"
         :key="item.classType"
         class="emptyAction"
         type="button"
         @pointerdown.stop
         @dblclick.stop
         @click.stop="emit('create', item.classType)">
-        <span class="actionIcon"><component :is="iconFor(item.classType)" :size="22" aria-hidden="true" /></span>
+        <span class="actionIcon"><component :is="iconFor(item.modality)" :size="22" aria-hidden="true" /></span>
         <span>{{ item.displayName }}</span>
       </button>
     </div>
@@ -22,25 +22,35 @@
 
 <script setup lang="ts">
 /**
- * 空画布引导层：移植自 vidsay `panels/canvas/components/canvasEmpty.vue`。
- * vidsay 列出图片/视频/音频生成三个快捷创建项；dsh_movie 改为六步影片节点，
- * 视觉规格（200px 圆角卡 + 40px 图标块）与 vidsay 完全一致。
+ * 空画布引导层（Phase-5 D11/D12）：移植自 vidsay `panels/canvas/components/canvasEmpty.vue`。
+ * 新房间现在打开于空画布（不再预置六步演示图），此层给出指向「添加节点」家族级联的
+ * 提示，并列出几个常用的功能节点（输入源 / 生成器）作为快捷创建。视觉规格
+ * （200px 圆角卡 + 40px 图标块）与 vidsay 完全一致。
  */
-import { IconClick, IconFileText, IconListDetails, IconPhoto, IconLayoutGrid, IconVideo, IconMovie, IconBox } from "@tabler/icons-vue";
-import { MOVIE_NODES } from "@dsh-movie/protocol";
+import { IconClick, IconFileText, IconPhoto, IconVideo, IconVolume2, IconBox } from "@tabler/icons-vue";
+import { FUNCTIONAL_NODES, type NodeModality } from "@dsh-movie/protocol";
 
 const emit = defineEmits<{ create: [classType: string] }>();
 
-const ICONS: Record<string, typeof IconBox> = {
-  MovieScript: IconFileText,
-  MovieShotPlan: IconListDetails,
-  MovieAsset: IconPhoto,
-  MovieStoryboard: IconLayoutGrid,
-  MovieClip: IconVideo,
-  MovieAssemble: IconMovie,
+/** The common functional primitives offered as empty-canvas quick-create. */
+const QUICK_CREATE_CLASS_TYPES = ["TextInput", "ImageInput", "TextGenerator", "ImageGenerator"];
+const QUICK_CREATE = QUICK_CREATE_CLASS_TYPES.map((classType) => {
+  const schema = FUNCTIONAL_NODES.find((node) => node.classType === classType);
+  return {
+    classType,
+    displayName: schema?.displayName ?? classType,
+    modality: (schema?.modality ?? "text") as NodeModality,
+  };
+});
+
+const MODALITY_ICON: Record<string, typeof IconBox> = {
+  text: IconFileText,
+  image: IconPhoto,
+  video: IconVideo,
+  audio: IconVolume2,
 };
-function iconFor(classType: string) {
-  return ICONS[classType] ?? IconBox;
+function iconFor(modality: string) {
+  return MODALITY_ICON[modality] ?? IconBox;
 }
 </script>
 
