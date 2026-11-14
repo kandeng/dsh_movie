@@ -342,7 +342,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
   },
   {
     classType: 'MediaConcat',
-    displayName: 'Media Concat',
+    displayName: 'Montage',
     description: 'Concatenate linked media of the same base type in slot order (clips into a reel, audio into a track).',
     category: 'movie/combiner',
     family: 'combiner',

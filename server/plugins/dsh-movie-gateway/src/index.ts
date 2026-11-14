@@ -217,6 +217,15 @@ export function apply(ctx: Context, config: Config): void {
         ...(llmText === undefined ? {} : { stepText: (classType: string, inputs: Record<string, unknown>): Promise<string> => llmText.text(classType, inputs) }),
         ...(llmText === undefined ? {} : { review: (classType: string, artifact: unknown, criteria: string): Promise<string> => llmText.review(classType, artifact, criteria) }),
         ...(matrixChat === undefined ? {} : { matrixChat }),
+        // P5-M4 D7: conversation → graph. The Bailian-backed text seam doubles as
+        // the cheap intent router (`mineIntent`); without it (no subagents/key) D7
+        // stays off and the chat relay is unaffected. `onRoomMessage` subscribes to
+        // the global `matrix/room-message` event matrix-chat emits for every inbound
+        // HUMAN utterance (the bot's own narration/echo/notice is filtered upstream,
+        // so a commit can never re-trigger itself).
+        ...(llmText === undefined ? {} : { intentMiner: llmText }),
+        onRoomMessage: (handler): (() => void) =>
+          ctx.on('matrix/room-message', (message): void => { handler(message) }),
         ...(ctx.jobs === undefined ? {} : { jobs: ctx.jobs }),
       })
       ctx.logger.info('[movie-gateway] Leg B/C gateway active on port %d', config.port)

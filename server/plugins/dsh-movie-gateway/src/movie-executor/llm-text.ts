@@ -104,6 +104,48 @@ function buildReviewPrompt(classType: string, artifact: unknown, criteria: strin
 }
 
 /**
+ * Compose the D7 intent-router prompt: a CHEAP classification turn that decides
+ * whether one room utterance asks to edit the canvas graph, and if so distills it
+ * into a single imperative intent the canvas planner can act on. Ordinary content
+ * discussion (story talk, feedback, questions) must classify as `NONE` so it never
+ * triggers ops (design doc D7/R5).
+ * @param utterance - the inbound human message body.
+ * @returns the router instruction prompt.
+ */
+function buildIntentRouterPrompt(utterance: string): string {
+  return [
+    'You are the dsh_movie canvas intent router.',
+    'Decide whether the user message asks to EDIT the movie canvas GRAPH.',
+    '',
+    'A graph edit means: add/remove a node, connect or reconnect nodes (edges),',
+    'change a node widget/parameter value, rename a node title, move a node,',
+    'or create/collapse a group box.',
+    'Ordinary content discussion (the story, creative feedback, questions, chat) is NOT a graph edit.',
+    '',
+    'Reply with EXACTLY one line and nothing else:',
+    '- if it is NOT a graph-edit request, reply: NONE',
+    '- if it IS a graph-edit request, reply with one concise imperative instruction',
+    '  describing the edit, e.g. "Add an ImageGenerator and connect the script node output to it".',
+    '',
+    'MESSAGE:',
+    utterance,
+  ].join('\n')
+}
+
+/**
+ * Parse the intent-router reply into a distilled intent, or `null` when the
+ * utterance was classified as ordinary content (`NONE`/empty).
+ * @param reply - the raw router model output.
+ * @returns the one-line intent, or `null` when no graph edit was requested.
+ */
+function parseIntentRouterReply(reply: string): string | null {
+  const firstLine = reply.split('\n').map((line): string => line.trim()).find((line): boolean => line !== '') ?? ''
+  if (firstLine === '') return null
+  if (firstLine.toUpperCase().startsWith('NONE')) return null
+  return firstLine
+}
+
+/**
  * Read the final assistant text produced since `firstSeq` on a session log.
  * Only the last `assistant/message` after the most recent `turn/start` counts.
  * @param session - the agent's durable session.
@@ -174,6 +216,26 @@ export class LlmTextAgent {
     return this.enqueue((): Promise<string> => this.runTurn(buildReviewPrompt(classType, artifact, criteria), `review:${classType}`))
   }
 
+  /**
+   * D7 intent router: decide whether one room utterance asks to edit the canvas
+   * graph, and if so distill it into a single imperative intent for the planner.
+   * Ordinary content discussion resolves to `null` (no ops). A model failure or
+   * an empty turn also resolves to `null` so mining never throws into the chat
+   * relay path.
+   * @param utterance - the inbound human message body.
+   * @returns the distilled graph-edit intent, or `null` when none was requested.
+   */
+  mineIntent(utterance: string): Promise<string | null> {
+    return this.enqueue(async (): Promise<string | null> => {
+      try {
+        const reply = await this.runTurn(buildIntentRouterPrompt(utterance), 'intent-router')
+        return parseIntentRouterReply(reply)
+      } catch {
+        return null
+      }
+    })
+  }
+
   /** Serialize one turn behind the prior turn so concurrent runs never interleave. */
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const previous = this.queue
@@ -182,20 +244,42 @@ export class LlmTextAgent {
     return run
   }
 
-  /** Get the shared executor agent, creating its session on first use. */
+  /** Get the shared executor agent, reusing/resuming/creating its stable session. */
   private async ensureAgent(): Promise<Agent> {
     if (this.agent !== undefined) return this.agent
+    const sessionId = executorSession()
     const selection = this.deps.agentDefaultModel.currentSelection()
     const agentOptions: AgentOptions = { ...selection }
     const setup = (agentCtx: Context): void => {
       installModelSelection(agentCtx)
     }
-    const { agent } = await this.deps.agents.create({
-      sessionId: executorSession(),
-      meta: { cwd: this.deps.cwd },
-      agentOptions,
-      setup,
-    })
+    // The executor session id is a STABLE constant, so the session outlives a
+    // plugin reload / host restart. Reuse a live agent when one is already
+    // registered under the id; otherwise create it; and when creation reports
+    // the session already exists (a persisted log survived), resume it. Without
+    // this the second and later lifecycles throw `session "…" already exists`
+    // and every text/review/intent turn fails.
+    const live = this.deps.agents.get(sessionId)
+    if (live !== undefined) {
+      this.agent = live
+      return live
+    }
+    let agent: Agent
+    try {
+      agent = (await this.deps.agents.create({
+        sessionId,
+        meta: { cwd: this.deps.cwd },
+        agentOptions,
+        setup,
+      })).agent
+    } catch (error) {
+      this.deps.logger.warn(
+        '[movie-executor] create on %s failed (%s); resuming the persisted session',
+        sessionId,
+        error instanceof Error ? error.message : String(error),
+      )
+      agent = (await this.deps.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })).agent
+    }
     await agent.whenIdle()
     this.agent = agent
     this.deps.logger.info('[movie-executor] shared text agent opened')

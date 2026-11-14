@@ -1,13 +1,20 @@
 /**
- * Movie pipeline + re-plan verifier (Phase-3 P3-M4, design doc §2/§5).
+ * Movie pipeline + re-plan verifier (Phase-3 P3-M4, Phase-5 P5-M4; design doc §2/§5).
  *
  * Two layers:
  *
  *  1. OFFLINE / deterministic (no network, no LLM): `initialPipelineStatus`
- *     derives the six pending steps from {@link MOVIE_NODES} in pipeline order.
+ *     derives the six pending steps from {@link MOVIE_NODES} in pipeline order;
+ *     and — new in Phase-5 P5-M4 — expanding the one-click `movie-pipeline`
+ *     template into a Leg B {@link PromptGraph} validates, topo-sorts, and
+ *     reproduces the legacy six-step artifact SEQUENCE (R4 drift guard: the
+ *     canvas path and the pre-Phase-5 director path agree on shape).
  *
  *  2. LIVE gateway (movie-profile host up: gateway 8788, identity 8787, Synapse
  *     8008) using brokered Matrix tokens like logged-in browsers:
+ *     - the expanded one-click `movie-pipeline` template is accepted on Leg B
+ *       `POST /prompt` (a `prompt_id` is issued), proving the expansion is
+ *       server-runnable (/health-gated; skipped with no gateway up);
  *     - `movie/run` + `movie/status` refuse a non-member `forbidden` (403), a
  *       missing token `missing-token` (400), an invalid token `invalid-token`
  *       (401), and bad params `bad-request` (400);
@@ -37,14 +44,27 @@ import {
   type MatrixEndpoint,
 } from '../plugins/dsh-matrix-identity/src/matrix-admin.ts'
 import {
+  FUNCTIONAL_NODES,
+  MOVIE_NODES,
+  MOVIE_PIPELINE_TEMPLATE,
   MOVIE_STEP_IDS,
+  SUBTYPE_OF,
   initialPipelineStatus,
   isCanvasScript,
   type CanvasOp,
+  type MovieNodeSchema,
   type MoviePipelineStatus,
   type MovieStepResult,
+  type NodeModality,
+  type PromptGraph,
   type StreamFrame,
+  type WorkflowTemplate,
 } from '../../protocol/src/index.ts'
+// Phase-5 P5-M4: the expanded-template parity leg reuses the Leg B validator +
+// topological sort (pure, side-effect-free) to prove the one-click
+// `movie-pipeline` expansion reproduces the legacy six-step artifact sequence.
+import { validatePromptGraph } from '../plugins/dsh-movie-gateway/src/movie-executor/validate.ts'
+import { topoSort } from '../plugins/dsh-movie-gateway/src/movie-executor/topo.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(here, '..')
@@ -219,6 +239,171 @@ function offlineChecks(): void {
   check('steps are numbered 1..6', status.steps.every((step, index): boolean => step.step === index + 1))
 }
 
+/**
+ * Every node schema (legacy steps + functional primitives) by `class_type`, so
+ * the parity leg can read a node's family/modality/slots without re-scanning.
+ */
+const SCHEMA_BY_TYPE: ReadonlyMap<string, MovieNodeSchema> = new Map(
+  [...MOVIE_NODES, ...FUNCTIONAL_NODES].map((node): [string, MovieNodeSchema] => [node.classType, node]),
+)
+
+/**
+ * Reduce an artifact slot type to its base media modality by walking the D2
+ * subtype table (SCRIPT → TEXT, ASSET → IMAGE, CLIP → VIDEO, …). The wildcard
+ * `*` has no base modality and maps to `null`.
+ */
+function baseModalityOfSlotType(slotType: string): NodeModality | null {
+  let current = slotType
+  while (SUBTYPE_OF[current] !== undefined) current = SUBTYPE_OF[current] as string
+  switch (current) {
+    case 'TEXT': return 'text'
+    case 'IMAGE': return 'image'
+    case 'VIDEO': return 'video'
+    case 'AUDIO': return 'audio'
+    default: return null
+  }
+}
+
+/**
+ * Expand a {@link WorkflowTemplate} into a flat Leg B {@link PromptGraph},
+ * mirroring the client's `expandTemplate.ts` + `workflowToPrompt`: template node
+ * order assigns ids "1".."N", widget defaults are seeded (then overridden by the
+ * template's `widgets`), and each template link becomes a `[sourceId, slot]`
+ * input keyed by the target slot's NAME. The leading text source is seeded with
+ * `sourceText` so a live run carries a real prompt.
+ */
+function expandTemplateToPrompt(template: WorkflowTemplate, sourceText: string): PromptGraph {
+  const idByKey = new Map<string, string>()
+  template.nodes.forEach((node, index): void => { idByKey.set(node.key, String(index + 1)) })
+  const graph: PromptGraph = {}
+  for (const node of template.nodes) {
+    const schema = SCHEMA_BY_TYPE.get(node.classType)
+    if (schema === undefined) throw new Error(`template references unknown class_type ${node.classType}`)
+    const id = idByKey.get(node.key) as string
+    const inputs: Record<string, unknown> = {}
+    for (const widget of schema.widgets) {
+      const override = node.widgets?.[widget.name]
+      if (override !== undefined) inputs[widget.name] = override
+      else if (widget.default !== undefined) inputs[widget.name] = widget.default
+      else if (widget.type === 'COMBO') inputs[widget.name] = widget.options?.[0] ?? ''
+      else inputs[widget.name] = ''
+    }
+    // Seed a text source's payload widget so the run has a real prompt.
+    if (schema.family === 'source' && schema.modality === 'text') inputs['text'] = sourceText
+    graph[id] = { class_type: node.classType, inputs }
+  }
+  for (const link of template.links) {
+    const fromId = idByKey.get(link.from) as string
+    const toId = idByKey.get(link.to) as string
+    const toSchema = SCHEMA_BY_TYPE.get(graph[toId]?.class_type as string) as MovieNodeSchema
+    const slot = toSchema.inputs[link.toSlot]
+    if (slot === undefined) throw new Error(`template link targets an out-of-range slot on ${toSchema.classType}`)
+    ;(graph[toId] as { inputs: Record<string, unknown> }).inputs[slot.name] = [fromId, link.fromSlot]
+  }
+  return graph
+}
+
+/**
+ * Phase-5 P5-M4 offline parity: expanding the one-click `movie-pipeline`
+ * template yields a graph that validates, topo-sorts, and reproduces the legacy
+ * six-step artifact SEQUENCE (same length, same per-position modality). This is
+ * the R4 drift guard — both paths source from the same functional catalog, so
+ * the canvas expansion and the pre-Phase-5 director pipeline agree on shape.
+ */
+function expandedPipelineParityChecks(): void {
+  process.stdout.write('\n— offline: expanded movie-pipeline template ↔ legacy six-step parity —\n')
+
+  const prompt = expandTemplateToPrompt(MOVIE_PIPELINE_TEMPLATE, 'a short film about a robot learning to paint')
+  const validation = validatePromptGraph(prompt)
+  check(
+    'the expanded movie-pipeline template validates as a PromptGraph',
+    validation.ok,
+    validation.ok ? `${Object.keys(prompt).length} nodes` : JSON.stringify(validation.nodeErrors),
+  )
+
+  const sorted = topoSort(prompt)
+  check('the expanded template topo-sorts (acyclic)', sorted.ok, sorted.ok ? sorted.order.join(' -> ') : `cycle: ${sorted.cycle.join(',')}`)
+  if (!sorted.ok) return
+
+  // Artifact-producing nodes: drop the leading source(s) and the terminal save.
+  const artifactIds = sorted.order.filter((id): boolean => {
+    const schema = SCHEMA_BY_TYPE.get(prompt[id]?.class_type as string) as MovieNodeSchema
+    return schema.family !== 'source' && schema.outputNode !== true
+  })
+  check(
+    'the expanded template yields six artifact-producing nodes',
+    artifactIds.length === 6,
+    `${artifactIds.length}: ${artifactIds.map((id): string => prompt[id]?.class_type as string).join(', ')}`,
+  )
+  if (artifactIds.length !== 6) return
+
+  // Positional parity: each expanded artifact node's modality equals the legacy
+  // step's output base modality at the same pipeline position.
+  const legacySteps = [...MOVIE_NODES].sort((a, b): number => (a.step ?? 0) - (b.step ?? 0))
+  const mismatches: string[] = []
+  artifactIds.forEach((id, index): void => {
+    const expanded = SCHEMA_BY_TYPE.get(prompt[id]?.class_type as string) as MovieNodeSchema
+    const legacy = legacySteps[index] as MovieNodeSchema
+    const legacyModality = baseModalityOfSlotType((legacy.outputs[0] as { type: string }).type)
+    if (expanded.modality !== legacyModality) {
+      mismatches.push(`#${index + 1} ${expanded.classType}(${expanded.modality ?? '?'}) vs ${legacy.classType}(${legacyModality ?? '?'})`)
+    }
+  })
+  check(
+    'the expanded artifact sequence matches the legacy six-step modality sequence',
+    mismatches.length === 0,
+    mismatches.length === 0
+      ? artifactIds.map((id): string => (SCHEMA_BY_TYPE.get(prompt[id]?.class_type as string) as MovieNodeSchema).displayName).join(' → ')
+      : mismatches.join('; '),
+  )
+
+  check(
+    'the legacy six-step order equals MOVIE_STEP_IDS',
+    legacySteps.map((node): string => node.classType).join(',') === MOVIE_STEP_IDS.join(','),
+    legacySteps.map((node): string => node.classType).join(' -> '),
+  )
+  const finalArtifact = SCHEMA_BY_TYPE.get(prompt[artifactIds[artifactIds.length - 1] as string]?.class_type as string) as MovieNodeSchema
+  check(
+    'the expanded template\'s final artifact is the Montage combiner (D10)',
+    finalArtifact.classType === 'MediaConcat',
+    finalArtifact.classType,
+  )
+}
+
+/**
+ * Phase-5 P5-M4 live parity: the gateway accepts the expanded one-click
+ * template on Leg B `POST /prompt` (validation passes on the real host and a
+ * `prompt_id` is issued), proving the expansion is server-runnable. Full media
+ * completion is bounded by D15 (image/audio have no backing model today) and is
+ * asserted in `verify-movie-executor.ts`; here we only prove the one-click graph
+ * is accepted end-to-end. Skipped when no gateway is reachable.
+ */
+async function expandedTemplatePromptChecks(): Promise<void> {
+  const gatewayUrl = process.env.GATEWAY_URL ?? 'http://127.0.0.1:8788'
+  let healthy = false
+  try {
+    const health = await fetch(`${gatewayUrl}/health`)
+    healthy = health.ok && ((await health.json()) as { ok?: boolean }).ok === true
+  } catch { healthy = false }
+  if (!healthy) {
+    note('live expanded-template POST /prompt acceptance', `gateway at ${gatewayUrl} not reachable`)
+    return
+  }
+  process.stdout.write('\n— live: expanded movie-pipeline template → POST /prompt —\n')
+  const prompt = expandTemplateToPrompt(MOVIE_PIPELINE_TEMPLATE, 'a short film about a robot learning to paint')
+  const resp = await fetch(`${gatewayUrl}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  })
+  const body = (await resp.json()) as { prompt_id?: string; error?: string; node_errors?: unknown }
+  check(
+    'POST /prompt accepts the expanded movie-pipeline template (one-click run)',
+    resp.status === 200 && typeof body.prompt_id === 'string',
+    body.prompt_id ?? `${body.error ?? ''} status ${resp.status}`,
+  )
+}
+
 /** Dev-only throwaway local accounts; not real secrets. */
 const HOST_LOCALPART = 'movie_pipe_host'
 const MEMBER_LOCALPART = 'movie_pipe_member'
@@ -227,6 +412,8 @@ const DEMO_PASSWORD = 'movie-pipe-pass'
 
 async function main(): Promise<void> {
   offlineChecks()
+  expandedPipelineParityChecks()
+  await expandedTemplatePromptChecks()
 
   const baseUrl = process.env.SYNAPSE_BASE_URL ?? 'http://127.0.0.1:8008'
   const serverName = process.env.SYNAPSE_SERVER_NAME ?? 'localhost'

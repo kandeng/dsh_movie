@@ -46,7 +46,22 @@
       <div class="messageList">
         <p v-if="!activeRoomId" class="emptyHint">{{ translate("还没有群聊，点右上角新建一个。") }}</p>
         <p v-else-if="!timeline.length" class="emptyHint">{{ translate("还没有消息，发送第一条开始讨论吧。") }}</p>
-        <div v-for="msg in timeline" :key="msg.id" class="messageRow" :class="{ mine: msg.mine, anchored: anchoredId === msg.id }" :data-event-id="msg.id" @contextmenu.prevent="openQuoteMenu($event, msg)">
+        <template v-for="msg in timeline" :key="msg.id">
+          <!-- Phase-5 D9: a committed op-script transaction narrates as ONE
+               collapsible system entry (never a chat bubble), so the timeline
+               shows convergence rather than per-op / per-keystroke mirroring. -->
+          <div v-if="narrationSummary(msg) !== null" class="txnRow" :class="{ anchored: anchoredId === msg.id }" :data-event-id="msg.id">
+            <button type="button" class="txnSummary" @click="toggleTxn(msg.id)">
+              <span class="txnChevron" aria-hidden="true">{{ expandedTxns.has(msg.id) ? "▾" : "▸" }}</span>
+              <span class="txnLabel">{{ translate("画布已更新") }}</span>
+              <span class="txnText">{{ narrationSummary(msg) }}</span>
+              <span class="txnTime">{{ formatTime(msg.ts) }}</span>
+            </button>
+            <ul v-if="expandedTxns.has(msg.id)" class="txnOps">
+              <li v-for="(op, i) in narrationOps(narrationSummary(msg) ?? '')" :key="i" class="txnOp">{{ op }}</li>
+            </ul>
+          </div>
+          <div v-else class="messageRow" :class="{ mine: msg.mine, anchored: anchoredId === msg.id }" :data-event-id="msg.id" @contextmenu.prevent="openQuoteMenu($event, msg)">
           <!-- ACT: 圆形头像置于气泡外侧（他人左/自己右）；无头像时用首字母占位圆。 -->
           <span v-if="!msg.mine" class="msgAvatar" :aria-label="msg.senderName">
             <img v-if="msg.senderAvatar" :src="msg.senderAvatar" :alt="msg.senderName" />
@@ -90,7 +105,8 @@
             <img v-if="msg.senderAvatar" :src="msg.senderAvatar" :alt="msg.senderName" />
             <span v-else class="initial">{{ msg.senderName.charAt(0) }}</span>
           </span>
-        </div>
+          </div>
+        </template>
       </div>
     </el-scrollbar>
 
@@ -232,6 +248,7 @@ import { useRoute } from "vue-router";
 import { ElMessage, type ScrollbarInstance } from "element-plus";
 import { IconBell, IconPlus, IconSend } from "@tabler/icons-vue";
 import { translate } from "@dsh-movie/i18n/vue";
+import { parseTxnNarration } from "@dsh-movie/protocol";
 // ACT: 工具按钮图标统一取自 src/icons（CSS mask + currentColor 着色，与全局外壳一致）。
 import iconUserGroup from "@/icons/user_group.svg";
 import iconFileUpload from "@/icons/file_upload.svg";
@@ -436,6 +453,28 @@ onBeforeUnmount(() => {
 
 function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+// ── Phase-5 D9：画布事务叙述。网关在每次「已提交」的 op-script 事务后，只发一条带
+//    TXN_NARRATION_PREFIX 哨兵的系统消息（如 `+ ImageGenerator #7; edge #3→#7`）。时间线识别该
+//    哨兵并渲染成一条可折叠的系统条目（绝非逐 op / 逐键镜像），展开后按 `;` 拆出每条操作。
+/** The D9 narration summary for a message, or `null` when it is an ordinary chat bubble. */
+function narrationSummary(msg: ChatMessage): string | null {
+  return msg.msgtype === "m.text" ? parseTxnNarration(msg.body) : null;
+}
+
+/** Split a narration summary into its individual op tokens (`;`-separated). */
+function narrationOps(summary: string): string[] {
+  return summary.split(";").map((op) => op.trim()).filter((op) => op !== "");
+}
+
+/** Narration entries the user has expanded (keyed by event id); collapsed by default. */
+const expandedTxns = ref<Set<string>>(new Set());
+function toggleTxn(id: string) {
+  const next = new Set(expandedTxns.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedTxns.value = next;
 }
 
 async function scrollToBottom() {
@@ -835,6 +874,80 @@ void props;
       outline: 2px solid var(--el-color-primary);
       outline-offset: 2px;
     }
+  }
+
+  // Phase-5 D9: a committed op-script transaction renders as ONE centered,
+  // collapsible system entry (not a chat bubble) — click to expand the op list.
+  .txnRow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+
+    &.anchored .txnSummary {
+      outline: 2px solid var(--el-color-primary);
+      outline-offset: 2px;
+    }
+  }
+
+  .txnSummary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 3px 10px;
+    border: 1px solid var(--el-border-color-lighter);
+    border-radius: 999px;
+    background: var(--el-fill-color-light);
+    color: var(--el-text-color-secondary);
+    font: inherit;
+    font-size: 11px;
+    line-height: 18px;
+    cursor: pointer;
+  }
+
+  .txnChevron {
+    flex-shrink: 0;
+    width: 10px;
+    color: var(--el-text-color-placeholder);
+  }
+
+  .txnLabel {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--el-text-color-regular);
+  }
+
+  .txnText {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-family: var(--el-font-family-mono, monospace);
+  }
+
+  .txnTime {
+    flex-shrink: 0;
+    color: var(--el-text-color-placeholder);
+  }
+
+  .txnOps {
+    margin: 0;
+    padding: 6px 12px;
+    max-width: 80%;
+    list-style: none;
+    border: 1px solid var(--el-border-color-lighter);
+    border-radius: var(--ui-radius, 8px);
+    background: var(--el-bg-color-overlay);
+  }
+
+  .txnOp {
+    padding: 2px 0;
+    color: var(--el-text-color-regular);
+    font-size: 11px;
+    font-family: var(--el-font-family-mono, monospace);
+
+    &:not(:last-child) { border-bottom: 1px dashed var(--el-border-color-lighter); }
   }
 
   .msgAvatar {

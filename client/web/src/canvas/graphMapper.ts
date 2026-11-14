@@ -81,6 +81,12 @@ export interface MovieNodeData {
   properties: Record<string, unknown>;
   /** Run status badge (a `NodeRunStatus` string). */
   status: string;
+  /**
+   * Reviewer verdict line (Phase-5 D5), view-only: painted from the Leg B
+   * `executed` output for `family === 'reviewer'` nodes and NEVER serialized
+   * back into the {@link WorkflowGraph} (mirrors the `status` badge contract).
+   */
+  verdict?: string;
 }
 
 /** A Vue Flow node carrying {@link MovieNodeData}. */

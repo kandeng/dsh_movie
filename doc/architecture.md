@@ -252,7 +252,7 @@ The browser persists a small amount of state in `localStorage`; this is a **pers
 
 ## 8. The movie pipeline: what the system actually produces
 
-The product domain is a **six-step movie production pipeline**. The six steps are node class types in a shared registry (`MOVIE_NODES`) that simultaneously feeds the ComfyUI `/object_info`, the graph validator, and the canvas node palette:
+The product domain is a **six-step movie production pipeline**. Historically the six steps were the *only* node class types, in a shared registry (`MOVIE_NODES`) that simultaneously feeds the ComfyUI `/object_info`, the graph validator, and the canvas node palette. **Phase-5 generalizes this into a two-layer palette** (§8.4): the six step class types are retained as **deprecated, still-executable aliases** (flagged `deprecated: true` in `/object_info`; removed in Phase 6) while a catalog of **15 functional primitives** (`FUNCTIONAL_NODES`, role × modality) becomes the forward path. Both catalogs feed the same `/object_info`, validator, and palette:
 
 1. **MovieScript** — the literary script (text).
 2. **MovieShotPlan** — the shot breakdown (text).
@@ -287,4 +287,28 @@ graph LR
     Results --> Agent
     Agent --> LegB[Leg B lifecycle -> node badges]
 ```
+
+### 8.4 The two-layer palette (Phase-5)
+
+The node registry now has **two layers** sharing one `class_type` namespace and one `/object_info` projection:
+
+- **Functional primitives** (`FUNCTIONAL_NODES`): 15 classes spanning 4 roles (`source`, `generator`, `reviewer`, `combiner`) × 4 modalities (`text`, `image`, `video`, `audio`), each carrying a `family` (role) and `modality`. The **typed media slot system** is the contract: slot types `TEXT|IMAGE|VIDEO|AUDIO` plus a subtype lattice (`SUBTYPE_OF`) and a wildcard `*`, with `slotCompatible(source, target)` governing legal connections (e.g. `TextInput`, `TextGenerator`, `TextReviewer`, `ImageGenerator`, `VideoGenerator`, `MediaConcat`, `SaveOutput`).
+- **Step macros** (`templates.ts`, D6): the six single-step `WorkflowTemplate`s (`step-script` … `step-montage`) plus `movie-pipeline` (their composition). A template is **pure client-side data** — local node keys, functional class types, canvas offsets, widget overrides, internal links — expanded **eagerly at drop** into ordinary graph nodes with fresh ids (`expandTemplate.ts`). The server never sees templates: the persisted `WorkflowGraph` and the submitted `PromptGraph` always contain expanded functional nodes, so validation/topo/runner/governance never learn templates exist. After the drop the inserted nodes are indistinguishable from hand-placed ones (rewire, edit, delete, branch freely).
+
+The final assembly step **displays as “Montage”** (D10) while its `class_type` stays the technical `MediaConcat` — names live in display/template data, never in `class_type`, so persisted graphs stay stable. Mental model: *families/classes are the alphabet, templates are pre-written sentences, the conversation (D7) is the editor that revises them.*
+
+### 8.5 Family dispatch (Phase-5 D4)
+
+Execution collapses the six bespoke step handlers into **one adapter per family**. The runner resolves `class_type → handler` through a **handler-registry** (D1) populated at plugin activation (`registerNodeHandlers(BUILTIN_NODE_HANDLERS)`), dispatching on `schema.family`:
+
+- **`source`** — pass-through: the widget payload (or a resolved upstream link) becomes the node's single typed output.
+- **`generator`** — `text` rides the LLM seam; `image|video|audio` first hit the **D15 availability gate** (an unbacked modality throws `ModelUnavailableError`, so `customer_service` posts the “no such model” notice instead of a silent placeholder), then the media seam (video rides Bailian).
+- **`reviewer`** (D5) — emits a **verdict** (output 0: `PASS`/`FAIL` + notes) and **forwards the reviewed artifact unchanged** (output 1). A reviewer **never throws**: a `FAIL` verdict is *data*, so the runner loop — which only aborts on a throw — continues into every unrelated branch. A fail shows the verdict and does **not** block siblings.
+- **`combiner`** — pure functions, no model call: `TextMerge` concatenates in slot order, `MediaConcat` (Montage) forwards slot-ordered references, `SaveOutput` passes the linked artifact through as the run output.
+
+The per-node lifecycle broadcast (`executing → progress → executed → execution_success`) is unchanged; the executor's per-run output table (`nodeId → slotIndex → artifact`) lets each adapter resolve upstream artifacts in topo order.
+
+### 8.6 Chat ⇄ graph convergence (Phase-5 D7/D9)
+
+Chat → graph now also travels **server-side** (D7): `customer_service` mines a room conversation for graph-edit intents (a cheap router LLM), invokes the canvas planner, and applies the resulting op-script to the **authoritative** `WorkflowGraph` (`apply-ops.ts`) — then commits, fans the new HEAD out to `workflow/watch` subscribers, and **narrates once** (D9). Graph → chat travels as **artifact echoes** (D8) plus **one batched, collapsible narration system message per committed txn** (e.g. `+ ImageGenerator #7; edge #3→#7`, sentinel-prefixed so the timeline renders it as a system entry, never a chat bubble). Per-keystroke or per-op mirroring is deliberately rejected: the conversation stays the audit log, the graph stays the executable projection of current intent (R4 drift guard: the chat path and the template path source from the same functional catalog, so they produce equivalent pipelines).
 

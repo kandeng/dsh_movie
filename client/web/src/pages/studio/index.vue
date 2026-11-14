@@ -99,6 +99,26 @@ watch(execStatus.statusById, (byId) => {
   for (const [id, status] of byId) bridge.setNodeStatus(id, status);
 });
 
+// Paint the reviewer verdict line (Phase-5 D5) from each node's executed output.
+// Only reviewer-family nodes render it (MovieNode.vue gates on `family`), so the
+// verdict is resolved against the live graph and passed through as view-only data.
+watch(execStatus.outputById, (byId) => {
+  const graph = currentGraph.value;
+  for (const [id, output] of byId) bridge.setNodeVerdict(id, reviewerVerdict(graph, id, output));
+});
+
+/**
+ * Extract a reviewer node's verdict string from its executed output (D5).
+ * A reviewer's artifact IS the verdict (`PASS …` / `FAIL …`); non-reviewer nodes
+ * and unresolved ids yield `undefined` so no verdict line is painted.
+ */
+function reviewerVerdict(graph: WorkflowGraph | null, id: number, output: unknown): string | undefined {
+  if (graph === null) return undefined;
+  if (nodeSchemaForId(graph, id)?.family !== "reviewer") return undefined;
+  const artifact = (output as { artifact?: unknown } | undefined)?.artifact;
+  return typeof artifact === "string" && artifact !== "" ? artifact : undefined;
+}
+
 // ── P3-M5：主机独占协作（design doc §4）。roomRole 解析 auth/role 并订阅唯一的
 //    workflow/watch mux（实时收敛 + 角色变更）；workspace 承载主机草稿自动保存
 //    （workspace/draft.put，防抖）、撤销/重做、提交、历史与回滚，并对非主机观众强制
@@ -141,7 +161,41 @@ async function hydrate(roomId: string): Promise<void> {
   // Phase-5 D11: a fresh room opens on an EMPTY canvas — no demo seed, no host
   // revision 1. The empty-canvas overlay points the user at the Add-node cascade.
   // Existing rooms keep their persisted graph unchanged.
-  await applyGraph(graph ?? emptyWorkflow());
+  const loaded = graph ?? emptyWorkflow();
+  await applyGraph(loaded);
+  // Phase-5 M5: announce (never block) a persisted graph that still references
+  // the six deprecated step class types (D1 — executable for one more phase).
+  notifyDeprecatedSteps(roomId, loaded);
+}
+
+/** The deprecated step class types still present in a persisted graph (Phase-5 M5). */
+function deprecatedStepsIn(graph: WorkflowGraph): string[] {
+  const found = new Set<string>();
+  for (const node of graph.nodes) {
+    if (findMovieNode(node.type)?.deprecated === true) found.add(node.type);
+  }
+  return [...found];
+}
+
+// Rooms already notified this session, so a load-time notice fires once per room
+// (repeated hydrate/room-switch calls do not re-spam the same warning).
+const deprecatedNotifiedRooms = ref<Set<string>>(new Set());
+
+/**
+ * Show the Phase-5 M5 load-time notice when a persisted graph still uses the
+ * deprecated step nodes. They remain executable this phase, so the notice is
+ * advisory only — the graph is loaded unchanged (no silent rewrite, D1/R1).
+ */
+function notifyDeprecatedSteps(roomId: string, graph: WorkflowGraph): void {
+  if (roomId === "" || deprecatedNotifiedRooms.value.has(roomId)) return;
+  const steps = deprecatedStepsIn(graph);
+  if (steps.length === 0) return;
+  deprecatedNotifiedRooms.value = new Set(deprecatedNotifiedRooms.value).add(roomId);
+  const names = steps.map((type) => findMovieNode(type)?.displayName ?? type).join("、");
+  ElMessage.warning({
+    message: `${translate("该房间画布仍在使用已弃用的步骤节点")}（${names}）：${translate("本阶段仍可执行，建议改用功能节点或模板重建")}。`,
+    duration: 6000,
+  });
 }
 
 bridge.onReady(() => {
@@ -317,6 +371,34 @@ const outputSummary = computed(() => {
   } catch {
     return String(output);
   }
+});
+
+/**
+ * The selected node's last executed output, parsed for the modality renderers
+ * (Phase-5 M4: text / image / video / audio player). A real media artifact is a
+ * URL (e.g. a Bailian `video_url`), so `isUrl` gates the `<img>/<video>/<audio>`
+ * elements; a canned placeholder falls back to the text view.
+ */
+const selectedOutput = computed<{ modality: string; artifact: string; media: string; isUrl: boolean } | undefined>(() => {
+  const id = selectedNode.value;
+  if (id === null) return undefined;
+  const raw = execStatus.outputOf(id);
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const record = raw as Record<string, unknown>;
+  const artifact = typeof record.artifact === "string" ? record.artifact : "";
+  const modality = typeof record.modality === "string"
+    ? record.modality
+    : (selectedSchema.value?.modality ?? "");
+  const media = typeof record.media === "string" ? record.media : "";
+  return { modality, artifact, media, isUrl: /^(https?:|data:|blob:)/i.test(artifact) };
+});
+
+/** True when the inspector should render a media element instead of raw text. */
+const outputMediaKind = computed<"image" | "video" | "audio" | "">(() => {
+  const output = selectedOutput.value;
+  if (output === undefined || !output.isUrl) return "";
+  if (output.modality === "image" || output.modality === "video" || output.modality === "audio") return output.modality;
+  return "";
 });
 
 function statusTagType(status: NodeRunStatus): "success" | "danger" | "warning" | "info" {
@@ -748,7 +830,25 @@ onScopeDispose(() => { onResizeUp(); });
           <p v-if="selectedSchema?.description" class="inspectorDesc">{{ selectedSchema.description }}</p>
           <div class="outputBlock">
             <div class="outputLabel">{{ translate("最近产物输出") }}</div>
-            <pre class="outputPre">{{ outputSummary || translate("尚无输出，运行工作流后查看") }}</pre>
+            <!-- Modality renderers (Phase-5 M4): a real media artifact is a URL, so
+                 image/video/audio render their native element (audio = a player);
+                 text and canned placeholders fall back to the raw text view. -->
+            <img
+              v-if="outputMediaKind === 'image'"
+              class="outputMedia"
+              :src="selectedOutput?.artifact"
+              :alt="translate('图像产物')" />
+            <video
+              v-else-if="outputMediaKind === 'video'"
+              class="outputMedia"
+              :src="selectedOutput?.artifact"
+              controls />
+            <audio
+              v-else-if="outputMediaKind === 'audio'"
+              class="outputAudio"
+              :src="selectedOutput?.artifact"
+              controls />
+            <pre v-else class="outputPre">{{ outputSummary || translate("尚无输出，运行工作流后查看") }}</pre>
           </div>
           <div v-if="selectedMovieStep?.artifact" class="outputBlock">
             <div class="outputLabel">
@@ -1644,6 +1744,20 @@ onScopeDispose(() => { onResizeUp(); });
   line-height: 1.5;
   background: var(--el-fill-color-light);
   border-radius: var(--ui-radius, 8px);
+}
+
+// Modality renderers (Phase-5 M4): image/video fill the inspector width; the
+// audio player spans full width so its transport controls are usable.
+.outputMedia {
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  background: var(--el-fill-color-light);
+  border-radius: var(--ui-radius, 8px);
+}
+
+.outputAudio {
+  width: 100%;
 }
 
 // vidsay：4px 命中区居中常显 1px 竖直分割线；悬停/拖拽亮主色。

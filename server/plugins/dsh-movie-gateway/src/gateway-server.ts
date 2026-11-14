@@ -51,7 +51,7 @@ import type {
   MatrixUserId,
   RoomRole,
 } from '@dsh-movie/protocol'
-import { IMPLEMENTED_METHODS, methodFromApiPath, initialPipelineStatus } from '@dsh-movie/protocol'
+import { IMPLEMENTED_METHODS, methodFromApiPath, initialPipelineStatus, parseTxnNarration } from '@dsh-movie/protocol'
 import type { MatrixIdentity, MatrixPrincipal } from 'dsh-matrix-identity/types'
 import {
   CANNED_ASSETS,
@@ -69,6 +69,7 @@ import { topoSort } from './movie-executor/topo.ts'
 import { startPromptJob, type StepTextGenerator } from './movie-executor/runner.ts'
 import { cannedMediaProvider, type MediaProvider } from './movie-executor/media-provider.ts'
 import { createRoomNotifier, type RoomPoster } from './movie-executor/room-notifier.ts'
+import { applyOpsToGraph } from './movie-executor/apply-ops.ts'
 import { availabilityFromInventory, type ModelAvailability } from './movie-executor/model-catalog.ts'
 import type { ReviewFn } from './movie-executor/llm-text.ts'
 import type { JobRegistry } from '@deepseek-ai/dsh-jobs'
@@ -159,7 +160,57 @@ export interface GatewayServerDeps {
    * unset (verifiers/tests) the store falls back to a throwaway temp dir.
    */
   workspaceRoot?: string | undefined
+  /**
+   * Optional D7 intent-mining seam. When present (with {@link GatewayServerDeps.canvasAgent}),
+   * each inbound human room utterance is classified/distilled into a graph-edit
+   * intent; ordinary content discussion resolves to `null` and triggers nothing.
+   * `LlmTextAgent.mineIntent` satisfies this structurally. Absent without a
+   * Bailian-backed text seam, so D7 degrades to off (chat relay is unaffected).
+   */
+  intentMiner?: IntentMiner | undefined
+  /**
+   * Optional subscription to inbound human room messages (D7). Returns an
+   * unsubscribe function; `ctx.on('matrix/room-message', …)` satisfies it. The
+   * gateway registers the miner only when this AND {@link GatewayServerDeps.intentMiner}
+   * AND {@link GatewayServerDeps.canvasAgent} are all present.
+   */
+  onRoomMessage?: RoomMessageSubscribe | undefined
 }
+
+/** The D7 intent-mining seam: classify + distill one room utterance. */
+export interface IntentMiner {
+  /**
+   * Decide whether an utterance asks to edit the canvas graph, and if so distill
+   * it into one imperative intent.
+   * @param utterance - the inbound human message body.
+   * @returns the distilled intent, or `null` when no graph edit was requested.
+   */
+  mineIntent(utterance: string): Promise<string | null>
+}
+
+/**
+ * The minimal inbound room-message shape the D7 miner consumes. Structurally
+ * compatible with `dsh-matrix-chat`'s `RoomMessage` so `ctx.on('matrix/room-message')`
+ * can feed it directly without the gateway importing the chat plugin's types.
+ */
+export interface RoomMessageLike {
+  /** Room the message arrived in. */
+  roomId: string
+  /** Sender's Matrix user id. */
+  senderId: string
+  /** Sender's resolved display name. */
+  senderName: string
+  /** The message body. */
+  body: string
+  /** The Matrix event id, or `null`. */
+  eventId: string | null
+}
+
+/**
+ * Subscribe to inbound human room messages; returns an unsubscribe function.
+ * `(handler) => ctx.on('matrix/room-message', handler)` satisfies this.
+ */
+export type RoomMessageSubscribe = (handler: (message: RoomMessageLike) => void) => () => void
 
 /** One live movie pipeline run (P3-M4): its evolving status and mux subscribers. */
 interface MovieRunRecord {
@@ -339,7 +390,7 @@ const MAX_REPLANS = 2
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage } = deps
   const execClients = new Set<WebSocket>()
   // D15/D8: the `customer_service` room notifier (posts the unavailable-model
   // notice and echoes executed artifacts) and the model-availability gate. Both
@@ -399,6 +450,77 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
   }
   let queueCounter = 0
   let listening = false
+
+  // ── Phase-5 D7: conversation → graph ──
+  // Mine each inbound human room utterance for a graph-edit intent; when one
+  // qualifies, run the canvas planner, apply its op-script to the committed HEAD
+  // graph, commit, fan the new HEAD out to watchers, and narrate once (D9). The
+  // bot's own messages (narration/echo/notice) never reach here — matrix-chat
+  // filters them before emitting `matrix/room-message` — and we double-guard on
+  // the narration sentinel so a commit can never re-trigger itself. Agent ops and
+  // user ops thus share ONE txn/commit/fanout/undo pipeline (design doc D7/D9).
+  /** Per-room serialization so concurrent utterances never interleave commits. */
+  const d7Queues = new Map<string, Promise<void>>()
+
+  /** Run one D7 mine → plan → apply → commit → narrate pass for a room. */
+  async function runD7ForRoom(message: RoomMessageLike): Promise<void> {
+    if (canvasAgent === undefined || intentMiner === undefined) return
+    const body = message.body.trim()
+    // Never mine our own narration (defensive; the bot is already filtered out).
+    if (body === '' || parseTxnNarration(body) !== null) return
+    const intent = await intentMiner.mineIntent(body)
+    if (intent === null) return
+    const roomId = message.roomId
+    // Snapshot HEAD right before the (slow) planner turn so the ops are generated
+    // against the graph we will apply to and commit over; a concurrent commit then
+    // surfaces as a baseRev conflict and is dropped rather than clobbered (R5).
+    const head = workflowStore.getHead(roomId)
+    const baseGraph: WorkflowGraph = head?.graph
+      ?? { last_node_id: 0, last_link_id: 0, nodes: [], links: [], groups: [], version: 0.4 }
+    const baseRev = head?.rev
+    const plan = await canvasAgent.generate(roomId, intent, head?.graph ?? null)
+    if (!plan.ok) {
+      logger.warn('[movie-gateway] D7 plan rejected room=%s: %s (%s)', roomId, plan.message, plan.code)
+      return
+    }
+    const outcome = applyOpsToGraph(baseGraph, plan.script.ops)
+    if (!outcome.committed) {
+      const failed = outcome.results.find((entry): boolean => !entry.ok)
+      logger.warn('[movie-gateway] D7 txn rolled back room=%s at op[%d]: %s', roomId, failed?.index ?? -1, failed?.error ?? 'unknown')
+      return
+    }
+    const author: MatrixUserId = message.senderId
+    const commit = workflowStore.putGraph(roomId, outcome.graph, author, baseRev, `D7: ${intent}`)
+    if (!commit.ok) {
+      logger.warn('[movie-gateway] D7 commit conflict room=%s (head rev %d)', roomId, commit.current.rev)
+      return
+    }
+    broadcastWatch(roomId, { stage: 'committed', workflow: commit.record, by: author })
+    await notifier.narrateTxn(roomId, outcome.summary)
+    logger.info('[movie-gateway] D7 applied room=%s ops=%d intent="%s"', roomId, plan.script.ops.length, intent)
+  }
+
+  /** Enqueue one D7 pass behind the room's prior pass (never interleave). */
+  function handleRoomMessage(message: RoomMessageLike): void {
+    if (canvasAgent === undefined || intentMiner === undefined || onRoomMessage === undefined) return
+    const roomId = message.roomId
+    const prior = d7Queues.get(roomId) ?? Promise.resolve()
+    const next = prior.then(
+      (): Promise<void> => runD7ForRoom(message),
+      (): Promise<void> => runD7ForRoom(message),
+    )
+    d7Queues.set(roomId, next.then((): void => undefined, (): void => undefined))
+    void next.catch((error: unknown): void => {
+      logger.warn('[movie-gateway] D7 handler failed room=%s: %s', roomId, String(error))
+    })
+  }
+
+  // Register the D7 listener only when the full seam is wired (planner + miner +
+  // event source); the unsubscribe runs in `stop()` so a host reload never leaks.
+  const unsubscribeRoomMessages =
+    canvasAgent !== undefined && intentMiner !== undefined && onRoomMessage !== undefined
+      ? onRoomMessage(handleRoomMessage)
+      : undefined
 
   /** Send one lifecycle message to a socket when it is open. */
   function sendExec(socket: WebSocket, message: ExecMessage): void {
@@ -1498,6 +1620,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       return info
     },
     async stop(): Promise<void> {
+      unsubscribeRoomMessages?.()
       for (const client of execWs.clients) client.terminate()
       for (const client of muxWs.clients) client.terminate()
       execClients.clear()

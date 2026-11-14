@@ -74,6 +74,22 @@ const accent = computed(() => skin.value.accent);
 const family = computed(() => schema.value?.family);
 const modality = computed(() => schema.value?.modality);
 
+/**
+ * Reviewer verdict line (Phase-5 D5). The Leg B `executed` output for a
+ * reviewer carries the verdict as its artifact; the Studio paints it onto the
+ * node data (view-only). PASS/FAIL is inferred from the text so the line can be
+ * colored — a FAIL verdict is DATA, never a thrown error, so the node still
+ * shows `success` while the verdict line reads FAIL.
+ */
+const verdict = computed(() => data.value.verdict ?? "");
+const verdictState = computed<"pass" | "fail" | "">(() => {
+  const text = verdict.value.toUpperCase();
+  if (text === "") return "";
+  if (text.includes("FAIL")) return "fail";
+  if (text.includes("PASS")) return "pass";
+  return "";
+});
+
 /** Handle ids that currently have an edge attached (dot vs dashed glyph). */
 const connectedHandles = computed(() => {
   const set = new Set<string>();
@@ -133,6 +149,13 @@ function asText(value: unknown): string {
           <div class="statusRow">
             <span class="statusDot" :class="`dot-${status}`" />
             <span class="statusText">{{ status }}</span>
+          </div>
+
+          <!-- Reviewer verdict line (D5): rendered only for reviewer nodes once
+               the executed output has been painted onto the node data. -->
+          <div v-if="family === 'reviewer' && verdict" class="verdictRow" :class="`verdict-${verdictState}`">
+            <span class="verdictBadge">{{ verdictState === "fail" ? "FAIL" : verdictState === "pass" ? "PASS" : "VERDICT" }}</span>
+            <span class="verdictText" :title="verdict">{{ verdict }}</span>
           </div>
 
           <div v-if="widgets.length > 0" class="widgets">
@@ -352,6 +375,48 @@ function asText(value: unknown): string {
   color: var(--el-text-color-secondary);
   font-size: 11px;
   text-transform: capitalize;
+}
+
+.verdictRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--el-border-color-light);
+  border-left: 3px solid var(--el-text-color-placeholder);
+  border-radius: var(--el-border-radius-small, 4px);
+  background: var(--el-fill-color-light);
+
+  &.verdict-pass { border-left-color: var(--el-color-success); }
+  &.verdict-fail { border-left-color: var(--el-color-danger); }
+}
+
+.verdictBadge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--el-text-color-placeholder);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  letter-spacing: 0.04em;
+
+  .verdict-pass & { background: var(--el-color-success); }
+  .verdict-fail & { background: var(--el-color-danger); }
+}
+
+.verdictText {
+  flex: 1;
+  min-width: 0;
+  color: var(--el-text-color-regular);
+  font-size: 11px;
+  line-height: 16px;
+  // Two-line clamp: the verdict can be a long reviewer note.
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .widgets {

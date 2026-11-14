@@ -95,6 +95,36 @@ export interface OpResult {
   error?: string | undefined
 }
 
+/**
+ * Sentinel prefix marking a D9 transaction-narration system message.
+ *
+ * On every COMMITTED op-script transaction the gateway posts exactly one batched
+ * room message whose body is `TXN_NARRATION_PREFIX + summary` (e.g.
+ * `[[canvas-txn]] + ImageGenerator #7; edge #3→#7`). The client timeline detects
+ * this prefix and renders the remainder as a single collapsible system entry
+ * rather than an ordinary chat bubble (D9: convergence, never per-op mirroring).
+ * The prefix is a machine marker and is never shown to the user verbatim.
+ */
+export const TXN_NARRATION_PREFIX = '[[canvas-txn]] '
+
+/**
+ * Build a D9 narration message body from a transaction summary.
+ * @param summary - the one-line op summary (e.g. `+ ImageGenerator #7`).
+ * @returns the sentinel-prefixed body to post into the room.
+ */
+export function txnNarrationBody(summary: string): string {
+  return `${TXN_NARRATION_PREFIX}${summary}`
+}
+
+/**
+ * Parse a room message body into its D9 narration summary, if it is one.
+ * @param body - the raw message body.
+ * @returns the summary text when `body` is a narration message, else `null`.
+ */
+export function parseTxnNarration(body: string): string | null {
+  return body.startsWith(TXN_NARRATION_PREFIX) ? body.slice(TXN_NARRATION_PREFIX.length) : null
+}
+
 /** The client executor's report for a whole script transaction. */
 export interface CanvasScriptResult {
   /** Echoes {@link CanvasScript.txnId}. */

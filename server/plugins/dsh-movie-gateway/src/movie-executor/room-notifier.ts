@@ -22,6 +22,7 @@
  */
 
 import { MODEL_UNAVAILABLE_NOTICE } from './model-catalog.ts'
+import { txnNarrationBody } from '@dsh-movie/protocol'
 
 /** The minimal room-posting seam (`ctx.matrixChat` is structurally compatible). */
 export interface RoomPoster {
@@ -62,6 +63,18 @@ export interface RoomNotifier {
    * @param kind - whether the artifact is text or media.
    */
   echoArtifact(roomId: string, classType: string, artifact: string, kind: EchoKind): Promise<void>
+  /**
+   * Narrate one committed op-script transaction into the room (D9).
+   *
+   * Posts a SINGLE batched, collapsible system message summarizing every op the
+   * transaction applied (e.g. `+ ImageGenerator #7; edge #3→#7`) — never one
+   * message per op or per keystroke. The body carries the shared
+   * {@link TXN_NARRATION_PREFIX} sentinel so the client timeline renders it as a
+   * collapsible system entry. An empty summary posts nothing.
+   * @param roomId - the room to narrate into (empty → log-only degrade).
+   * @param summary - the one-line op summary produced by the op applier.
+   */
+  narrateTxn(roomId: string, summary: string): Promise<void>
 }
 
 /**
@@ -94,6 +107,10 @@ export function createRoomNotifier(poster: RoomPoster | undefined, logger: Notif
       if (artifact === '') return
       const body = kind === 'media' ? `[${classType}] ${artifact}` : artifact
       await post(roomId, body, 'artifact echo (D8)')
+    },
+    async narrateTxn(roomId: string, summary: string): Promise<void> {
+      if (summary === '') return
+      await post(roomId, txnNarrationBody(summary), 'txn narration (D9)')
     },
   }
 }
