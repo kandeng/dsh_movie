@@ -203,6 +203,18 @@ function panMove(event: PointerEvent) {
 }
 function panUp() { panning.value = false; }
 
+// The Chat main panel is a pure viewer: the left and right mouse buttons do
+// nothing on the media surface — no drag-pan, no ink start, no native context
+// menu. Stopping the pointerdown in the capture phase keeps it from ever
+// reaching the img/ink handlers on the children; the control-bar buttons stay
+// the only interaction path.
+function onSurfacePointerDown(event: PointerEvent): void {
+  if (event.button === 0 || event.button === 2) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+
 // ACT: 换图/收回图片都重置缩放、平移与笔迹（标记属于当前展示内容）；canvas 尺寸补测一次。
 watch(() => props.image, img => {
   zoom.value = 1;
@@ -534,11 +546,19 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="stage">
+  <!-- The whole main panel swallows the native right-click menu: in video mode the
+       media box is only the centered aspect-ratio region, and a right-click on the
+       surrounding dot-field background must be inert too. -->
+  <section class="stage" @contextmenu.prevent>
     <div class="stageBoxWrap">
       <!-- ACT: 盒子按视频原生宽高比撑开（object-fit 无需 letterbox），画笔层与视频内容完全重合。 -->
       <!-- ACT: 无视频时不锁宽高比：占位盒高度随空态内容撑开，胶片图与文案完整可见不被裁切。 -->
-      <div ref="boxRef" class="stageBox" :class="{ empty: !current && !image && !text, imageMode: !!image, textMode: !!text }" :style="boxStyle">
+      <div
+        ref="boxRef"
+        class="stageBox"
+        :class="{ empty: !current && !image && !text, imageMode: !!image, textMode: !!text }"
+        :style="boxStyle"
+        @pointerdown.capture="onSurfacePointerDown">
         <!-- ACT: 图片模式：与视频同盒同位；transform 先平移后缩放，zoom>1 时指针拖拽平移。 -->
         <img
           v-if="image"

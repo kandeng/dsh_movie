@@ -22,7 +22,7 @@ import { useExecStatus } from "@/composables/useExecStatus";
 import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
 import { useMovieRun } from "@/composables/useMovieRun";
 import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId, findMovieNode } from "@/utils/demoWorkflow";
-import { workflowToPrompt } from "@/canvas/graphMapper";
+import { workflowToPrompt, type MovieNodeData } from "@/canvas/graphMapper";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
 import { IconArrowBackUp, IconArrowForwardUp, IconGitCommit, IconHistory } from "@tabler/icons-vue";
 import type { CanvasToolMode } from "@/canvas/toolContext";
@@ -605,8 +605,29 @@ function setToolMode(mode: CanvasToolMode) {
 function onConnectPick(payload: { source: number; target: number }) {
   toolMode.value = "cursor";
   if (!roomRole.isHost.value) return;
+  // Orient the picked pair by feasibility, never by click order alone: prefer
+  // first.out → second.in; if the first node has no output handle or the second
+  // no input handle, flip to second.out → first.in when that direction exists.
+  // Neither direction viable → refuse instead of drawing an edge into a missing
+  // handle (vue-flow would dangle the end at the node's top-left corner).
+  const ends = (id: number) => {
+    const data = bridge.flow.findNode(String(id))?.data as MovieNodeData | undefined;
+    return { out: (data?.outputs ?? []).length > 0, in: (data?.inputs ?? []).length > 0 };
+  };
+  const first = ends(payload.source);
+  const second = ends(payload.target);
+  let fromId = payload.source;
+  let toId = payload.target;
+  if (!(first.out && second.in)) {
+    if (!(second.out && first.in)) {
+      ElMessage.error(translate("无法在这两个节点间建立连线"));
+      return;
+    }
+    fromId = payload.target;
+    toId = payload.source;
+  }
   void bridge
-    .request("edge.add", { fromId: payload.source, fromSlot: 0, toId: payload.target, toSlot: 0 })
+    .request("edge.add", { fromId, fromSlot: 0, toId, toSlot: 0 })
     .catch(() => {
       ElMessage.error(translate("添加连线失败"));
     });
@@ -981,7 +1002,7 @@ function goLogin() {
                 </el-popover>
               </span>
             </el-tooltip>
-            <el-tooltip content="添加连线（先点源节点，再点目标节点）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip content="添加连线（点选两个节点，自动从输出连到输入）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton iconOnly"
@@ -1118,7 +1139,7 @@ function goLogin() {
                       type="button"
                       class="barButton zoomButton"
                       aria-label="缩放菜单"
-                      @wheel.stop.prevent="$event.deltaY && applyZoom(Math.min(800, Math.max(20, zoomPercent - Math.sign($event.deltaY))))">
+                      @wheel.stop.prevent="$event.deltaY && applyZoom(Math.min(800, Math.max(20, Math.round(zoomPercent * ($event.deltaY < 0 ? 1.2 : 1 / 1.2)))))">
                       {{ zoomPercent }}%
                     </button>
                   </template>
@@ -1413,15 +1434,6 @@ function goLogin() {
     &:disabled { opacity: 0.45; cursor: not-allowed; }
 
     &.iconOnly { width: 32px; padding: 0; }
-
-    // Phase-5 P5-M3: the run action is the primary toolbar verb, so it carries a
-    // persistent primary-color accent (not just the aria-pressed state).
-    &.runButton {
-      border-color: var(--el-color-primary);
-      color: var(--el-color-primary);
-
-      &:hover:not(:disabled) { background: var(--el-color-primary-light-9); color: var(--el-color-primary); }
-    }
 
     &[aria-pressed="true"] {
       border-color: var(--el-color-primary);

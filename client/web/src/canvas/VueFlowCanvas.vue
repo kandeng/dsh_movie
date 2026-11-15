@@ -5,8 +5,8 @@
  * canvas *surface* matches vidsay:
  *  - static 16px dot field via CSS (not the Vue Flow <Background> addon),
  *  - vidsay's VueFlow prop set (zoom 0.2–8, strict connections, non-focusable
- *    nodes/edges, elevate-on-select, partial selection, no dblclick/scroll zoom,
- *    wheel = pan, Ctrl+wheel/pinch = zoom, right/middle-drag pan, hand mode),
+ *    nodes/edges, elevate-on-select, partial selection, no dblclick zoom,
+ *    wheel = zoom (Shift+wheel pans, pinch zooms), right/middle-drag pan, hand mode),
  *  - hand-mode grab cursor + pointer-events isolation,
  *  - click-an-edge → floating disconnect bubble,
  *  - empty-canvas hint overlay (`canvasEmpty`).
@@ -84,7 +84,7 @@ for (const node of [...MOVIE_NODES, ...FUNCTIONAL_NODES]) {
   nodeTypes[node.classType] = markRaw(MovieNode);
 }
 
-const { nodes, fitView, viewport, zoomTo, removeEdges, findEdge, screenToFlowCoordinate } = useVueFlow();
+const { nodes, fitView, viewport, removeEdges, findEdge, screenToFlowCoordinate, setTransform } = useVueFlow();
 
 // Center the graph the first time nodes appear (workspace hydrate / demo reload from
 // empty). fit-view-on-init runs before the async graph lands, so we fit here instead.
@@ -108,12 +108,24 @@ onMounted(() => {
   }, 400);
 });
 
-// vidsay: plain wheel pans (panOnScroll); Ctrl+wheel / trackpad pinch zooms.
+// Wheel ownership: plain wheel zooms (forward = in, backward = out) anchored at
+// the cursor; Shift+wheel pans for trackpad users; Ctrl/Meta+wheel and pinch keep
+// zooming. Elements vue-flow marks `.nowheel` (node widgets) scroll natively.
 function onWheel(event: WheelEvent) {
-  if (!event.ctrlKey && !event.metaKey) return;
+  if ((event.target as HTMLElement).closest(".nowheel")) return;
   event.preventDefault();
-  const next = Math.min(8, Math.max(0.2, viewport.value.zoom * (1 - event.deltaY * 0.01)));
-  void zoomTo(next);
+  const vp = viewport.value;
+  if (event.shiftKey) {
+    setTransform({ x: vp.x - event.deltaX, y: vp.y - event.deltaY, zoom: vp.zoom });
+    return;
+  }
+  const factor = Math.exp(-event.deltaY * 0.002);
+  const next = Math.min(8, Math.max(0.2, vp.zoom * factor));
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
+  const scale = next / vp.zoom;
+  setTransform({ x: px - (px - vp.x) * scale, y: py - (py - vp.y) * scale, zoom: next });
 }
 
 // vidsay: clicking an edge surfaces a floating disconnect bubble at the click point.
@@ -249,8 +261,7 @@ function onMoveEnd(payload: { event?: unknown }): void {
       :zoom-on-double-click="false"
       :zoom-on-scroll="false"
       :zoom-on-pinch="true"
-      :pan-on-scroll="!handMode"
-      :pan-on-scroll-speed="1"
+      :pan-on-scroll="false"
       :pan-on-drag="handMode ? true : [1, 2]"
       :pan-on-scroll-mode="PanOnScrollMode.Free"
       :delete-key-code="null"
