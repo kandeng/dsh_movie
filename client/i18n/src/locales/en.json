@@ -3398,5 +3398,11 @@
   "添加失败，请稍后重试": "Failed to add, please try again later",
   "删除失败，请稍后重试": "Failed to remove, please try again later",
   "移交失败，请稍后重试": "Failed to transfer host, please try again later",
-  "点击工具栏「添加节点」打开家族级联面板，即可创建常用节点或整套模板": "Click “Add Node” in the toolbar to open the family cascade and create common nodes or whole templates"
+  "点击工具栏「添加节点」打开家族级联面板，即可创建常用节点或整套模板": "Click “Add Node” in the toolbar to open the family cascade and create common nodes or whole templates",
+  "提交版本": "Submit version",
+  "版本历史": "Version history",
+  "收起历史": "Collapse history",
+  "添加连线失败": "Failed to add connection",
+  "删除节点失败": "Failed to delete node",
+  "删除连线失败": "Failed to delete connection"
 }

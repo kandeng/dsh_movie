@@ -24,13 +24,18 @@ import { useMovieRun } from "@/composables/useMovieRun";
 import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId, findMovieNode } from "@/utils/demoWorkflow";
 import { workflowToPrompt } from "@/canvas/graphMapper";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
-import { IconArrowBackUp, IconArrowForwardUp, IconGitCommit, IconHistory, IconPlayerPlay } from "@tabler/icons-vue";
+import { IconArrowBackUp, IconArrowForwardUp, IconGitCommit, IconHistory } from "@tabler/icons-vue";
+import type { CanvasToolMode } from "@/canvas/toolContext";
 // vidsay studioBar 工具图标：本地 svg 经 mask 渲染，跟随按钮文字颜色。
 import iconCanvasAdd from "@/icons/canvas_add.svg";
+import iconCanvasCursor from "@/icons/canvas_cursor.svg";
+import iconCanvasDelete from "@/icons/canvas_delete.svg";
+import iconCanvasEdge from "@/icons/canvas_edge.svg";
 import iconCanvasGrouping from "@/icons/canvas_grouping.svg";
 import iconCanvasMove from "@/icons/canvas_move.svg";
+import iconCanvasRun from "@/icons/canvas_run.svg";
 import iconCanvasSearch from "@/icons/canvas_search.svg";
-import iconCanvasAsset from "@/icons/canvas_asset.svg";
+import iconCanvasVersion from "@/icons/canvas_version.svg";
 
 // ACT: 工作室框架外壳（design doc §4.3，M4）。这是「分步生成」模式的页面骨架：
 // 左侧是舞台槽位（当前为占位，M5 把 ComfyUI iframe 落进来）；右侧是常驻的停靠式聊天框，
@@ -584,6 +589,48 @@ function onHandDone() {
   handArmed.value = false;
 }
 
+// ── 画布指针工具：cursor（悬停高亮节点边框/连线弧，点选）、connect（先点源节点再点
+//    目标节点建连线）、delete（点击高亮的节点/连线即删除）。connect 与 delete 为一次性：
+//    完成一次拾取/删除后自动回到 cursor 模式。高亮由画布组件内部实现（MovieNode 边框
+//    + edge CSS :hover），这里只维护模式与提交 bridge 命令（仅主持人可改图）。──
+const toolMode = ref<CanvasToolMode>("cursor");
+const versionMenuVisible = ref(false);
+
+function setToolMode(mode: CanvasToolMode) {
+  if (!canvasReady.value) return;
+  if (mode !== "cursor" && !roomRole.isHost.value) return;
+  toolMode.value = mode;
+}
+
+function onConnectPick(payload: { source: number; target: number }) {
+  toolMode.value = "cursor";
+  if (!roomRole.isHost.value) return;
+  void bridge
+    .request("edge.add", { fromId: payload.source, fromSlot: 0, toId: payload.target, toSlot: 0 })
+    .catch(() => {
+      ElMessage.error(translate("添加连线失败"));
+    });
+}
+
+function onDeleteNode(id: number) {
+  toolMode.value = "cursor";
+  if (!roomRole.isHost.value) return;
+  void bridge.request("node.remove", { id }).catch(() => {
+    ElMessage.error(translate("删除节点失败"));
+  });
+}
+
+function onDeleteEdge(edgeId: string) {
+  toolMode.value = "cursor";
+  if (!roomRole.isHost.value) return;
+  const edge = bridge.flow.findEdge(edgeId);
+  const linkId = Number((edge?.data as { linkId?: unknown } | undefined)?.linkId ?? edgeId.replace("link-", ""));
+  if (!Number.isFinite(linkId)) return;
+  void bridge.request("edge.remove", { id: linkId }).catch(() => {
+    ElMessage.error(translate("删除连线失败"));
+  });
+}
+
 // ── P3-M5：主机治理（撤销/重做/提交/移交 + 版本历史）与成员只读交互。
 //    只读由角色驱动（useWorkspaceGraph 内 watch role.isHost → bridge.setReadonly(!isHost)）；
 //    主持人可选「只读预览」临时锁定自己的画布。移交从房间花名册挑选继任者，经
@@ -767,9 +814,13 @@ function goLogin() {
           :hand-mode="handArmed"
           :group-mode="groupArmed"
           :groups="bridge.groups.value"
+          :tool-mode="toolMode"
           @group-draw="onGroupDraw"
           @group-click="onGroupClick"
-          @hand-done="onHandDone" />
+          @hand-done="onHandDone"
+          @connect-pick="onConnectPick"
+          @delete-node="onDeleteNode"
+          @delete-edge="onDeleteEdge" />
         <!-- M6 产物检视器：选中节点时展示其步骤、产物类型、实时状态与最近输出。 -->
         <aside v-if="selectedNode !== null" class="inspector">
           <div class="inspectorHead">
@@ -869,62 +920,8 @@ function goLogin() {
         <modeSwitcher class="modeSwitch" mode="step-by-step" />
       </div>
 
-      <!-- vidsay studioBar：底部按钮条（第二行第一列），左治理卡 + 右工具卡。 -->
+      <!-- vidsay studioBar：底部按钮条（第二行第一列），单工具卡：运行 | 光标/移动/添加/连线/删除/分组/搜索/版本/缩放。 -->
       <div class="studioBar">
-        <el-card class="syncMenu" shadow="never" :body-style="{ padding: '4px' }">
-          <div class="barRow" role="group" aria-label="画布治理">
-            <el-tooltip content="撤销" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
-              <button
-                type="button"
-                class="barButton"
-                :disabled="workspace.undoDepth.value === 0 || workspace.busy.value"
-                aria-label="撤销"
-                @click="onUndo">
-                <IconArrowBackUp :size="18" aria-hidden="true" />
-                <span class="barLabel">撤销</span>
-              </button>
-            </el-tooltip>
-            <el-tooltip content="重做" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
-              <button
-                type="button"
-                class="barButton"
-                :disabled="workspace.redoDepth.value === 0 || workspace.busy.value"
-                aria-label="重做"
-                @click="onRedo">
-                <IconArrowForwardUp :size="18" aria-hidden="true" />
-                <span class="barLabel">重做</span>
-              </button>
-            </el-tooltip>
-            <el-tooltip content="提交版本" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
-              <button
-                type="button"
-                class="barButton"
-                :disabled="!workspace.hasDraft.value || workspace.busy.value"
-                aria-label="提交版本"
-                @click="onCommit">
-                <IconGitCommit :size="18" aria-hidden="true" />
-                <span class="barLabel">提交版本</span>
-              </button>
-            </el-tooltip>
-            <el-tooltip
-              :content="historyOpen ? '收起历史' : '版本历史'"
-              placement="top"
-              :show-arrow="false"
-              :hide-after="0"
-              :enterable="false">
-              <button
-                type="button"
-                class="barButton"
-                :aria-pressed="historyOpen"
-                aria-label="版本历史"
-                @click="historyOpen = !historyOpen">
-                <IconHistory :size="18" aria-hidden="true" />
-                <span class="barLabel">版本历史</span>
-              </button>
-            </el-tooltip>
-          </div>
-        </el-card>
-
         <el-card class="toolMenu" shadow="never" :body-style="{ padding: '4px' }">
           <div class="barRow" role="toolbar" aria-label="画布工具">
             <el-tooltip content="运行工作流" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
@@ -934,8 +931,32 @@ function goLogin() {
                 :disabled="!canvasReady || !roomRole.isHost.value || runningDemo || (currentGraph?.nodes.length ?? 0) === 0"
                 aria-label="运行工作流"
                 @click="runCurrentGraph">
-                <IconPlayerPlay :size="18" aria-hidden="true" />
+                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasRun}&quot;)` }" aria-hidden="true" />
                 <span class="barLabel">{{ runningDemo ? translate("运行中…") : translate("运行") }}</span>
+              </button>
+            </el-tooltip>
+            <!-- 三倍间隔：把「运行」动词与指针工具组分开。 -->
+            <span class="barGapTriple" aria-hidden="true" />
+            <el-tooltip content="光标（悬停高亮节点与连线）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton iconOnly"
+                :aria-pressed="toolMode === 'cursor'"
+                :disabled="!canvasReady"
+                aria-label="光标"
+                @click="setToolMode('cursor')">
+                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasCursor}&quot;)` }" aria-hidden="true" />
+              </button>
+            </el-tooltip>
+            <el-tooltip content="移动画布" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton iconOnly"
+                :aria-pressed="handArmed"
+                :disabled="!canvasReady"
+                aria-label="移动画布"
+                @click="armHand">
+                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasMove}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
             <el-tooltip content="添加节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
@@ -959,6 +980,28 @@ function goLogin() {
                   <NodeCascade @select="onCascadePicked" />
                 </el-popover>
               </span>
+            </el-tooltip>
+            <el-tooltip content="添加连线（先点源节点，再点目标节点）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton iconOnly"
+                :aria-pressed="toolMode === 'connect'"
+                :disabled="!canvasReady || !roomRole.isHost.value"
+                aria-label="添加连线"
+                @click="setToolMode('connect')">
+                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasEdge}&quot;)` }" aria-hidden="true" />
+              </button>
+            </el-tooltip>
+            <el-tooltip content="删除（点击高亮的节点或连线）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+              <button
+                type="button"
+                class="barButton iconOnly"
+                :aria-pressed="toolMode === 'delete'"
+                :disabled="!canvasReady || !roomRole.isHost.value"
+                aria-label="删除"
+                @click="setToolMode('delete')">
+                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasDelete}&quot;)` }" aria-hidden="true" />
+              </button>
             </el-tooltip>
             <el-tooltip content="分组节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
@@ -999,28 +1042,67 @@ function goLogin() {
                 </el-popover>
               </span>
             </el-tooltip>
-            <el-tooltip content="素材库" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip
+              content="版本（撤销 / 重做 / 提交 / 历史）"
+              placement="top"
+              :show-arrow="false"
+              :hide-after="0"
+              :enterable="false"
+              :disabled="versionMenuVisible">
               <span class="popTrigger">
-                <el-popover trigger="click" placement="top-end" :width="220">
+                <el-popover v-model:visible="versionMenuVisible" trigger="click" placement="top-end" width="auto">
                   <template #reference>
-                    <button type="button" class="barButton iconOnly" aria-label="素材库">
-                      <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasAsset}&quot;)` }" aria-hidden="true" />
+                    <button type="button" class="barButton iconOnly" aria-label="版本" aria-haspopup="menu">
+                      <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasVersion}&quot;)` }" aria-hidden="true" />
                     </button>
                   </template>
-                  <p class="assetStub">素材库依赖 vidsay 后端能力，dsh_movie 当前未接入。</p>
+                  <div class="versionMenu">
+                    <button
+                      type="button"
+                      class="versionItem"
+                      :disabled="workspace.undoDepth.value === 0 || workspace.busy.value"
+                      @click="
+                        versionMenuVisible = false;
+                        onUndo();
+                      ">
+                      <IconArrowBackUp :size="16" aria-hidden="true" />
+                      <span>{{ translate("撤销") }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="versionItem"
+                      :disabled="workspace.redoDepth.value === 0 || workspace.busy.value"
+                      @click="
+                        versionMenuVisible = false;
+                        onRedo();
+                      ">
+                      <IconArrowForwardUp :size="16" aria-hidden="true" />
+                      <span>{{ translate("重做") }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="versionItem"
+                      :disabled="!workspace.hasDraft.value || workspace.busy.value"
+                      @click="
+                        versionMenuVisible = false;
+                        onCommit();
+                      ">
+                      <IconGitCommit :size="16" aria-hidden="true" />
+                      <span>{{ translate("提交版本") }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="versionItem"
+                      @click="
+                        versionMenuVisible = false;
+                        historyOpen = !historyOpen;
+                      ">
+                      <IconHistory :size="16" aria-hidden="true" />
+                      <span>{{ historyOpen ? translate("收起历史") : translate("版本历史") }}</span>
+                    </button>
+                  </div>
                 </el-popover>
               </span>
-            </el-tooltip>
-            <el-tooltip content="移动画布" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
-              <button
-                type="button"
-                class="barButton iconOnly"
-                :aria-pressed="handArmed"
-                :disabled="!canvasReady"
-                aria-label="移动画布"
-                @click="armHand">
-                <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasMove}&quot;)` }" aria-hidden="true" />
-              </button>
             </el-tooltip>
             <el-tooltip
               content="缩放菜单（滚轮调整缩放）"
@@ -1282,7 +1364,6 @@ function goLogin() {
   border-top: 1px solid var(--el-border-color);
   background: var(--el-bg-color);
 
-  .syncMenu,
   .toolMenu {
     flex-shrink: 0;
     background: color-mix(in srgb, var(--el-bg-color-overlay) 70%, transparent);
@@ -1295,6 +1376,12 @@ function goLogin() {
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+
+  // 三倍间隔（3 × 6px barRow gap）：把「运行」与指针工具组分开。
+  .barGapTriple {
+    flex: 0 0 auto;
+    width: 18px;
   }
 
   .dropTrigger,
@@ -1855,10 +1942,30 @@ function goLogin() {
   }
 }
 
-.assetStub {
-  margin: 0;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  line-height: 1.6;
+.versionMenu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 148px;
+
+  .versionItem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin: 0;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--el-text-color-primary);
+    font-size: 12px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+
+    &:hover:not(:disabled) { background: var(--el-fill-color); }
+    &:disabled { opacity: 0.45; cursor: not-allowed; }
+  }
 }
 </style>

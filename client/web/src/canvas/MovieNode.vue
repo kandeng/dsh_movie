@@ -11,16 +11,24 @@
  * Data wiring is unchanged from P4-M3: it reads {@link MovieNodeData} produced by the
  * {@link graphMapper} and writes widget edits back through `updateNodeData`.
  */
-import { computed } from "vue";
+import { computed, inject } from "vue";
 import { Handle, Position, useVueFlow, type NodeProps } from "@vue-flow/core";
 import {
   IconCircleDashed, IconCircleDot, IconFileText, IconLayoutGrid, IconListDetails,
   IconMovie, IconPhoto, IconVideo, IconVolume2,
 } from "@tabler/icons-vue";
 import { schemaFor, slotColor, type MovieNodeData, type NodeWidgetView } from "@/canvas/graphMapper";
+import { CANVAS_TOOL_KEY } from "@/canvas/toolContext";
 
 const props = defineProps<NodeProps<MovieNodeData>>();
 const { updateNodeData, edges } = useVueFlow();
+
+// Canvas tool context (absent only if the node is mounted outside VueFlowCanvas):
+// every pointer tool mode (cursor/connect/delete) highlights the node border on
+// hover, and `connect` keeps the first-picked source node highlighted until the
+// second click lands on a target.
+const tool = inject(CANVAS_TOOL_KEY, null);
+const isConnectSource = computed(() => tool !== null && tool.connectSourceId.value === props.id);
 
 const data = computed<MovieNodeData>(() => props.data ?? ({} as MovieNodeData));
 const schema = computed(() => schemaFor(data.value.classType));
@@ -131,7 +139,7 @@ function asText(value: unknown): string {
 </script>
 
 <template>
-  <div class="movieNode" :class="[`status-${status}`, { selected }]" :style="{ '--node-accent': accent }">
+  <div class="movieNode" :class="[`status-${status}`, { selected, toolHoverable: tool !== null, connectSource: isConnectSource }]" :style="{ '--node-accent': accent }">
     <!-- vidsay nodeSkeleton titleBar: type icon + grab label above the content card. -->
     <div class="titleBar">
       <component :is="typeIcon" class="titleIcon" :size="16" aria-hidden="true" />
@@ -244,6 +252,18 @@ function asText(value: unknown): string {
   text-align: left;
 
   &:hover .nodeHandle .handleIcon { opacity: 1; }
+
+  // Tool-mode hover highlight: any of cursor/connect/delete lights the card border.
+  &.toolHoverable:hover .contentCard {
+    border-color: var(--el-color-primary);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+  }
+
+  // Connect mode: the first-picked source stays highlighted until the second click.
+  &.connectSource .contentCard {
+    border-color: var(--el-color-primary);
+    box-shadow: 0 0 0 1px var(--el-color-primary);
+  }
 }
 
 .titleBar {

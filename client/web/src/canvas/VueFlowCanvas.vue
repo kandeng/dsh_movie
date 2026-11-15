@@ -11,7 +11,7 @@
  *  - click-an-edge → floating disconnect bubble,
  *  - empty-canvas hint overlay (`canvasEmpty`).
  */
-import { computed, markRaw, nextTick, onMounted, ref, watch } from "vue";
+import { computed, markRaw, nextTick, onMounted, provide, ref, toRef, watch } from "vue";
 import {
   VueFlow,
   useVueFlow,
@@ -20,12 +20,14 @@ import {
   SelectionMode,
   type NodeTypesObject,
   type EdgeMouseEvent,
+  type NodeMouseEvent,
 } from "@vue-flow/core";
 import { IconUnlink } from "@tabler/icons-vue";
 import { FUNCTIONAL_NODES, MOVIE_NODES, type WorkflowGroup } from "@dsh-movie/protocol";
 import MovieNode from "@/canvas/MovieNode.vue";
 import canvasEmpty from "@/canvas/canvasEmpty.vue";
 import { boundingFromDrag, groupColor } from "@/canvas/groupOverlay";
+import { CANVAS_TOOL_KEY, type CanvasToolMode } from "@/canvas/toolContext";
 
 import "@vue-flow/core/dist/style.css";
 import "@vue-flow/core/dist/theme-default.css";
@@ -38,8 +40,10 @@ const props = withDefaults(
     groupMode?: boolean;
     /** Live drawn group boxes rendered under the nodes (Phase-5 D13). */
     groups?: WorkflowGroup[];
+    /** Active pointer tool: hover highlight + click-click connect + click delete. */
+    toolMode?: CanvasToolMode;
   }>(),
-  { handMode: false, groupMode: false, groups: () => [] },
+  { handMode: false, groupMode: false, groups: () => [], toolMode: "cursor" },
 );
 const emit = defineEmits<{
   /** A completed one-shot group rectangle draw (D13). */
@@ -48,7 +52,26 @@ const emit = defineEmits<{
   "group-click": [payload: { index: number; x: number; y: number }];
   /** The one-shot hand gesture finished, so the parent disarms (D14). */
   "hand-done": [];
+  /** Connect mode: two node clicks completed a source→target pair. */
+  "connect-pick": [payload: { source: number; target: number }];
+  /** Delete mode: the clicked node should be removed. */
+  "delete-node": [id: number];
+  /** Delete mode: the clicked edge (flow id) should be removed. */
+  "delete-edge": [id: string];
 }>();
+
+// ── Pointer tool context: shared with MovieNode via inject so nodes can paint
+//    the hover border highlight and the sticky connect-source highlight without
+//    prop drilling through Vue Flow's node-type registry. ──
+const connectSourceId = ref<string | undefined>(undefined);
+provide(CANVAS_TOOL_KEY, { toolMode: toRef(props, "toolMode"), connectSourceId });
+// Leaving connect mode always drops a pending first pick.
+watch(
+  () => props.toolMode,
+  (mode) => {
+    if (mode !== "connect") connectSourceId.value = undefined;
+  },
+);
 
 /**
  * Map every registered `class_type` to the generic node component: the six
@@ -94,11 +117,43 @@ function onWheel(event: WheelEvent) {
 }
 
 // vidsay: clicking an edge surfaces a floating disconnect bubble at the click point.
+// In the new tool modes the click is rerouted instead: `delete` removes the edge,
+// `connect` ignores edges entirely (only nodes are pickable).
 const edgeDisconnect = ref<{ id: string; x: number; y: number }>();
 function onEdgeClick(event: EdgeMouseEvent) {
+  if (props.toolMode === "delete") {
+    emit("delete-edge", event.edge.id);
+    return;
+  }
+  if (props.toolMode === "connect") return;
   const source = event.event;
   if (!("clientX" in source)) return;
   edgeDisconnect.value = { id: event.edge.id, x: source.clientX, y: source.clientY };
+}
+
+// ── Tool-mode node clicks: `connect` is a two-click pick (first click arms the
+//    source, second on a different node completes the pair and the parent exits
+//    back to cursor mode); `delete` reports the node under the cursor. ──
+function onNodeToolClick(event: NodeMouseEvent): void {
+  const mode = props.toolMode;
+  if (mode === "connect") {
+    const id = event.node.id;
+    if (connectSourceId.value === undefined) {
+      connectSourceId.value = id;
+      return;
+    }
+    if (connectSourceId.value === id) return; // same node: keep waiting for a target
+    emit("connect-pick", { source: Number(connectSourceId.value), target: Number(id) });
+    connectSourceId.value = undefined;
+    return;
+  }
+  if (mode === "delete") emit("delete-node", Number(event.node.id));
+}
+
+/** Pane click: dismiss the disconnect bubble and drop a pending connect source. */
+function onPaneClick(): void {
+  edgeDisconnect.value = undefined;
+  connectSourceId.value = undefined;
 }
 function disconnect(edgeId: string) {
   removeEdges(edgeId);
@@ -174,7 +229,7 @@ function onMoveEnd(payload: { event?: unknown }): void {
 </script>
 
 <template>
-  <div class="canvas" :class="{ handMode }" @wheel.capture="onWheel">
+  <div class="canvas" :class="[{ handMode }, `tool-${toolMode}`]" @wheel.capture="onWheel">
     <VueFlow
       :node-types="nodeTypes"
       :min-zoom="0.2"
@@ -203,9 +258,10 @@ function onMoveEnd(payload: { event?: unknown }): void {
       :pan-activation-key-code="null"
       :selection-mode="SelectionMode.Partial"
       :default-edge-options="{ type: 'default' }"
+      @node-click="onNodeToolClick"
       @edge-click="onEdgeClick"
       @move-end="onMoveEnd"
-      @pane-click="edgeDisconnect = undefined">
+      @pane-click="onPaneClick">
       <!-- Group boxes (D13): a graph-space layer under the nodes (zoom-pane is
            inside the transformed viewport, so boxes pan/zoom with the graph). -->
       <template #zoom-pane>
@@ -287,6 +343,26 @@ function onMoveEnd(payload: { event?: unknown }): void {
   // vidsay: show every target handle while a connection drag is in flight.
   &:has(.vue-flow__connection) :deep(.vue-flow__node:not(.selected) .nodeHandle.target .handleIcon) {
     opacity: 1;
+  }
+
+  // Cursor / delete modes: hovering an edge highlights the whole arc (the g
+  // wrapper receives :hover from either the visible path or the fat invisible
+  // interaction path vue-flow renders underneath it).
+  &.tool-cursor :deep(.vue-flow__edge:hover .vue-flow__edge-path),
+  &.tool-delete :deep(.vue-flow__edge:hover .vue-flow__edge-path) {
+    stroke: var(--el-color-primary);
+    stroke-width: 2.5;
+  }
+
+  // Connect mode: nodes read as pick targets.
+  &.tool-connect :deep(.vue-flow__node) {
+    cursor: crosshair;
+  }
+
+  // Delete mode: everything is a click-to-remove target.
+  &.tool-delete :deep(.vue-flow__node),
+  &.tool-delete :deep(.vue-flow__edge) {
+    cursor: pointer;
   }
 
   // vidsay: selection marquee gets an 8px breathing box.
