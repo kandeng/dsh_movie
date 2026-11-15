@@ -596,9 +596,18 @@ function onHandDone() {
 const toolMode = ref<CanvasToolMode>("cursor");
 const versionMenuVisible = ref(false);
 
+// The pressed accent is exclusive: Move Canvas / Group Nodes are one-shot arms
+// layered on top of the tool mode, so while either is armed the Cursor button
+// must NOT look pressed. Once the gesture finishes (hand-done / group-draw) the
+// arm clears and Cursor regains the accent automatically.
+const cursorPressed = computed(() => toolMode.value === "cursor" && !handArmed.value && !groupArmed.value);
+
 function setToolMode(mode: CanvasToolMode) {
   if (!canvasReady.value) return;
   if (mode !== "cursor" && !roomRole.isHost.value) return;
+  // Picking any pointer tool cancels a pending one-shot arm (hand/group).
+  handArmed.value = false;
+  groupArmed.value = false;
   toolMode.value = mode;
 }
 
@@ -962,7 +971,7 @@ function goLogin() {
               <button
                 type="button"
                 class="barButton iconOnly"
-                :aria-pressed="toolMode === 'cursor'"
+                :aria-pressed="cursorPressed"
                 :disabled="!canvasReady"
                 aria-label="光标"
                 @click="setToolMode('cursor')">
