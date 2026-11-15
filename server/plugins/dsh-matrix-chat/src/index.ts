@@ -22,6 +22,7 @@ import * as sdk from 'matrix-js-sdk'
 import type {} from 'dsh-matrix-identity/types'
 import { AgentInbox } from './agent-inbox.ts'
 import { createRoomPoster, type RoomPoster } from './room-post.ts'
+import { createSdkLogger } from './sdk-logger.ts'
 import type {
   MatrixChat, MatrixChatStatus, MatrixRoomId, MatrixUserId, PostFile, PostOptions, RoomMessage, RoomReply,
 } from './types.ts'
@@ -237,6 +238,9 @@ export function apply(ctx: Context, config: Config): void {
       baseUrl: homeserverUrlOf(ctx),
       accessToken: token,
       userId: endpoint?.userId ?? config.botUserId,
+      // Filtered sink: the SDK's unconditional MSC4143 RTC-transports probe 404s
+      // on Synapse and would otherwise dump an error+stack on every boot.
+      logger: createSdkLogger((...msg: unknown[]): void => ctx.logger.debug('[matrix-chat] %s', msg.join(' '))),
       ...(deviceId === null ? {} : { deviceId }),
     })
     client = instance

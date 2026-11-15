@@ -767,7 +767,6 @@ function goLogin() {
           :hand-mode="handArmed"
           :group-mode="groupArmed"
           :groups="bridge.groups.value"
-          @create="addMovieNode"
           @group-draw="onGroupDraw"
           @group-click="onGroupClick"
           @hand-done="onHandDone" />

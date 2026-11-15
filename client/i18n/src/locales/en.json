@@ -3397,5 +3397,6 @@
   "请先选择要移交的队友": "Select the teammate to receive the host first",
   "添加失败，请稍后重试": "Failed to add, please try again later",
   "删除失败，请稍后重试": "Failed to remove, please try again later",
-  "移交失败，请稍后重试": "Failed to transfer host, please try again later"
+  "移交失败，请稍后重试": "Failed to transfer host, please try again later",
+  "点击工具栏「添加节点」打开家族级联面板，即可创建常用节点或整套模板": "Click “Add Node” in the toolbar to open the family cascade and create common nodes or whole templates"
 }

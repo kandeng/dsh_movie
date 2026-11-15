@@ -9,7 +9,7 @@
  *    wheel = pan, Ctrl+wheel/pinch = zoom, right/middle-drag pan, hand mode),
  *  - hand-mode grab cursor + pointer-events isolation,
  *  - click-an-edge → floating disconnect bubble,
- *  - empty-canvas quick-create overlay (`canvasEmpty`).
+ *  - empty-canvas hint overlay (`canvasEmpty`).
  */
 import { computed, markRaw, nextTick, onMounted, ref, watch } from "vue";
 import {
@@ -42,7 +42,6 @@ const props = withDefaults(
   { handMode: false, groupMode: false, groups: () => [] },
 );
 const emit = defineEmits<{
-  create: [classType: string];
   /** A completed one-shot group rectangle draw (D13). */
   "group-draw": [bounding: WorkflowGroup["bounding"]];
   /** A group's title chip was clicked; carries the screen anchor for the popover. */
@@ -247,7 +246,7 @@ function onMoveEnd(payload: { event?: unknown }): void {
       @pointermove="onDrawMove"
       @pointerup="onDrawUp"
       @pointercancel="onDrawUp" />
-    <canvasEmpty v-if="emptyVisible && nodes.length === 0" @create="classType => emit('create', classType)" />
+    <canvasEmpty v-if="emptyVisible && nodes.length === 0" />
     <teleport to="body">
       <el-button
         v-if="edgeDisconnect && findEdge(edgeDisconnect.id)"
