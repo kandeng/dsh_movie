@@ -303,12 +303,33 @@ export class CanvasScriptAgent {
     const setup = (agentCtx: Context): void => {
       installModelSelection(agentCtx)
     }
-    const { agent } = await this.deps.agents.create({
-      sessionId,
-      meta: { cwd: this.deps.cwd },
-      agentOptions,
-      setup,
-    })
+    // The planner session id is a STABLE per-room hash, so the session outlives a
+    // plugin reload / host restart. Reuse a live agent already registered under
+    // the id; otherwise create it; and when creation reports the session already
+    // exists (a persisted log survived), resume it. Without this the second and
+    // later lifecycles throw `session "…" already exists` and every D7 planner
+    // turn degrades to `llm-unavailable`.
+    const live = this.deps.agents.get(sessionId)
+    let agent: Agent
+    if (live !== undefined) {
+      agent = live
+    } else {
+      try {
+        agent = (await this.deps.agents.create({
+          sessionId,
+          meta: { cwd: this.deps.cwd },
+          agentOptions,
+          setup,
+        })).agent
+      } catch (error) {
+        this.deps.logger.warn(
+          '[movie-gateway] planner create on %s failed (%s); resuming the persisted session',
+          sessionId,
+          error instanceof Error ? error.message : String(error),
+        )
+        agent = (await this.deps.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })).agent
+      }
+    }
     await agent.whenIdle()
     this.agentsByRoom.set(roomId, agent)
     this.deps.logger.info('[movie-gateway] canvas planner opened for room %s', roomId)

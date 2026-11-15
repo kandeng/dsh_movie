@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
@@ -10,6 +10,7 @@ import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useVueFlowBridge } from "@/composables/useVueFlowBridge";
+import { useChatSplitWidth } from "@/composables/useChatSplitWidth";
 import VueFlowCanvas from "@/canvas/VueFlowCanvas.vue";
 import NodeCascade, { type CascadeSelection } from "@/canvas/NodeCascade.vue";
 import { expandTemplate } from "@/canvas/expandTemplate";
@@ -674,35 +675,11 @@ function onRequestHost() {
   ElMessage.success(translate("已在群聊中发送移交请求"));
 }
 
-// ── 停靠式聊天框分栏：右列宽度由可拖拽分隔条实时调整，夹紧到 [320, 55vw]；
-//    默认取舞台列宽度的 1/3（挂载时按实际容器宽度计算一次），拖拽后以拖拽值为准。聊天框常开。──
-const CHAT_MIN = 320;
+// ── 停靠式聊天框分栏：右列宽度由可拖拽分隔条实时调整。宽度与拖拽逻辑收敛到
+//    useChatSplitWidth（模块级单例）：默认分隔条位于面板左起 2/3（聊天列 = 1/3），
+//    夹紧到 [320, 55vw]，且在 Chat / Studio 之间跳转时保留上一次拖拽位置。聊天框常开。──
 const studioEl = ref<HTMLElement>();
-const chatWidth = ref(400);
-const resizing = ref(false);
-function applyDefaultChatWidth() {
-  const panel = studioEl.value?.clientWidth ?? 0;
-  if (!panel) return;
-  const max = Math.round(window.innerWidth * 0.55);
-  chatWidth.value = Math.min(max, Math.max(CHAT_MIN, Math.round((panel * 2) / 3)));
-}
-function onResizeDown(event: PointerEvent) {
-  event.preventDefault();
-  resizing.value = true;
-  document.addEventListener("pointermove", onResizeMove);
-  document.addEventListener("pointerup", onResizeUp);
-}
-function onResizeMove(event: PointerEvent) {
-  if (!resizing.value) return;
-  const max = Math.round(window.innerWidth * 0.55);
-  chatWidth.value = Math.min(max, Math.max(CHAT_MIN, window.innerWidth - event.clientX));
-}
-function onResizeUp() {
-  if (!resizing.value) return;
-  resizing.value = false;
-  document.removeEventListener("pointermove", onResizeMove);
-  document.removeEventListener("pointerup", onResizeUp);
-}
+const { chatWidth, resizing, onResizeDown } = useChatSplitWidth(studioEl);
 
 // ── 媒体查看器：视频 / 图片 / 只读文本预览（与群聊页同一套逻辑）。──
 type ViewerKind = "video" | "image" | "text";
@@ -772,8 +749,6 @@ function goLogin() {
   void router.push({ path: "/account", query: { login: "1", redirect: "/studio" } });
 }
 
-onMounted(() => { applyDefaultChatWidth(); });
-onScopeDispose(() => { onResizeUp(); });
 </script>
 
 <template>
@@ -970,7 +945,7 @@ onScopeDispose(() => { onResizeUp(); });
                   v-model:visible="addNodeVisible"
                   trigger="click"
                   placement="top-start"
-                  :width="380"
+                  width="auto"
                   :disabled="!canvasReady || !roomRole.isHost.value">
                   <template #reference>
                     <button
@@ -1300,6 +1275,10 @@ onScopeDispose(() => { onResizeUp(); });
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+  // Clip the tool cards at the column edge: when the divider is dragged left the
+  // right-hand card (zoom % etc.) must hide at the divider, never bleed into the
+  // docked chatbox column. Popovers/tooltips are teleported to <body>, unaffected.
+  overflow: hidden;
   padding: 0 15px;
   border-top: 1px solid var(--el-border-color);
   background: var(--el-bg-color);

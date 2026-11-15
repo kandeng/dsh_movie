@@ -20,7 +20,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startGatewayServer, type GatewayHandle } from './gateway-server.ts'
@@ -36,6 +36,32 @@ import type { MovieGateway, MovieGatewayInfo } from './types.ts'
 import type {} from 'dsh-matrix-chat/types'
 
 export type { MovieGateway, MovieGatewayInfo } from './types.ts'
+
+/**
+ * Resolve the Bailian API key so the real-LLM gate matches the rest of the
+ * runtime. The credentials seam (and `llm-pi-ai`'s `apiKeyEnv: BAILIAN_API_KEY`)
+ * sources the key from `server/.env`, but DSH does NOT inject that file into
+ * `process.env`, so a host launched without the variable exported would read an
+ * empty key and silently disable the text/review seams, the D15 text
+ * availability and the D7 intent miner. Prefer the live environment, then fall
+ * back to parsing `server/.env`.
+ *
+ * @param serverRoot - absolute path of the `server/` directory.
+ * @returns the trimmed key, or `''` when none is configured (key-free degrade).
+ */
+function resolveBailianKey(serverRoot: string): string {
+  const fromEnv = (process.env['BAILIAN_API_KEY'] ?? '').trim()
+  if (fromEnv !== '') return fromEnv
+  try {
+    for (const line of readFileSync(resolve(serverRoot, '.env'), 'utf8').split('\n')) {
+      const match = /^BAILIAN_API_KEY=(.*)$/.exec(line.trim())
+      if (match !== null) return (match[1] ?? '').trim().replace(/^(['"])(.*)\1$/, '$2')
+    }
+  } catch {
+    // No readable server/.env: stay key-free (canned seams, D7 off).
+  }
+  return ''
+}
 
 /** Stable Loader identity. */
 export const name = 'movie-gateway'
@@ -160,7 +186,16 @@ export function apply(ctx: Context, config: Config): void {
     //  - image/audio -> no model on the current Bailian-only inventory: the gate
     //    fails the node and `customer_service` posts the "no such model" notice.
     const subagents = ctx.get('subagents')
-    const bailianKey = (process.env['BAILIAN_API_KEY'] ?? '').trim()
+    const bailianKey = resolveBailianKey(serverRoot)
+    // D7 is otherwise invisible when degraded (the listener simply never
+    // registers and ctx.logger.info is filtered at the default level), so state
+    // the arm decision once at boot on stdout for operability.
+    console.log(
+      '[movie-gateway] D7 intent miner %s (key=%s, subagents=%s)',
+      subagents === undefined || bailianKey === '' ? 'OFF' : 'armed',
+      bailianKey === '' ? 'missing' : 'set',
+      subagents === undefined ? 'missing' : 'present',
+    )
     // The real text/review seams activate only with BOTH the subagent runtime and
     // a Bailian key; without either the adapters fall back to their honest canned
     // text (mirroring the director's key-free degrade), so the key-free verifier
@@ -175,7 +210,7 @@ export function apply(ctx: Context, config: Config): void {
         cwd: process.cwd(),
         logger: ctx.logger,
       })
-    const videoConfig = videoConfigFromEnv()
+    const videoConfig = videoConfigFromEnv({ ...process.env, BAILIAN_API_KEY: bailianKey })
     const videoProvider = videoConfig === undefined ? undefined : createVideoProvider(videoConfig, ctx.logger)
     // Route functional `VideoGenerator` to the real Happyhorse seam when it is
     // configured; everything else stays on the canned offline fallback so the

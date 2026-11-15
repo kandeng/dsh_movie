@@ -324,8 +324,13 @@ export function useWorkspaceGraph(
       return;
     }
     if (frame.stage === "committed" || frame.stage === "reverted") {
+      const prevRev = rev.value;
       rev.value = frame.workflow.rev;
-      if (frame.by !== selfId()) void applyGraph(frame.workflow.graph);
+      // Apply remote writes. Our OWN optimistic local commits already updated
+      // rev, so they skip re-apply; but server-side commits authored by us (the
+      // D7 chat→graph txn, author = the chatting user) advance rev without any
+      // local optimistic apply, so they must redraw even though by === selfId.
+      if (frame.by !== selfId() || frame.workflow.rev !== prevRev) void applyGraph(frame.workflow.graph);
       void loadHistory();
       if (role.isHost.value) void syncDraftState();
     }

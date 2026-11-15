@@ -469,6 +469,9 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     // Never mine our own narration (defensive; the bot is already filtered out).
     if (body === '' || parseTxnNarration(body) !== null) return
     const intent = await intentMiner.mineIntent(body)
+    // ctx.logger.info is filtered at the default level, and a `NONE` classify is
+    // otherwise completely silent, so trace the mine decision on stdout.
+    console.log('[movie-gateway] D7 mine room=%s intent=%s', message.roomId, intent === null ? 'NONE' : JSON.stringify(intent))
     if (intent === null) return
     const roomId = message.roomId
     // Snapshot HEAD right before the (slow) planner turn so the ops are generated
@@ -478,7 +481,9 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     const baseGraph: WorkflowGraph = head?.graph
       ?? { last_node_id: 0, last_link_id: 0, nodes: [], links: [], groups: [], version: 0.4 }
     const baseRev = head?.rev
+    console.log('[movie-gateway] D7 plan start room=%s headRev=%s', roomId, String(baseRev))
     const plan = await canvasAgent.generate(roomId, intent, head?.graph ?? null)
+    console.log('[movie-gateway] D7 plan done room=%s ok=%s %s', roomId, String(plan.ok), plan.ok ? '' : `code=${plan.code} msg=${plan.message}`)
     if (!plan.ok) {
       logger.warn('[movie-gateway] D7 plan rejected room=%s: %s (%s)', roomId, plan.message, plan.code)
       return
@@ -497,7 +502,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     }
     broadcastWatch(roomId, { stage: 'committed', workflow: commit.record, by: author })
     await notifier.narrateTxn(roomId, outcome.summary)
-    logger.info('[movie-gateway] D7 applied room=%s ops=%d intent="%s"', roomId, plan.script.ops.length, intent)
+    console.log('[movie-gateway] D7 applied room=%s rev=%d ops=%d intent="%s"', roomId, commit.record.rev, plan.script.ops.length, intent)
   }
 
   /** Enqueue one D7 pass behind the room's prior pass (never interleave). */
@@ -511,6 +516,9 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     )
     d7Queues.set(roomId, next.then((): void => undefined, (): void => undefined))
     void next.catch((error: unknown): void => {
+      // console.log as well as logger.warn: the logger sink is filtered/redirected
+      // per deployment, and a swallowed D7 failure is otherwise invisible.
+      console.log('[movie-gateway] D7 handler failed room=%s: %s', roomId, error instanceof Error ? (error.stack ?? error.message) : String(error))
       logger.warn('[movie-gateway] D7 handler failed room=%s: %s', roomId, String(error))
     })
   }

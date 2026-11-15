@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
@@ -7,6 +7,7 @@ import groupChat from "@/components/groupChat.vue";
 import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useMatrixChat } from "@/composables/useMatrixChat";
+import { useChatSplitWidth } from "@/composables/useChatSplitWidth";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
 import videoStage from "./components/videoStage.vue";
 
@@ -91,41 +92,11 @@ function goLogin() {
 }
 
 // ── Draggable divider between the stage and the chat column ──
-// pointerdown records the start; pointermove derives the right-column width from
-// window width - clientX, clamped to [CHAT_MIN, vw*0.55].
-const CHAT_MIN = 320;
-const chatWidth = ref(400);
-const resizing = ref(false);
+// Width + drag logic live in useChatSplitWidth (module-level singleton): default
+// divider at 2/3 from the left (chat column = 1/3), clamped to [320, 55vw], and
+// preserved when navigating to/from the Studio page.
 const chatEl = ref<HTMLElement>();
-
-// Default right-column (chatbox) width is 1/3 of the main panel width, computed once
-// on mount; after the user drags, the dragged value wins.
-function applyDefaultChatWidth() {
-  const panel = chatEl.value?.clientWidth ?? 0;
-  if (!panel) return;
-  const max = Math.round(window.innerWidth * 0.55);
-  chatWidth.value = Math.min(max, Math.max(CHAT_MIN, Math.round(panel / 3)));
-}
-onMounted(applyDefaultChatWidth);
-
-function onResizeDown(event: PointerEvent) {
-  event.preventDefault();
-  resizing.value = true;
-  document.addEventListener("pointermove", onResizeMove);
-  document.addEventListener("pointerup", onResizeUp);
-}
-function onResizeMove(event: PointerEvent) {
-  if (!resizing.value) return;
-  const max = Math.round(window.innerWidth * 0.55);
-  chatWidth.value = Math.min(max, Math.max(CHAT_MIN, window.innerWidth - event.clientX));
-}
-function onResizeUp() {
-  if (!resizing.value) return;
-  resizing.value = false;
-  document.removeEventListener("pointermove", onResizeMove);
-  document.removeEventListener("pointerup", onResizeUp);
-}
-onBeforeUnmount(onResizeUp);
+const { chatWidth, resizing, onResizeDown } = useChatSplitWidth(chatEl);
 </script>
 
 <template>
