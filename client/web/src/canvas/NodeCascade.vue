@@ -67,7 +67,9 @@ const branches = computed<Branch[]>(() => {
     label: translate(FAMILY_LABEL[family]),
     classes: FUNCTIONAL_NODES.filter((node) => node.family === family).map((node): ClassEntry => ({
       classType: node.classType,
-      displayName: node.displayName,
+      // The protocol ships English display names; route them through the i18n
+      // catalog (keyed by the English name) so the cascade leaves localize.
+      displayName: translate(node.displayName),
       description: node.description,
     })),
     templates: [],
@@ -78,7 +80,7 @@ const branches = computed<Branch[]>(() => {
     classes: [],
     templates: WORKFLOW_TEMPLATES.map((template): TemplateEntry => ({
       templateId: template.id,
-      displayName: template.displayName,
+      displayName: translate(template.displayName),
       description: template.description,
     })),
   };

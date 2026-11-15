@@ -3415,5 +3415,11 @@
   "添加连线失败": "Failed to add connection",
   "删除节点失败": "Failed to delete node",
   "删除连线失败": "Failed to delete connection",
-  "无法在这两个节点间建立连线": "Cannot connect these two nodes in either direction"
+  "无法在这两个节点间建立连线": "Cannot connect these two nodes in either direction",
+  "输入源": "Input Sources",
+  "生成器": "Generators",
+  "审校器": "Reviewers",
+  "组合器": "Combiners",
+  "模板": "Templates",
+  "无可用节点": "No available nodes"
 }

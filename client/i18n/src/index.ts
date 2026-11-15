@@ -2,6 +2,7 @@ import { IntlMessageFormat } from "intl-messageformat";
 import { escapeMessageText } from "./messageText.ts";
 export { escapeMessageText } from "./messageText.ts";
 import zhTw from "./locales/zhTw.json";
+import zhCn from "./locales/zhCn.json";
 import en from "./locales/en.json";
 import ja from "./locales/ja.json";
 import ru from "./locales/ru.json";
@@ -35,7 +36,7 @@ export const supportedLocales: { code: Locale; name: string }[] = [
   { code: "te", name: "తెలుగు" }, { code: "mr", name: "मराठी" }, { code: "pa", name: "ਪੰਜਾਬੀ" },
   { code: "ar", name: "العربية" }, { code: "fa", name: "فارسی" }, { code: "tr", name: "Türkçe" },
 ];
-const catalogs: Record<string, Record<string, string>> = { "zh-TW": zhTw, en, ja, ru, vi, th, ko, hi, id, ms, fil, bn, ur, ta, te, mr, pa, ar, fa, tr };
+const catalogs: Record<string, Record<string, string>> = { "zh-CN": zhCn, "zh-TW": zhTw, en, ja, ru, vi, th, ko, hi, id, ms, fil, bn, ur, ta, te, mr, pa, ar, fa, tr };
 let activeLocale: Locale = "zh-CN";
 const listeners = new Set<(locale: Locale) => void>();
 const formatters = new Map<string, IntlMessageFormat>();
