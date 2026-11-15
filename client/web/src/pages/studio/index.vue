@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
@@ -24,7 +24,6 @@ import { useMovieRun } from "@/composables/useMovieRun";
 import { buildDemoWorkflow, buildDemoPrompt, nodeSchemaForId, findMovieNode } from "@/utils/demoWorkflow";
 import { workflowToPrompt, type MovieNodeData } from "@/canvas/graphMapper";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
-import { IconArrowBackUp, IconArrowForwardUp, IconGitCommit, IconHistory } from "@tabler/icons-vue";
 import type { CanvasToolMode } from "@/canvas/toolContext";
 // vidsay studioBar 工具图标：本地 svg 经 mask 渲染，跟随按钮文字颜色。
 import iconCanvasAdd from "@/icons/canvas_add.svg";
@@ -208,7 +207,14 @@ bridge.onReady(() => {
   canvasReady.value = true;
   void hydrate(activeRoomId.value);
 });
-bridge.onNodeSelected((id) => { selectedNode.value = id; });
+bridge.onNodeSelected((id) => {
+  // Only a pure cursor-mode click is a selection that opens the artifact
+  // inspector. In every other state — connect (add edge), delete, group draw,
+  // hand pan, or the add-node cascade — a node click is a tool action, never a
+  // selection, so the property window must not pop up.
+  if (toolMode.value !== "cursor" || handArmed.value || groupArmed.value || addNodeVisible.value) return;
+  selectedNode.value = id;
+});
 bridge.onExecPainted(() => { paintedCount.value += 1; });
 bridge.onGraphChanged(({ graph }) => {
   currentGraph.value = graph;
@@ -484,11 +490,39 @@ function reloadDemo() {
   void applyGraph(buildDemoWorkflow());
 }
 
-/** Drop position for a palette/template insert (cascades so repeats don't stack). */
+/** Nominal MovieNode footprint used to center a fresh drop: the card width is
+ *  fixed at 220px in MovieNode.vue; height varies by field count, so we estimate. */
+const NODE_W = 220;
+const NODE_H_EST = 140;
+
+/** Flow-space point at the center of the *visible* pane (the part of the canvas
+ *  shown in the main panel), not the whole graph: map the viewport element's
+ *  client-rect center through the current pan/zoom transform. */
+function viewportCenter(): { x: number; y: number } {
+  const el = bridge.flow.viewportRef.value;
+  if (el) {
+    const rect = el.getBoundingClientRect();
+    return bridge.flow.screenToFlowCoordinate({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+  }
+  return { x: 0, y: 0 };
+}
+
+/** Drop position for a new node/template: the visible-viewport center, centered
+ *  on the node footprint. If an existing node already occupies that center, drop
+ *  exactly on top of the most recent such node so the new one stacks in front at
+ *  the center instead of scattering to empty space. */
 function nextDropPos(): [number, number] {
-  const count = bridge.flow.getNodes.value.length;
-  const offset = (count % 8) * 48;
-  return [120 + offset, 180 + offset];
+  const c = viewportCenter();
+  let occupied: { x: number; y: number } | undefined;
+  for (const n of bridge.flow.getNodes.value) {
+    const w = n.dimensions?.width ?? 0;
+    const h = n.dimensions?.height ?? 0;
+    if (c.x >= n.position.x && c.x <= n.position.x + w && c.y >= n.position.y && c.y <= n.position.y + h) {
+      occupied = { x: n.position.x, y: n.position.y };
+    }
+  }
+  if (occupied) return [occupied.x, occupied.y];
+  return [c.x - NODE_W / 2, c.y - NODE_H_EST / 2];
 }
 
 /**
@@ -553,6 +587,13 @@ const groupTitleDraft = ref("");
 
 function onGroupClick(payload: { index: number; x: number; y: number }) {
   if (!roomRole.isHost.value) return;
+  // Delete tool: clicking a group chip removes the whole group and, like the
+  // node/edge deletes, returns the canvas to cursor mode (one-shot).
+  if (toolMode.value === "delete") {
+    toolMode.value = "cursor";
+    bridge.removeGroup(payload.index);
+    return;
+  }
   groupTitleDraft.value = bridge.groups.value[payload.index]?.title ?? "";
   groupPopover.value = payload;
 }
@@ -597,10 +638,23 @@ const toolMode = ref<CanvasToolMode>("cursor");
 const versionMenuVisible = ref(false);
 
 // The pressed accent is exclusive: Move Canvas / Group Nodes are one-shot arms
-// layered on top of the tool mode, so while either is armed the Cursor button
-// must NOT look pressed. Once the gesture finishes (hand-done / group-draw) the
-// arm clears and Cursor regains the accent automatically.
-const cursorPressed = computed(() => toolMode.value === "cursor" && !handArmed.value && !groupArmed.value);
+// layered on top of the tool mode, and the Add Node cascade is its own transient
+// "add" mode, so while any of those is active the Cursor button must NOT look
+// pressed. Once the gesture finishes (hand-done / group-draw) or the cascade
+// closes after dropping a node, the arm clears and Cursor regains the accent.
+const cursorPressed = computed(
+  () => toolMode.value === "cursor" && !handArmed.value && !groupArmed.value && !addNodeVisible.value,
+);
+
+// Opening the Add Node cascade is a transient "add" mode: drop pointer-tool modes
+// and one-shot arms so the pressed accent stays exclusive (Add Node only). While
+// the cascade is open Add Node reads pressed; picking a node closes it and the
+// accent falls back to Cursor.
+function enterAddMode() {
+  toolMode.value = "cursor";
+  handArmed.value = false;
+  groupArmed.value = false;
+}
 
 function setToolMode(mode: CanvasToolMode) {
   if (!canvasReady.value) return;
@@ -608,11 +662,19 @@ function setToolMode(mode: CanvasToolMode) {
   // Picking any pointer tool cancels a pending one-shot arm (hand/group).
   handArmed.value = false;
   groupArmed.value = false;
+  // Tool modes repurpose node clicks; close the inspector so a stale panel does
+  // not linger over the canvas while picking or deleting.
+  if (mode !== "cursor") selectedNode.value = null;
   toolMode.value = mode;
 }
 
 function onConnectPick(payload: { source: number; target: number }) {
-  toolMode.value = "cursor";
+  // Defer the return-to-cursor out of this click's synchronous phase: the bridge's
+  // node-click selection hook also runs during this same click and must still see
+  // `connect` so it does not open the inspector for the second picked node.
+  void nextTick(() => {
+    toolMode.value = "cursor";
+  });
   if (!roomRole.isHost.value) return;
   // Orient the picked pair by feasibility, never by click order alone: prefer
   // first.out → second.in; if the first node has no output handle or the second
@@ -643,7 +705,10 @@ function onConnectPick(payload: { source: number; target: number }) {
 }
 
 function onDeleteNode(id: number) {
-  toolMode.value = "cursor";
+  // Defer return-to-cursor so the same click's selection hook still sees `delete`.
+  void nextTick(() => {
+    toolMode.value = "cursor";
+  });
   if (!roomRole.isHost.value) return;
   void bridge.request("node.remove", { id }).catch(() => {
     ElMessage.error(translate("删除节点失败"));
@@ -651,7 +716,10 @@ function onDeleteNode(id: number) {
 }
 
 function onDeleteEdge(edgeId: string) {
-  toolMode.value = "cursor";
+  // Defer return-to-cursor so the same click's selection hook still sees `delete`.
+  void nextTick(() => {
+    toolMode.value = "cursor";
+  });
   if (!roomRole.isHost.value) return;
   const edge = bridge.flow.findEdge(edgeId);
   const linkId = Number((edge?.data as { linkId?: unknown } | undefined)?.linkId ?? edgeId.replace("link-", ""));
@@ -954,7 +1022,7 @@ function goLogin() {
       <div class="studioBar">
         <el-card class="toolMenu" shadow="never" :body-style="{ padding: '4px' }">
           <div class="barRow" role="toolbar" aria-label="画布工具">
-            <el-tooltip content="运行工作流" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('运行（执行当前工作流）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton runButton"
@@ -967,7 +1035,7 @@ function goLogin() {
             </el-tooltip>
             <!-- 三倍间隔：把「运行」动词与指针工具组分开。 -->
             <span class="barGapTriple" aria-hidden="true" />
-            <el-tooltip content="光标（悬停高亮节点与连线）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('光标（悬停高亮节点与连线）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton iconOnly"
@@ -978,7 +1046,7 @@ function goLogin() {
                 <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasCursor}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
-            <el-tooltip content="移动画布" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('移动画布（拖拽一次平移画布）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton iconOnly"
@@ -989,7 +1057,7 @@ function goLogin() {
                 <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasMove}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
-            <el-tooltip content="添加节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('添加节点（级联菜单创建节点或模板）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <span class="popTrigger">
                 <el-popover
                   v-model:visible="addNodeVisible"
@@ -1001,9 +1069,11 @@ function goLogin() {
                     <button
                       type="button"
                       class="barButton iconOnly"
+                      :aria-pressed="addNodeVisible"
                       :disabled="!canvasReady || !roomRole.isHost.value"
                       aria-label="添加节点"
-                      aria-haspopup="menu">
+                      aria-haspopup="menu"
+                      @click="enterAddMode">
                       <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasAdd}&quot;)` }" aria-hidden="true" />
                     </button>
                   </template>
@@ -1011,7 +1081,7 @@ function goLogin() {
                 </el-popover>
               </span>
             </el-tooltip>
-            <el-tooltip content="添加连线（点选两个节点，自动从输出连到输入）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('添加连线（点选两个节点，自动从输出连到输入）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton iconOnly"
@@ -1022,7 +1092,7 @@ function goLogin() {
                 <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasEdge}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
-            <el-tooltip content="删除（点击高亮的节点或连线）" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('删除（点击节点或连线将其删除）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton iconOnly"
@@ -1033,7 +1103,7 @@ function goLogin() {
                 <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasDelete}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
-            <el-tooltip content="分组节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('分组节点（拖拽矩形框选节点成组）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <button
                 type="button"
                 class="barButton iconOnly"
@@ -1044,7 +1114,7 @@ function goLogin() {
                 <span class="toolIcon" :style="{ '--tool-icon': `url(&quot;${iconCanvasGrouping}&quot;)` }" aria-hidden="true" />
               </button>
             </el-tooltip>
-            <el-tooltip content="搜索节点" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
+            <el-tooltip :content="translate('搜索节点（按名称搜索并添加节点）')" placement="top" :show-arrow="false" :hide-after="0" :enterable="false">
               <span class="popTrigger">
                 <el-popover v-model:visible="searchVisible" trigger="click" placement="top-end" :width="240">
                   <template #reference>
@@ -1073,7 +1143,7 @@ function goLogin() {
               </span>
             </el-tooltip>
             <el-tooltip
-              content="版本（撤销 / 重做 / 提交 / 历史）"
+              :content="translate('版本（撤销 / 重做 / 提交 / 历史）')"
               placement="top"
               :show-arrow="false"
               :hide-after="0"
@@ -1095,7 +1165,6 @@ function goLogin() {
                         versionMenuVisible = false;
                         onUndo();
                       ">
-                      <IconArrowBackUp :size="16" aria-hidden="true" />
                       <span>{{ translate("撤销") }}</span>
                     </button>
                     <button
@@ -1106,7 +1175,6 @@ function goLogin() {
                         versionMenuVisible = false;
                         onRedo();
                       ">
-                      <IconArrowForwardUp :size="16" aria-hidden="true" />
                       <span>{{ translate("重做") }}</span>
                     </button>
                     <button
@@ -1117,7 +1185,6 @@ function goLogin() {
                         versionMenuVisible = false;
                         onCommit();
                       ">
-                      <IconGitCommit :size="16" aria-hidden="true" />
                       <span>{{ translate("提交版本") }}</span>
                     </button>
                     <button
@@ -1127,7 +1194,6 @@ function goLogin() {
                         versionMenuVisible = false;
                         historyOpen = !historyOpen;
                       ">
-                      <IconHistory :size="16" aria-hidden="true" />
                       <span>{{ historyOpen ? translate("收起历史") : translate("版本历史") }}</span>
                     </button>
                   </div>
@@ -1135,7 +1201,7 @@ function goLogin() {
               </span>
             </el-tooltip>
             <el-tooltip
-              content="缩放菜单（滚轮调整缩放）"
+              :content="translate('缩放（滚轮或菜单调整画布缩放）')"
               placement="top"
               :show-arrow="false"
               :hide-after="0"

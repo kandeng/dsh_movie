@@ -262,6 +262,7 @@ function onMoveEnd(payload: { event?: unknown }): void {
       :zoom-on-scroll="false"
       :zoom-on-pinch="true"
       :pan-on-scroll="false"
+      :nodes-selectable="toolMode === 'cursor'"
       :pan-on-drag="handMode ? true : [1, 2]"
       :pan-on-scroll-mode="PanOnScrollMode.Free"
       :delete-key-code="null"
