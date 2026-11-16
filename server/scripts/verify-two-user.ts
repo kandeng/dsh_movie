@@ -109,7 +109,7 @@ async function main(): Promise<void> {
   const serverName = process.env.SYNAPSE_SERVER_NAME ?? 'localhost'
   const adminToken = process.env.SYNAPSE_ADMIN_TOKEN ?? ''
   const authUrl = process.env.AUTH_URL ?? 'http://127.0.0.1:8787'
-  const botUserId = process.env.SYNAPSE_BOT_USER_ID ?? `@vidsay_bot:${serverName}`
+  const botUserId = process.env.SYNAPSE_BOT_USER_ID ?? `@dsh_bot:${serverName}`
   if (adminToken === '') {
     process.stdout.write('SYNAPSE_ADMIN_TOKEN missing from server/.env; cannot verify.\n')
     process.exit(1)

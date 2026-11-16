@@ -165,6 +165,16 @@ The graph (workflow) is a JSON object of nodes + links. **Server-authoritative**
 
 The CanvasBridge is the seam between the Toonflow UI (canvas) and the ComfyUI protocol. It is a thin adapter that translates UI events into protocol calls, so the rest of the app never talks to the protocol directly. Because it is an interface, every downstream consumer (the op-script executor, the execution-status watcher, the persistence/governance composables) works unchanged when the underlying canvas is swapped. Keeping the seam thin means the UI can change without touching the protocol, and the protocol can change without touching the UI.
 
+### 4.6 Node card vs. docked editor (Phase 6)
+
+The node's two former jobs — *being present on the canvas* and *being read/edited* — are split across two surfaces:
+
+- **The card (`MovieNode.vue`) is a presence token**: modality icon + localized type, the user-editable **name**, a small **read-only content stub**, and execution status carried only by the border/ring color plus one corner dot. It is never an editing surface; it renders the same content the modality widget already holds, so it needs no separate data.
+- **The docked editor (`pages/studio/index.vue`) is the single read/edit surface**: a ~400px right-docked aside (replacing the old floating inspector) with rows for type, name, description, content source, the content/output area, and a minimal status line. It is opened by double-click (cursor mode) or the toolbar **Edit Node** button.
+- **Edit lock** is orthogonal to selection: a single `editingNodeId` plus a full-canvas **scrim** freeze interaction while the editor is open (one editor instance at a time; remote deletion of the edited node auto-closes it with a toast).
+- **Content provenance (`contentRef`)** records `{ origin: upload | market | chat | inline, uri?, mime?, name?, text?, msgId? }`. It round-trips additively through the ComfyUI node's `properties` (no wire-shape change), while the canonical content (URL/text) stays in the source node's single modality widget so runs and the card stub are driven with no protocol change. Uploads reuse the chat media pipeline (`uploadContent` → authenticated-media blob URL) *without* posting a room message; "pick from chat" references an existing room message.
+- **Draft → publish governance**: the editor edits a **private draft buffer**; **Save** publishes atomically through the bridge (`setNodeMeta` + `node.setWidget`), all synchronous, so the two-stage debounce (bridge `graphChanged` → `workspace.autosave` → one `workspace/draft.put`) coalesces the whole Save into **one** server-side undo entry and **one** room sync. Publishing stays **host-exclusive** (§5.2): guests open the same editor **read-only** behind a banner and propose changes in chat, so there is still exactly one writer.
+
 ## 5. Session model & graph governance
 
 ### 5.1 One session = one room = one agent inbox = one workspace

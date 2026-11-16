@@ -11,7 +11,7 @@
     homeserverUrl: http://127.0.0.1:8008
     serverName: localhost
     adminTokenRef: SYNAPSE_ADMIN_TOKEN
-    botUserId: '@vidsay_bot:localhost'
+    botUserId: '@dsh_bot:localhost'
     whoamiCacheMs: 60000
     principalListenerPort: 0
 - id: matrix-chat

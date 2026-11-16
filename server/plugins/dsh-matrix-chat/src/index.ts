@@ -39,7 +39,7 @@ export const inject = ['matrixIdentity', 'agents', 'agentDefaultModel', 'session
 
 /** Plugin configuration. */
 export interface Config {
-  /** The bot's fully qualified Matrix user id, e.g. `@vidsay_bot:localhost`. */
+  /** The bot's fully qualified Matrix user id, e.g. `@dsh_bot:localhost`. */
   botUserId: string
   /** Rooms the bot joins at boot (idempotent). */
   autoJoinRooms: string[]
@@ -165,7 +165,7 @@ export function apply(ctx: Context, config: Config): void {
     if (creds === null) {
       // The bot account may not exist yet in a fresh deployment: provision it
       // idempotently, then broker again.
-      await ctx.matrixIdentity.provisionUser(localpartOf(botUserId), { displayName: 'Movie Bot' })
+      await ctx.matrixIdentity.provisionUser(localpartOf(botUserId), { displayName: 'DSH Bot' })
       creds = await ctx.matrixIdentity.brokerToken(botUserId)
     }
     return creds?.accessToken ?? null

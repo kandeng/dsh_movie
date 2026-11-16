@@ -1,6 +1,6 @@
 # Phase 6 Plan: Node Card as Presence Token + Docked Node Editor (draft → publish governance)
 
-- Status: 🚧 PLANNED (2026-08-09)
+- Status: ✅ IMPLEMENTED (2026-08-09) — client-only; M1–M5 built and verified (vue-tsc typecheck + vite build green; 28 new i18n keys × 21 locale catalogs, coverage 21/21).
 - Depends on: `phase4-vueflow-canvas-vidsay-shell.md` (canvas shell, MovieNode chrome), `phase5-functional-node-palette.md` (functional registry, families/modalities, verdicts), P3-M5 room governance (host-exclusive writes, `workspace` commit/revert/undo, host transfer), P2-M6 (workflow store + artifact inspector)
 - Scope: **client-only** (`client/web/src/` + `client/i18n/src/locales/`). No `WorkflowGraph` / `PromptGraph` wire-shape change, no server executor change, no new plugin. The chat media upload pipeline and the gateway ws canvas sync are reused AS-IS.
 - Carry-over note: `phase5` §9 assigned "removing the six deprecated step class types" to Phase 6. That item is **re-scoped to Phase 7** (D10): this phase already changes node rendering and edit governance, and multiplying that with a persisted-graph class-type migration in one phase is unnecessary risk.

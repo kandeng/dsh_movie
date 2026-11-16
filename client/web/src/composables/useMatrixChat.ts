@@ -1,7 +1,7 @@
 import { computed, ref, shallowRef, watch } from "vue";
 import * as sdk from "matrix-js-sdk";
 import { translate } from "@dsh-movie/i18n/vue";
-import { authenticatedMediaUrl } from "@/lib/matrixMedia";
+import { authenticatedMediaUrl, fetchMediaBlobUrl } from "@/lib/matrixMedia";
 import { useAuthStore } from "@/stores/auth";
 import { clientConfig } from "@/config";
 
@@ -581,6 +581,27 @@ async function sendFile(file: File) {
   refreshRooms();
 }
 
+// ACT: 画布节点内容上传（Phase-6 D5）：复用聊天同一条上传管线与鉴权媒体缓存——上传到
+// Matrix 内容仓库得到 mxc，再拉成 blob objectURL 供画布卡片/编辑器内联渲染。与 sendFile 不同，
+// 它「不」向房间投递消息：画布素材只需存储与一个可播放地址（共享同一 blob 仓库）。
+async function uploadMedia(file: File): Promise<{ uri: string; mxc: string; mime: string; name: string }> {
+  if (!client) throw new Error(translate("尚未连接到聊天服务"));
+  const uploaded = await client.uploadContent(file, { name: file.name, type: file.type });
+  const mxc = typeof uploaded === "string" ? uploaded : (uploaded as { content_uri?: string })?.content_uri;
+  if (!mxc) throw new Error(translate("上传失败，请稍后重试"));
+  // 命中缓存直接复用；否则用令牌拉成 blob 并登记，teardown 时统一 revoke。
+  let uri = mediaCache.get(mxc) ?? "";
+  if (uri === "") {
+    uri = await fetchMediaBlobUrl(mxc, client.getAccessToken() ?? "");
+    if (uri !== "") {
+      objectUrls.add(uri);
+      mediaCache.set(mxc, uri);
+      mediaTick.value++;
+    }
+  }
+  return { uri, mxc, mime: file.type, name: file.name };
+}
+
 // ACT: 团队弹层「添加队友」：把用户邀请进当前房间；membership 事件会让花名册实时补人。
 async function inviteTeammate(userId: string) {
   if (!client || !activeRoomId.value) throw new Error(translate("尚未连接到聊天服务"));
@@ -711,6 +732,6 @@ export function useMatrixChat() {
     teamMembers, inviteTeammate, kickTeammate, transferHost, searchUsers, mediaUrl,
     bootstrap, teardown, refreshRooms,
     setActiveRoom, createRoom, joinRoom, acceptInvite,
-    sendText, sendImage, sendFile, deleteMessage, noteTyping, markRead,
+    sendText, sendImage, sendFile, uploadMedia, deleteMessage, noteTyping, markRead,
   };
 }

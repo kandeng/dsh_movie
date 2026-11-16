@@ -19,7 +19,7 @@ export const clientConfig = {
   /** DSH host identity-plugin `/auth` listener (Phase-1 Mode-B principal proof). */
   authUrl: import.meta.env.VITE_AUTH_URL ?? "http://127.0.0.1:8787",
   /** The server-side agent bot to invite into the room. */
-  botUserId: import.meta.env.VITE_BOT_ID ?? "@vidsay_bot:localhost",
+  botUserId: import.meta.env.VITE_BOT_ID ?? "@dsh_bot:localhost",
 } as const;
 
 /**

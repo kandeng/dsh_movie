@@ -44,6 +44,7 @@ import {
   type MovieFlowEdge,
   type MovieFlowNode,
   type MovieNodeData,
+  type ContentRef,
   type NodeWidgetView,
 } from "@/canvas/graphMapper";
 import type {
@@ -81,6 +82,12 @@ export interface VueFlowBridge extends CanvasBridge {
    * suppressed from `graphChanged` so it never dirties/autosaves the graph.
    */
   setNodeVerdict: (id: number, verdict: string | undefined) => void;
+  /**
+   * Write a node's name/description (Phase-6 D11). Unlike the status/verdict
+   * paints these ARE canonical node data, so the write schedules a
+   * `graphChanged` (host autosave → room sync) like any other edit.
+   */
+  setNodeMeta: (id: number, patch: { title?: string; description?: string; contentRef?: ContentRef }) => void;
 }
 
 /** Options for {@link useVueFlowBridge}. */
@@ -282,6 +289,17 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
     // `paintStatus` to avoid dirtying/autosaving the graph.
     suppressUntil = Math.max(suppressUntil, Date.now() + STATUS_SUPPRESS_MS);
     flow.updateNodeData(String(id), { verdict } as Partial<MovieNodeData>);
+  }
+
+  /** Write node name/description/content provenance (Phase-6 D5/D11) — canonical, so it syncs. */
+  function setNodeMeta(id: number, patch: { title?: string; description?: string; contentRef?: ContentRef }): void {
+    if (flow.findNode(String(id)) === undefined) return;
+    const data: Partial<MovieNodeData> = {};
+    if (patch.title !== undefined) data.title = patch.title;
+    if (patch.description !== undefined) data.description = patch.description;
+    if (patch.contentRef !== undefined) data.contentRef = patch.contentRef;
+    flow.updateNodeData(String(id), data);
+    scheduleGraphChanged();
   }
 
   /**
@@ -510,6 +528,7 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
     },
     setNodeStatus: (id: number, status: NodeRunStatus): void => sendCommand("node.setStatus", { id, status }),
     setNodeVerdict: (id: number, verdict: string | undefined): void => paintVerdict(id, verdict),
+    setNodeMeta,
     setReadonly: (value: boolean): void => sendCommand("setReadonly", { readonly: value }),
     viewFit: (ids?: number[]): void => sendCommand("view.fit", ids !== undefined ? { ids } : {}),
     onReady: (cb: () => void): void => { readyHandlers.push(cb); },

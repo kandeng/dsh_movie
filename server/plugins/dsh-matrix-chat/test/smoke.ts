@@ -193,7 +193,7 @@ async function main(): Promise<void> {
   const baseUrl = process.env.SYNAPSE_BASE_URL ?? 'http://127.0.0.1:8008'
   const serverName = process.env.SYNAPSE_SERVER_NAME ?? 'localhost'
   const adminToken = process.env.SYNAPSE_ADMIN_TOKEN ?? ''
-  const botUserId = process.env.SYNAPSE_BOT_USER_ID ?? `@vidsay_bot:${serverName}`
+  const botUserId = process.env.SYNAPSE_BOT_USER_ID ?? `@dsh_bot:${serverName}`
   const endpoint: MatrixEndpoint = { baseUrl, serverName, adminToken }
 
   if (adminToken === '') {

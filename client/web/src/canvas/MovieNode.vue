@@ -1,27 +1,33 @@
 <script setup lang="ts">
 /**
- * Generic Vue Flow node for every movie step, skinned to the vidsay
- * `nodeSkeleton` card chrome (Path B / Phase 4).
+ * Generic Vue Flow node for every movie step — Phase-6 D11: a presence token.
  *
- * Visual language copied from vidsay `packages/nodeScaffold/src/nodeSkeleton.vue`:
- * a 220px node with a title bar (16px type icon + grab-cursor label) sitting above
- * a bordered content card, and 18px circular dot/dashed handles floated at ±12px on
- * the card's left/right edges (revealed on hover / when connected).
+ * Three rows only, top to bottom:
+ *   1. modality icon + localized node type, in the family accent hue;
+ *   2. the node name (displayed here, edited only in the editor card);
+ *   3. a read-only content stub: image thumbnail, video first frame
+ *      (`#t=0.5`), audio glyph + file name, or two clamped text lines
+ *      (user description, else the first paragraph of the text payload).
  *
- * Data wiring is unchanged from P4-M3: it reads {@link MovieNodeData} produced by the
- * {@link graphMapper} and writes widget edits back through `updateNodeData`.
+ * Running status is carried by the border color plus one corner dot (D13) —
+ * no status word. The reviewer verdict line stays: a verdict is output data,
+ * not status. Everything else the old card rendered (editable widgets, port
+ * name/type lists, schema blurb, modality chip, family pill, step badge) is
+ * gone: decoration without meaning, and editing moved to the editor card.
+ *
+ * This component never writes: it reads {@link MovieNodeData} produced by the
+ * {@link graphMapper} and renders it. Handles stay because edges need them.
  */
 import { computed, inject } from "vue";
 import { Handle, Position, useVueFlow, type NodeProps } from "@vue-flow/core";
-import {
-  IconCircleDashed, IconCircleDot, IconFileText, IconLayoutGrid, IconListDetails,
-  IconMovie, IconPhoto, IconVideo, IconVolume2,
-} from "@tabler/icons-vue";
-import { schemaFor, slotColor, type MovieNodeData, type NodeWidgetView } from "@/canvas/graphMapper";
+import { IconCircleDashed, IconCircleDot, IconVolume2 } from "@tabler/icons-vue";
+import { translate } from "@dsh-movie/i18n/vue";
+import { schemaFor, type MovieNodeData } from "@/canvas/graphMapper";
+import { nodeSkin } from "@/canvas/nodeSkin";
 import { CANVAS_TOOL_KEY } from "@/canvas/toolContext";
 
 const props = defineProps<NodeProps<MovieNodeData>>();
-const { updateNodeData, edges } = useVueFlow();
+const { edges } = useVueFlow();
 
 // Canvas tool context (absent only if the node is mounted outside VueFlowCanvas):
 // every pointer tool mode (cursor/connect/delete) highlights the node border on
@@ -32,55 +38,21 @@ const isConnectSource = computed(() => tool !== null && tool.connectSourceId.val
 
 const data = computed<MovieNodeData>(() => props.data ?? ({} as MovieNodeData));
 const schema = computed(() => schemaFor(data.value.classType));
-const title = computed(() => data.value.title ?? schema.value?.displayName ?? data.value.classType);
-const description = computed(() => schema.value?.description ?? "");
-const inputs = computed(() => data.value.inputs ?? []);
-const outputs = computed(() => data.value.outputs ?? []);
 const widgets = computed(() => data.value.widgets ?? []);
 const status = computed(() => data.value.status ?? "idle");
-
-/** Per-class_type icon + accent hue for the six legacy movie steps. */
-const TYPE_SKIN: Record<string, { icon: typeof IconFileText; accent: string }> = {
-  MovieScript: { icon: IconFileText, accent: "#409eff" },
-  MovieShotPlan: { icon: IconListDetails, accent: "#36cfc9" },
-  MovieAsset: { icon: IconPhoto, accent: "#52c41a" },
-  MovieStoryboard: { icon: IconLayoutGrid, accent: "#faad14" },
-  MovieClip: { icon: IconVideo, accent: "#9254de" },
-  MovieAssemble: { icon: IconMovie, accent: "#f759ab" },
-};
-
-/** Functional-node icon by modality (Phase-5 D3). */
-const MODALITY_ICON: Record<string, typeof IconFileText> = {
-  text: IconFileText,
-  image: IconPhoto,
-  video: IconVideo,
-  audio: IconVolume2,
-};
-
-/** Functional-node accent hue by family (role). */
-const FAMILY_ACCENT: Record<string, string> = {
-  source: "#13c2c2",
-  generator: "#409eff",
-  reviewer: "#fa8c16",
-  combiner: "#722ed1",
-};
-
-const skin = computed(() => {
-  const legacy = TYPE_SKIN[data.value.classType];
-  if (legacy !== undefined) return legacy;
-  const family = schema.value?.family;
-  if (family !== undefined) {
-    return {
-      icon: MODALITY_ICON[schema.value?.modality ?? "text"] ?? IconFileText,
-      accent: FAMILY_ACCENT[family] ?? "#409eff",
-    };
-  }
-  return { icon: IconFileText, accent: "#409eff" };
-});
-const typeIcon = computed(() => skin.value.icon);
-const accent = computed(() => skin.value.accent);
 const family = computed(() => schema.value?.family);
 const modality = computed(() => schema.value?.modality);
+
+/** Row 1: the localized node type (English protocol names are i18n keys). */
+const typeLabel = computed(() => translate(schema.value?.displayName ?? data.value.classType));
+/** Row 2: the node name; a fresh node defaults to its localized type name. */
+const nodeName = computed(() => data.value.title ?? typeLabel.value);
+
+/** Identity skin (icon + family accent hue), shared with the docked editor's
+ *  header row so the two surfaces never drift apart (`canvas/nodeSkin`). */
+const skin = computed(() => nodeSkin(data.value.classType));
+const typeIcon = computed(() => skin.value.icon);
+const accent = computed(() => skin.value.accent);
 
 /**
  * Reviewer verdict line (Phase-5 D5). The Leg B `executed` output for a
@@ -108,135 +80,109 @@ const connectedHandles = computed(() => {
   return set;
 });
 
-/** Write a single widget value back into the store by index. */
-function setWidget(index: number, value: unknown): void {
-  const next = widgets.value.map((widget, i): NodeWidgetView => (i === index ? { ...widget, value } : widget));
-  updateNodeData(props.id, {
-    widgets: next,
-    widgetsValues: next.map((widget): unknown => widget.value),
-  } as Partial<MovieNodeData>);
-}
-
-function onText(index: number, event: Event): void {
-  setWidget(index, (event.target as HTMLInputElement).value);
-}
-function onNumber(index: number, event: Event): void {
-  const raw = (event.target as HTMLInputElement).value;
-  const num = Number(raw);
-  setWidget(index, raw !== "" && Number.isFinite(num) ? num : raw);
-}
-function onSelect(index: number, event: Event): void {
-  setWidget(index, (event.target as HTMLSelectElement).value);
-}
-function onBool(index: number, event: Event): void {
-  setWidget(index, (event.target as HTMLInputElement).checked);
-}
-
 function asText(value: unknown): string {
   if (value === null || value === undefined) return "";
   return typeof value === "string" ? value : String(value);
 }
+
+/** The node's primary text payload: the multiline widget, else prompt/criteria. */
+const primaryText = computed(() => {
+  const multiline = widgets.value.find((widget) => widget.type === "STRING" && widget.multiline === true);
+  if (multiline !== undefined) return multiline.value;
+  const named = widgets.value.find((widget) => widget.name === "text" || widget.name === "prompt" || widget.name === "criteria");
+  return named?.value;
+});
+
+/**
+ * Row 3 text stub (D11): the user-written description when present, otherwise
+ * the first paragraph of the text payload; the template clamps it to two lines.
+ */
+const stubText = computed(() => {
+  if (modality.value !== "text") return "";
+  const description = (data.value.description ?? "").trim();
+  const source = description !== "" ? description : asText(primaryText.value).trim();
+  return source.split(/\n{2,}/)[0]?.trim() ?? "";
+});
+
+/** A URL-like content reference held by the modality widget (D11 media stub). */
+const mediaRef = computed(() => {
+  const kind = modality.value;
+  if (kind !== "image" && kind !== "video" && kind !== "audio") return "";
+  const widget = widgets.value.find((item) => item.name === kind)
+    ?? widgets.value.find((item) => item.type === "STRING");
+  const value = asText(widget?.value).trim();
+  return /^(https?:|\/|blob:|data:)/.test(value) ? value : "";
+});
+
+/** Bare file name of a media reference, shown on the audio stub line. */
+const mediaName = computed(() => {
+  if (mediaRef.value === "") return "";
+  const path = mediaRef.value.split(/[?#]/)[0] ?? mediaRef.value;
+  return path.split("/").pop() ?? "";
+});
 </script>
 
 <template>
   <div class="movieNode" :class="[`status-${status}`, { selected, toolHoverable: tool !== null, connectSource: isConnectSource }]" :style="{ '--node-accent': accent }">
-    <!-- vidsay nodeSkeleton titleBar: type icon + grab label above the content card. -->
+    <!-- Row 1: vidsay nodeSkeleton titleBar — type icon + grab label. -->
     <div class="titleBar">
       <component :is="typeIcon" class="titleIcon" :size="16" aria-hidden="true" />
-      <span class="labelText" :title="title">{{ title }}</span>
-      <span v-if="schema && schema.step !== undefined" class="nodeStep">{{ schema.step }}/6</span>
-      <span v-else-if="family" class="familyBadge" :class="`fam-${family}`">{{ family }}</span>
-    </div>
-    <div v-if="modality" class="modalityRow">
-      <span class="modalityChip" :style="{ '--slot-color': slotColor((schema?.modality ?? 'text').toUpperCase()) }">{{ modality }}</span>
+      <span class="labelText" :title="typeLabel">{{ typeLabel }}</span>
     </div>
 
     <div class="cardContainer">
       <div class="contentCard" :class="{ selected }">
-        <div class="cardBody">
-          <div class="statusRow">
-            <span class="statusDot" :class="`dot-${status}`" />
-            <span class="statusText">{{ status }}</span>
-          </div>
+        <!-- D13: status is the border color plus this one corner dot. -->
+        <span class="statusDot" :class="`dot-${status}`" :title="status" />
 
-          <!-- Reviewer verdict line (D5): rendered only for reviewer nodes once
-               the executed output has been painted onto the node data. -->
-          <div v-if="family === 'reviewer' && verdict" class="verdictRow" :class="`verdict-${verdictState}`">
-            <span class="verdictBadge">{{ verdictState === "fail" ? "FAIL" : verdictState === "pass" ? "PASS" : "VERDICT" }}</span>
-            <span class="verdictText" :title="verdict">{{ verdict }}</span>
-          </div>
+        <!-- Row 2: node name (read here, edited in the editor card). -->
+        <div class="nameRow" :title="nodeName">{{ nodeName }}</div>
 
-          <div v-if="widgets.length > 0" class="widgets">
-            <div v-for="(widget, i) in widgets" :key="widget.name" class="widgetRow">
-              <label class="widgetLabel">{{ widget.name }}</label>
-              <textarea
-                v-if="widget.type === 'STRING' && widget.multiline"
-                class="widget nodrag nowheel"
-                rows="3"
-                :value="asText(widget.value)"
-                @input="onText(i, $event)" />
-              <select
-                v-else-if="widget.type === 'COMBO'"
-                class="widget nodrag nowheel"
-                :value="asText(widget.value)"
-                @change="onSelect(i, $event)">
-                <option v-for="opt in widget.options ?? []" :key="opt" :value="opt">{{ opt }}</option>
-              </select>
-              <input
-                v-else-if="widget.type === 'INT' || widget.type === 'FLOAT'"
-                class="widget nodrag nowheel"
-                type="number"
-                :step="widget.type === 'INT' ? 1 : 0.1"
-                :min="widget.min"
-                :max="widget.max"
-                :value="asText(widget.value)"
-                @input="onNumber(i, $event)" />
-              <input
-                v-else-if="widget.type === 'BOOLEAN'"
-                class="widget nodrag nowheel"
-                type="checkbox"
-                :checked="widget.value === true"
-                @change="onBool(i, $event)" />
-              <input
-                v-else
-                class="widget nodrag nowheel"
-                type="text"
-                :value="asText(widget.value)"
-                @input="onText(i, $event)" />
-            </div>
-          </div>
+        <!-- Row 3: read-only content stub (D11). -->
+        <img
+          v-if="modality === 'image' && mediaRef"
+          class="stubMedia nodrag nowheel"
+          :src="mediaRef"
+          :alt="nodeName" />
+        <video
+          v-else-if="modality === 'video' && mediaRef"
+          class="stubMedia nodrag nowheel"
+          :src="`${mediaRef}#t=0.5`"
+          preload="metadata"
+          muted
+          playsinline
+          tabindex="-1"
+          aria-hidden="true" />
+        <div v-else-if="modality === 'audio' && mediaRef" class="stubAudio nodrag" :title="mediaName">
+          <IconVolume2 :size="14" aria-hidden="true" />
+          <span class="stubAudioName">{{ mediaName }}</span>
+        </div>
+        <p v-else-if="modality === 'text' && stubText" class="stubText nodrag">{{ stubText }}</p>
+        <div v-else class="stubEmpty" aria-hidden="true">
+          <component :is="typeIcon" :size="14" />
+        </div>
 
-          <div v-if="inputs.length > 0" class="portList">
-            <div v-for="(slot, i) in inputs" :key="`in-${i}`" class="portRow">
-              <span class="portName">{{ slot.name || `in ${i}` }}</span>
-              <span class="portType" :style="{ color: slotColor(slot.type) }">{{ slot.type }}</span>
-            </div>
-          </div>
-          <div v-if="outputs.length > 0" class="portList out">
-            <div v-for="(slot, i) in outputs" :key="`out-${i}`" class="portRow">
-              <span class="portName">{{ slot.name || `out ${i}` }}</span>
-              <span class="portType" :style="{ color: slotColor(slot.type) }">{{ slot.type }}</span>
-            </div>
-          </div>
-
-          <p v-if="description" class="nodeDesc">{{ description }}</p>
+        <!-- Reviewer verdict line (D5): output data, kept per D13. -->
+        <div v-if="family === 'reviewer' && verdict" class="verdictRow" :class="`verdict-${verdictState}`">
+          <span class="verdictBadge">{{ verdictState === "fail" ? "FAIL" : verdictState === "pass" ? "PASS" : "VERDICT" }}</span>
+          <span class="verdictText" :title="verdict">{{ verdict }}</span>
         </div>
       </div>
 
       <!-- vidsay nodeSkeleton handles: 18px circular glyphs at ±12px, distributed by index. -->
       <Handle
-        v-for="(slot, i) in inputs" :key="`hin-${i}`"
+        v-for="(slot, i) in (data.inputs ?? [])" :key="`hin-${i}`"
         :id="`in-${i}`" type="target" :position="Position.Left"
         class="nodeHandle" :class="{ connected: connectedHandles.has(`in-${i}`) }"
-        :style="{ top: `${((i + 1) / (inputs.length + 1)) * 100}%`, color: slotColor(slot.type) }"
+        :style="{ top: `${((i + 1) / ((data.inputs ?? []).length + 1)) * 100}%` }"
         :title="`${slot.name || `in ${i}`} · ${slot.type}`">
         <component :is="connectedHandles.has(`in-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>
       <Handle
-        v-for="(slot, i) in outputs" :key="`hout-${i}`"
+        v-for="(slot, i) in (data.outputs ?? [])" :key="`hout-${i}`"
         :id="`out-${i}`" type="source" :position="Position.Right"
         class="nodeHandle" :class="{ connected: connectedHandles.has(`out-${i}`) }"
-        :style="{ top: `${((i + 1) / (outputs.length + 1)) * 100}%`, color: slotColor(slot.type) }"
+        :style="{ top: `${((i + 1) / ((data.outputs ?? []).length + 1)) * 100}%` }"
         :title="`${slot.name || `out ${i}`} · ${slot.type}`">
         <component :is="connectedHandles.has(`out-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>
@@ -287,48 +233,13 @@ function asText(value: unknown): string {
 
     &:active { cursor: grabbing; }
   }
-
-  .nodeStep {
-    flex-shrink: 0;
-    color: var(--el-text-color-secondary);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .familyBadge {
-    flex-shrink: 0;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--node-accent);
-    color: #fff;
-    font-size: 10px;
-    font-weight: 600;
-    line-height: 15px;
-    text-transform: capitalize;
-  }
-}
-
-.modalityRow {
-  display: flex;
-  padding: 0 4px 6px;
-
-  .modalityChip {
-    padding: 0 6px;
-    border: 1px solid var(--slot-color, var(--el-border-color));
-    border-radius: 4px;
-    color: var(--slot-color, var(--el-text-color-secondary));
-    font-size: 10px;
-    font-weight: 600;
-    line-height: 16px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
 }
 
 .cardContainer {
   position: relative;
 
   .contentCard {
+    position: relative;
     border: 1px solid var(--el-border-color-light);
     border-radius: var(--ui-radius-large, var(--el-border-radius-base));
     background: var(--el-bg-color-overlay);
@@ -337,14 +248,6 @@ function asText(value: unknown): string {
     &.selected {
       border-color: color-mix(in srgb, var(--el-color-primary) 50%, var(--el-border-color-light));
     }
-  }
-
-  .cardBody {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px;
-    font-size: 12px;
   }
 
   .nodeHandle {
@@ -371,16 +274,13 @@ function asText(value: unknown): string {
   }
 }
 
-.statusRow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
+// D13: the whole status vocabulary on the card is this dot + the border color.
 .statusDot {
+  position: absolute;
+  top: 7px;
+  right: 7px;
   width: 8px;
   height: 8px;
-  flex: 0 0 auto;
   border-radius: 50%;
   background: var(--el-text-color-placeholder);
 
@@ -391,16 +291,81 @@ function asText(value: unknown): string {
   &.dot-error { background: var(--el-color-danger); }
 }
 
-.statusText {
-  color: var(--el-text-color-secondary);
+.nameRow {
+  padding: 8px 22px 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stubMedia {
+  display: block;
+  width: calc(100% - 16px);
+  height: 48px;
+  margin: 0 8px;
+  border-radius: var(--el-border-radius-small, 4px);
+  object-fit: cover;
+  background: var(--el-fill-color-light);
+}
+
+.stubAudio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 48px;
+  margin: 0 8px;
+  padding: 0 8px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: var(--el-border-radius-small, 4px);
+  background: var(--el-fill-color-light);
+  color: var(--node-accent);
+
+  .stubAudioName {
+    min-width: 0;
+    color: var(--el-text-color-regular);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.stubText {
+  margin: 0 8px;
+  padding: 4px 0;
+  color: var(--el-text-color-regular);
   font-size: 11px;
-  text-transform: capitalize;
+  line-height: 16px;
+  // D11: two clamped lines; the remainder of the paragraph is chopped.
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.stubEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 48px;
+  margin: 0 8px;
+  border: 1px dashed var(--el-border-color-lighter);
+  border-radius: var(--el-border-radius-small, 4px);
+  color: var(--el-text-color-placeholder);
+}
+
+.contentCard {
+  padding-bottom: 8px;
 }
 
 .verdictRow {
   display: flex;
   align-items: flex-start;
   gap: 6px;
+  margin: 6px 8px 0;
   padding: 4px 6px;
   border: 1px solid var(--el-border-color-light);
   border-left: 3px solid var(--el-text-color-placeholder);
@@ -437,67 +402,6 @@ function asText(value: unknown): string {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-}
-
-.widgets {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.widgetRow {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.widgetLabel {
-  color: var(--el-text-color-secondary);
-  font-size: 11px;
-}
-
-.widget {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 4px 6px;
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--el-border-radius-small, 4px);
-  background: var(--el-fill-color-blank);
-  color: var(--el-text-color-primary);
-  font-size: 12px;
-  font-family: inherit;
-  resize: vertical;
-}
-
-.portList {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-
-  .portRow {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    min-height: 18px;
-  }
-
-  &.out .portRow { flex-direction: row-reverse; }
-}
-
-.portName { color: var(--el-text-color-regular); font-size: 11px; }
-
-.portType {
-  color: var(--el-text-color-placeholder);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
-.nodeDesc {
-  margin: 0;
-  color: var(--el-text-color-secondary);
-  font-size: 11px;
-  line-height: 1.4;
 }
 
 .status-running .contentCard,

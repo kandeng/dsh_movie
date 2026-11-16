@@ -55,12 +55,48 @@ export interface NodeWidgetView {
   multiline?: boolean;
 }
 
+/**
+ * One content-reference shape for every provenance (Phase-6 D5). Upload, market
+ * and chat all yield `uri` (+ meta; chat also records `msgId`); inline text-input
+ * nodes yield `text`. It is persisted ADDITIVELY in `properties.contentRef` for
+ * provenance, while the canonical content the runs execute and the card stub
+ * renders stays in the node's modality widget — one source of truth, no
+ * wire-shape surgery. A `chat`/`upload` `uri` is a resolved media URL and may go
+ * stale (R8); consumers fall back to the modality glyph.
+ */
+export interface ContentRef {
+  /** Where the content came from. */
+  origin: "upload" | "market" | "chat" | "inline";
+  /** Resolved media URL (upload/market/chat). */
+  uri?: string;
+  /** MIME type of the referenced media. */
+  mime?: string;
+  /** Display label / original filename. */
+  name?: string;
+  /** Literal text (inline text-input nodes). */
+  text?: string;
+  /** Source room message id (chat origin). */
+  msgId?: string;
+}
+
 /** The `data` payload carried by every Vue Flow movie node. */
 export interface MovieNodeData {
   /** The ComfyUI `class_type` (a {@link MOVIE_NODES} key). */
   classType: string;
   /** Optional node title override. */
   title?: string;
+  /**
+   * Optional user-written node description (Phase-6 D11), persisted inside
+   * `properties.description` and shown as the card's text stub when present.
+   * Never inferred from the schema blurb: empty means "no description".
+   */
+  description?: string;
+  /**
+   * Optional content provenance (Phase-6 D5), persisted inside
+   * `properties.contentRef`. Records where a source node's content came from;
+   * the content value itself lives in the modality widget.
+   */
+  contentRef?: ContentRef;
   /** Renderable widgets (schema zipped with current values). */
   widgets: NodeWidgetView[];
   /** Raw positional widget values (mirrors `widgets_values`). */
@@ -228,6 +264,11 @@ export function workflowToVueFlow(graph: WorkflowGraph): VueFlowGraph {
       status: "idle",
     };
     if (node.title !== undefined) data.title = node.title;
+    const props = node.properties ?? {};
+    if (typeof props.description === "string") data.description = props.description;
+    if (typeof props.contentRef === "object" && props.contentRef !== null) {
+      data.contentRef = props.contentRef as ContentRef;
+    }
     return {
       id: String(node.id),
       type: node.type,
@@ -343,6 +384,13 @@ export function vueFlowToWorkflow(
       widgets_values: [...(node.data?.widgetsValues ?? [])],
     };
     if (node.data?.title !== undefined) workflowNode.title = node.data.title;
+    if (node.data?.description !== undefined || node.data?.contentRef !== undefined) {
+      workflowNode.properties = {
+        ...(workflowNode.properties ?? {}),
+        ...(node.data.description !== undefined ? { description: node.data.description } : {}),
+        ...(node.data.contentRef !== undefined ? { contentRef: node.data.contentRef } : {}),
+      };
+    }
     return workflowNode;
   });
 

@@ -58,6 +58,8 @@ const emit = defineEmits<{
   "delete-node": [id: number];
   /** Delete mode: the clicked edge (flow id) should be removed. */
   "delete-edge": [id: string];
+  /** Cursor mode: a node was double-clicked → open its editor card (Phase-6 D3). */
+  "node-double-click": [id: number];
 }>();
 
 // ── Pointer tool context: shared with MovieNode via inject so nodes can paint
@@ -160,6 +162,18 @@ function onNodeToolClick(event: NodeMouseEvent): void {
     return;
   }
   if (mode === "delete") emit("delete-node", Number(event.node.id));
+}
+
+/**
+ * Double-click opens the node's editor card (Phase-6 D3), and only in the pure
+ * cursor state: in `connect` a double-click is two picks, in `delete` it is a
+ * delete, and while the hand/group one-shot arms are up the gesture owns the
+ * pointer. The canvas reports the id; the Studio owns the edit lock.
+ */
+function onNodeDblClick(event: NodeMouseEvent): void {
+  if (props.toolMode !== "cursor" || props.handMode || props.groupMode) return;
+  const id = Number(event.node.id);
+  if (Number.isFinite(id)) emit("node-double-click", id);
 }
 
 /** Pane click: dismiss the disconnect bubble and drop a pending connect source. */
@@ -271,6 +285,7 @@ function onMoveEnd(payload: { event?: unknown }): void {
       :selection-mode="SelectionMode.Partial"
       :default-edge-options="{ type: 'default' }"
       @node-click="onNodeToolClick"
+      @node-double-click="onNodeDblClick"
       @edge-click="onEdgeClick"
       @move-end="onMoveEnd"
       @pane-click="onPaneClick">
