@@ -24,7 +24,7 @@ base for **world-model** work — above all the generation of **interactive
 movies** — by deploying the world-model services and the interactive-movie
 application functions as plugins on top of the DSH + Synapse + Canvas foundation.
 
-**How the pieces communicate** — three surfaces, at three different boundaries:
+**How the pieces communicate** — four surfaces, at four different boundaries:
 
 - **Client ↔ server — three legs behind one typed SDK.** *Leg A*: the Matrix
   Client-Server API (identity, chat, media). *Leg B*: a ComfyUI-protocol
@@ -52,11 +52,6 @@ and to support world-model research. As a future step we also plan to reach
 external services through **MCP (Model Context Protocol) plugins** (DSH already
 ships MCP client/resources packages), complementing the off-host model access
 described above.
-
-dsh_movie runs **no account store of its own**: the app **cannot start without a
-Synapse homeserver on `http://127.0.0.1:8008` (`server_name: localhost`)**; if
-Synapse is down you will see a "Startup failed / Failed to fetch" screen from a
-refused `/_matrix/client/v3/account/whoami` call.
 
 For the full system design see [`doc/architecture.md`](doc/architecture.md) and
 the phase plans under [`doc/design/`](doc/design/).
@@ -225,6 +220,12 @@ live (`%h` expands to your home directory). Optionally run
 `loginctl enable-linger $USER` so the service keeps running after you log out.
 For a quick manual start instead of systemd:
 `python -m synapse.app.homeserver -c <your-homeserver.yaml>`.
+
+dsh_movie keeps **no account store of its own**, so the app **cannot start without
+a running Synapse** on `http://127.0.0.1:8008` (`server_name: localhost`). If the
+service is down, the web client's `/_matrix/client/v3/account/whoami` call is
+refused and you get a "Startup failed / Failed to fetch" screen — start
+`dsh-postgre` + `dsh-synapse` and reload the page.
 
 On first start Synapse creates its own schema (~176 tables). If your homeserver
 lives elsewhere, point `SYNAPSE_BASE_URL` / `SYNAPSE_SERVER_NAME` in
