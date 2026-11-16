@@ -4,6 +4,9 @@ import { translate } from "@dsh-movie/i18n/vue";
 import { authenticatedMediaUrl, fetchMediaBlobUrl } from "@/lib/matrixMedia";
 import { useAuthStore } from "@/stores/auth";
 import { clientConfig } from "@/config";
+// ACT: AI 客服 bot（dsh_bot）没有 Matrix 头像；时间线/花名册统一回落到这张内置客服图标，
+// 而不是首字母占位圆，保证 bot 在任何头像位置都有稳定形象。
+import botAvatarUrl from "@/icons/chatroom_customer_service.svg";
 
 // ACT: 群聊状态单例（计划 Task 2 + Task 3）。
 // Task 2：凭据不再由服务端代签隐藏账号，改为读取 auth store —— 用户自己用密码登录 Matrix 得到的令牌；
@@ -229,7 +232,8 @@ function refreshTimeline() {
       id: ev.getId() ?? `${ev.getTs()}-${senderId}`,
       senderId,
       senderName: member?.name || senderId,
-      senderAvatar: cachedMediaUrl(avatarMxc),
+      // ACT: bot 无 mxc 头像，直接用内置客服图标；其余成员走鉴权媒体缓存。
+      senderAvatar: senderId === botUserId.value ? botAvatarUrl : cachedMediaUrl(avatarMxc),
       msgtype,
       body: typeof content.body === "string" ? content.body : "",
       url: cachedMediaUrl(mxc),
@@ -714,7 +718,8 @@ const teamMembers = computed<TeamMember[]>(() => {
       return {
         userId: member.userId,
         name: member.name || member.userId,
-        avatar: mediaUrl(avatarMxc),
+        // ACT: 同时间线一致 —— bot 用内置客服图标，其余成员用鉴权媒体解析结果。
+        avatar: member.userId === botUserId.value ? botAvatarUrl : mediaUrl(avatarMxc),
         host: hostIds.has(member.userId),
         bot: member.userId === botUserId.value,
         // ACT: presence 事件不一定覆盖自己；已登录且能看到房间即视为已连接。
