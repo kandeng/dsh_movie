@@ -97,6 +97,39 @@ export async function ensureUser(
 }
 
 /**
+ * Check whether a Matrix account already exists
+ * (`GET /_synapse/admin/v2/users/<mxid>`). Used by the email sign-up path so a
+ * duplicate registration is rejected instead of silently overwriting an
+ * existing account's password via the idempotent {@link ensureUser} PUT.
+ * @param endpoint - resolved Synapse endpoint.
+ * @param logger - diagnostics sink.
+ * @param mxid - fully qualified user id to look up.
+ * @returns `true` when the user exists, `false` when Synapse reports 404, and
+ *   `null` when the lookup degraded (outage / auth failure) so callers can
+ *   fail closed rather than risk an overwrite.
+ */
+export async function userExists(
+  endpoint: MatrixEndpoint,
+  logger: AdminLogger,
+  mxid: MatrixUserId,
+): Promise<boolean | null> {
+  try {
+    const response = await fetch(`${endpoint.baseUrl}/_synapse/admin/v2/users/${mxid}`, {
+      headers: authHeaders(endpoint.adminToken),
+    })
+    if (response.status === 404) return false
+    if (!response.ok) {
+      logger.warn(`[matrix] userExists ${mxid} -> HTTP ${response.status}: ${await bodyPreview(response)}`)
+      return null
+    }
+    return true
+  } catch (error) {
+    logger.warn(`[matrix] userExists ${mxid} failed: ${String(error)}`)
+    return null
+  }
+}
+
+/**
  * Broker client credentials for a hidden account via the Admin puppet-login flow
  * (`POST /_synapse/admin/v1/users/<mxid>/login`, Synapse >= 1.49). The user never
  * sees a Matrix password; the host signs a token on their behalf.

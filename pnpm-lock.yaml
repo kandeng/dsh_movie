@@ -201,6 +201,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ~3.19.0
         version: 3.19.0
+      '@dsh-movie/protocol':
+        specifier: workspace:*
+        version: link:../../../protocol
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ~4.1.0

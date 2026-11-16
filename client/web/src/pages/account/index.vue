@@ -46,6 +46,15 @@
 
             <dl class="profileFields">
               <div class="profileRow">
+                <dt>{{ translate("邮箱") }}</dt>
+                <dd>
+                  {{ auth.email || translate("未知") }}
+                  <el-tag :type="auth.emailVerified ? 'success' : 'warning'" size="small" effect="plain">
+                    {{ auth.emailVerified ? translate("已验证") : translate("未验证") }}
+                  </el-tag>
+                </dd>
+              </div>
+              <div class="profileRow">
                 <dt>{{ translate("昵称") }}</dt>
                 <dd>
                   <el-input v-model="editName" size="small" :disabled="saving" :placeholder="translate('群聊中展示的名字')" />
@@ -63,6 +72,15 @@
               <el-button type="danger" plain :loading="signingOut" @click="signOut">{{ translate("退出登录") }}</el-button>
             </div>
 
+            <!-- ACT: 邮箱未验证提醒（本站无 SMTP / 验证码流程）：只给警示，不提供补验表单。 -->
+            <div v-if="!auth.emailVerified" class="verifyBlock">
+              <div class="verifyNotice" role="note">
+                <p class="verifyTitle">{{ translate("你的邮箱尚未验证") }}</p>
+                <p>{{ translate("本站不使用邮箱验证码，注册后即可正常使用全部功能。") }}</p>
+                <p class="verifyWarn">{{ translate("未验证邮箱的影响：如果忘记密码，将无法通过邮箱找回，只能重新注册一个新账号。请务必牢记你的密码。") }}</p>
+              </div>
+            </div>
+
             <!-- ACT: 修改密码：Matrix UIA 流程，成功后所有设备登出，本地会话失效并回落到登录表单。 -->
             <div class="passwordBlock">
               <h3 class="blockTitle">{{ translate("修改密码") }}</h3>
@@ -75,28 +93,74 @@
             </div>
           </div>
 
-          <!-- ACT: 未登录：内联 Mode-B 登录表单（Matrix 用户名 + 密码，直连本地 Synapse）。 -->
+          <!-- ACT: 未登录：内联邮箱登录 / 注册（Mode-B 直连本地 Synapse；注册经 host /auth/register 供给账号）。 -->
           <div v-else class="loginBlock">
             <p class="accountHint">{{ translate("登录后即可创建群聊、邀请成员，并作为主持人生成视频。") }}</p>
-            <el-form class="loginForm" label-position="top" @submit.prevent="onSubmit">
-              <el-form-item :label="translate('Matrix 用户名')">
-                <el-input v-model="form.identifier" placeholder="movie_demo" autocomplete="username" :disabled="auth.busy" />
-              </el-form-item>
-              <el-form-item :label="translate('密码')">
-                <el-input
-                  v-model="form.password"
-                  type="password"
-                  placeholder="••••••••"
-                  autocomplete="current-password"
-                  show-password
-                  :disabled="auth.busy"
-                  @keyup.enter="onSubmit" />
-              </el-form-item>
-              <el-alert v-if="loginError" :title="loginError" type="error" show-icon :closable="false" class="loginAlert" />
-              <el-button type="primary" class="loginSubmit" :loading="auth.busy" @click="onSubmit">
-                {{ auth.busy ? translate("登录中…") : translate("登录") }}
-              </el-button>
-            </el-form>
+            <el-tabs v-model="authMode" class="authTabs" stretch>
+              <!-- 登录：邮箱 + 密码。 -->
+              <el-tab-pane name="login">
+                <template #label>{{ translate("登录") }}</template>
+                <el-form class="authForm" label-position="top" @submit.prevent="onSubmit">
+                  <el-form-item :label="translate('邮箱')" :error="loginField.email">
+                    <el-input v-model="form.identifier" type="email" placeholder="you@example.com" autocomplete="username" :disabled="auth.busy" @input="loginField.email = ''" />
+                  </el-form-item>
+                  <el-form-item :label="translate('密码')" :error="loginField.password">
+                    <el-input
+                      v-model="form.password"
+                      type="password"
+                      placeholder="••••••••"
+                      autocomplete="current-password"
+                      show-password
+                      :disabled="auth.busy"
+                      @input="loginField.password = ''"
+                      @keyup.enter="onSubmit" />
+                  </el-form-item>
+                  <el-alert v-if="loginError" :title="loginError" type="error" show-icon :closable="false" class="loginAlert" />
+                  <el-button type="primary" class="authSubmit" :loading="auth.busy" @click="onSubmit">
+                    {{ auth.busy ? translate("登录中…") : translate("登录") }}
+                  </el-button>
+                </el-form>
+              </el-tab-pane>
+
+              <!-- 注册：邮箱 + 昵称 + 密码 + 确认密码；成功后自动登录。无需邮箱验证。 -->
+              <el-tab-pane name="register">
+                <template #label>{{ translate("注册") }}</template>
+                <el-form class="authForm" label-position="top" @submit.prevent="onRegister">
+                  <el-form-item :label="translate('邮箱')" :error="regField.email">
+                    <el-input v-model="regForm.email" type="email" placeholder="you@example.com" autocomplete="username" :disabled="auth.busy" @input="regField.email = ''" />
+                  </el-form-item>
+                  <el-form-item :label="translate('昵称')">
+                    <el-input v-model="regForm.name" :placeholder="translate('群聊中展示的名字')" autocomplete="nickname" :disabled="auth.busy" />
+                  </el-form-item>
+                  <el-form-item :label="translate('密码')" :error="regField.password">
+                    <el-input
+                      v-model="regForm.password"
+                      type="password"
+                      placeholder="••••••••"
+                      autocomplete="new-password"
+                      show-password
+                      :disabled="auth.busy"
+                      @input="regField.password = ''" />
+                  </el-form-item>
+                  <el-form-item :label="translate('确认密码')" :error="regField.confirm">
+                    <el-input
+                      v-model="regForm.confirm"
+                      type="password"
+                      placeholder="••••••••"
+                      autocomplete="new-password"
+                      show-password
+                      :disabled="auth.busy"
+                      @input="regField.confirm = ''"
+                      @keyup.enter="onRegister" />
+                  </el-form-item>
+                  <p class="registerNote">{{ translate("注册即表示你已知悉：本站不使用邮箱验证，若忘记密码将无法通过邮箱找回。") }}</p>
+                  <el-alert v-if="registerError" :title="registerError" type="error" show-icon :closable="false" class="loginAlert" />
+                  <el-button type="primary" class="authSubmit" :loading="auth.busy" @click="onRegister">
+                    {{ auth.busy ? translate("注册中…") : translate("注册") }}
+                  </el-button>
+                </el-form>
+              </el-tab-pane>
+            </el-tabs>
             <div class="loginHint">
               <div>homeserver: <el-tag size="small">{{ clientConfig.homeserverUrl }}</el-tag></div>
             </div>
@@ -124,7 +188,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
 import iconAccount from "@/icons/user.svg";
-import { useAuthStore, localpartOf } from "@/stores/auth";
+import { useAuthStore, localpartOf, AuthFieldError } from "@/stores/auth";
 import { clientConfig } from "@/config";
 
 // ACT: 账户页：设置页同款整页布局（左菜单栏 + 右扁平主面板），主面板内含「账户/钱包/账单」三个锚点段落。
@@ -135,9 +199,28 @@ const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 
-// ── 未登录：Mode-B 登录表单 ──
+// ── 未登录：邮箱登录 / 注册（两个 tab）──
+const authMode = ref<"login" | "register">("login");
 const form = reactive({ identifier: "", password: "" });
 const loginError = ref("");
+// ACT: 逐字段错误标记：失败时把提示挂到对应输入框（红框 + 行内文案），而非只给整块 alert。
+const loginField = reactive({ email: "", password: "" });
+const regForm = reactive({ email: "", name: "", password: "", confirm: "" });
+const registerError = ref("");
+const regField = reactive({ email: "", password: "", confirm: "" });
+
+// ACT: 把 store 抛出的 AuthFieldError 落到对应字段；非字段级错误（如 Synapse 不可用）落到整块 alert。
+type FieldErrors = { email: string; password: string; confirm?: string };
+function applyAuthError(err: unknown, field: FieldErrors, setGeneral: (message: string) => void) {
+  if (err instanceof AuthFieldError) {
+    if (err.field === "email") field.email = err.message;
+    else if (err.field === "password") field.password = err.message;
+    else if (err.field === "confirm") field.confirm = err.message;
+    else setGeneral(err.message);
+  } else {
+    setGeneral(err instanceof Error ? err.message : String(err));
+  }
+}
 
 // ── 已登录：资料编辑 ──
 const editName = ref("");
@@ -261,13 +344,37 @@ function afterSignIn() {
 
 async function onSubmit() {
   loginError.value = "";
+  loginField.email = "";
+  loginField.password = "";
   try {
     await auth.login(form.identifier, form.password);
     ElMessage.success(translate("已登录"));
     form.password = "";
     afterSignIn();
   } catch (err) {
-    loginError.value = err instanceof Error ? err.message : String(err);
+    applyAuthError(err, loginField, message => { loginError.value = message; });
+  }
+}
+
+// ACT: 注册：邮箱 + 昵称 + 密码（含确认），经 auth.register 调用 host /auth/register
+// 供给账号后自动登录；成功后与登录一致地回到守卫给定的目标页。
+async function onRegister() {
+  registerError.value = "";
+  regField.email = "";
+  regField.password = "";
+  regField.confirm = "";
+  if (regForm.password !== regForm.confirm) {
+    regField.confirm = translate("两次输入的密码不一致");
+    return;
+  }
+  try {
+    await auth.register(regForm.email, regForm.password, regForm.name);
+    ElMessage.success(translate("注册成功"));
+    regForm.password = "";
+    regForm.confirm = "";
+    afterSignIn();
+  } catch (err) {
+    applyAuthError(err, regField, message => { registerError.value = message; });
   }
 }
 
@@ -516,7 +623,7 @@ onBeforeUnmount(() => { /* nothing to tear down; avatar blob URLs are session-sc
   }
 }
 
-// ACT: 未登录内联登录表单。
+// ACT: 未登录内联邮箱登录 / 注册表单。
 .loginBlock {
   max-width: 420px;
 }
@@ -528,11 +635,27 @@ onBeforeUnmount(() => { /* nothing to tear down; avatar blob URLs are session-sc
   line-height: 1.7;
 }
 
+.authTabs {
+  :deep(.el-tabs__header) { margin-bottom: 16px; }
+}
+
+.authForm {
+  display: flex;
+  flex-direction: column;
+}
+
+.registerNote {
+  margin: 0 0 12px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .loginAlert {
   margin-bottom: 12px;
 }
 
-.loginSubmit {
+.authSubmit {
   width: 100%;
 }
 
@@ -543,5 +666,32 @@ onBeforeUnmount(() => { /* nothing to tear down; avatar blob URLs are session-sc
   gap: 6px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+// ACT: 邮箱未验证警示区（无补验表单，仅提醒）。
+.verifyBlock {
+  margin-top: 4px;
+}
+
+.verifyNotice {
+  padding: 12px 14px;
+  border: 1px solid var(--el-color-warning-light-5);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-color-warning-light-9);
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  line-height: 1.7;
+
+  p { margin: 0 0 6px; }
+  p:last-child { margin-bottom: 0; }
+
+  .verifyTitle {
+    font-weight: 600;
+    color: var(--el-color-warning-dark-2);
+  }
+
+  .verifyWarn {
+    color: var(--el-color-warning-dark-2);
+  }
 }
 </style>

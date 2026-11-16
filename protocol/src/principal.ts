@@ -67,3 +67,31 @@ export function localpartOf(userId: MatrixUserId): string {
 export function isHostRole(role: RoomRole): boolean {
   return role === 'host'
 }
+
+/**
+ * Derive a deterministic Matrix localpart from an email address.
+ *
+ * Sign-up on the Account page is email-keyed, but Mode-B login goes straight
+ * to Synapse, so both the host (at `/auth/register` provisioning time) and the
+ * browser (at login time) must map the same email to the same localpart with
+ * no shared storage. The localpart is `<name-part>.<djb2(email) base36>`:
+ * the name part keeps it human-readable, and the email hash suffix keeps
+ * `alice@a.com` and `alice@b.com` from colliding.
+ * @param email - the sign-up email address (case-insensitive).
+ * @returns a localpart within the Matrix-allowed charset, or `''` when the
+ *   email has no usable name part.
+ */
+export function localpartFromEmail(email: string): string {
+  const normalized = email.trim().toLowerCase()
+  const at = normalized.indexOf('@')
+  if (at <= 0) return ''
+  const name = normalized.slice(0, at)
+  // Matrix localparts allow [a-z0-9._=-/]; drop anything else for hygiene.
+  const safe = name.replace(/[^a-z0-9._=-]/g, '').slice(0, 40)
+  if (safe === '') return ''
+  let hash = 5381
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash = ((hash << 5) + hash + normalized.charCodeAt(i)) >>> 0
+  }
+  return `${safe}.${hash.toString(36)}`
+}

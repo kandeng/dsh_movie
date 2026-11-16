@@ -21,6 +21,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { localpartFromEmail } from '@dsh-movie/protocol'
 import {
   brokerToken as adminBrokerToken,
   ensureUser,
@@ -31,6 +32,7 @@ import {
   roomPowerLevels,
   setRoomHostAs,
   syncMatrixProfile,
+  userExists,
   whoami as adminWhoami,
   type MatrixEndpoint,
 } from './matrix-admin.ts'
@@ -43,12 +45,13 @@ import type {
   MatrixUserId,
   ProvisionOptions,
   ProvisionResult,
+  RegisterResult,
   RoomRole,
 } from './types.ts'
 
 export type {
   BrokeredCredentials, MatrixIdentity, MatrixPrincipal, MatrixRoomId, MatrixUserId,
-  ProvisionOptions, ProvisionResult, RoomRole,
+  ProvisionOptions, ProvisionResult, RegisterResult, RegisterStatus, RoomRole,
 } from './types.ts'
 
 /** Stable Loader identity. */
@@ -159,6 +162,28 @@ export function apply(ctx: Context, config: Config): void {
       // them whether Synapse actually accepted it.
       ctx.emit('matrix/user-provisioned', { userId, provisioned })
       return { userId, provisioned }
+    },
+
+    async registerUser(email: string, password: string, displayName?: string): Promise<RegisterResult> {
+      // Derive the same deterministic localpart the browser will re-derive at
+      // login (Mode-B goes straight to Synapse), so no mapping needs storing.
+      const localpart = localpartFromEmail(email)
+      if (localpart === '') return { status: 'invalid' }
+      const userId = service.userIdFor(localpart)
+      const endpoint = await resolveEndpoint()
+      if (endpoint === null) return { status: 'degraded' }
+      // Fail closed on an ambiguous lookup (`null`) rather than risk the
+      // idempotent PUT overwriting an existing account's password.
+      const exists = await userExists(endpoint, ctx.logger, userId)
+      if (exists === null) return { status: 'degraded' }
+      if (exists) return { status: 'exists', userId }
+      const provisioned = await ensureUser(endpoint, ctx.logger, userId, {
+        password,
+        ...(displayName !== undefined && displayName !== '' ? { displayName } : {}),
+      })
+      if (!provisioned) return { status: 'degraded' }
+      ctx.emit('matrix/user-provisioned', { userId, provisioned: true })
+      return { status: 'ok', userId }
     },
 
     async brokerToken(userId: MatrixUserId): Promise<BrokeredCredentials | null> {

@@ -14,6 +14,11 @@
  *
  * Endpoints:
  * - `GET  /auth/health`    -> `{ ok: true }`
+ * - `POST /auth/register`  -> body `{ email, password, name? }`; provisions a
+ *                             new account through the Synapse Admin API (open
+ *                             registration stays disabled). `200 { ok, userId }`
+ *                             on success; `409` when the email is taken; `400`
+ *                             on a malformed/weak request; `503` when degraded.
  * - `POST /auth/principal` -> body `{ token }`; `200 { ok, principal, principalId }`
  *                             on a valid token, `401` on an invalid one, `400`
  *                             when the token is missing.
@@ -73,6 +78,22 @@ export interface RoleResponse {
   error?: string
 }
 
+/** The JSON wire shape returned by `POST /auth/register`. */
+export interface RegisterResponse {
+  /** Whether a new account was provisioned. */
+  ok: boolean
+  /** The fully qualified Matrix user id, present when `ok`. */
+  userId?: string
+  /** A short machine-readable reason, present when not `ok`. */
+  error?: string
+}
+
+/** Minimum accepted sign-up password length. */
+const MIN_PASSWORD_LENGTH = 8
+
+/** A permissive email shape check (the Account page is the only validator). */
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
 /** Bound the request body so a hostile client cannot exhaust memory. */
 const MAX_BODY_BYTES = 8192
 
@@ -84,7 +105,7 @@ function applyCors(res: ServerResponse): void {
 }
 
 /** Send a JSON response with CORS headers already applied. */
-function sendJson(res: ServerResponse, status: number, payload: PrincipalResponse | RoleResponse | { ok: boolean }): void {
+function sendJson(res: ServerResponse, status: number, payload: PrincipalResponse | RoleResponse | RegisterResponse | { ok: boolean }): void {
   applyCors(res)
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(payload))
@@ -126,6 +147,45 @@ export function startPrincipalListener(deps: PrincipalListenerDeps): Server {
     }
     if (req.method === 'GET' && url === '/auth/health') {
       sendJson(res, 200, { ok: true })
+      return
+    }
+    if (req.method === 'POST' && url === '/auth/register') {
+      let email = ''
+      let password = ''
+      let name = ''
+      try {
+        const raw = await readBody(req)
+        const parsed = JSON.parse(raw === '' ? '{}' : raw) as { email?: unknown; password?: unknown; name?: unknown }
+        if (typeof parsed.email === 'string') email = parsed.email.trim()
+        if (typeof parsed.password === 'string') password = parsed.password
+        if (typeof parsed.name === 'string') name = parsed.name.trim()
+      } catch (error) {
+        deps.logger.warn('[matrix-identity] /auth/register bad body: %s', String(error))
+        sendJson(res, 400, { ok: false, error: 'bad-request' })
+        return
+      }
+      if (!EMAIL_PATTERN.test(email)) {
+        sendJson(res, 400, { ok: false, error: 'invalid-email' })
+        return
+      }
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        sendJson(res, 400, { ok: false, error: 'invalid-password' })
+        return
+      }
+      const result = await deps.identity.registerUser(email, password, name === '' ? undefined : name)
+      if (result.status === 'ok') {
+        sendJson(res, 200, { ok: true, userId: result.userId })
+        return
+      }
+      if (result.status === 'exists') {
+        sendJson(res, 409, { ok: false, error: 'email-taken' })
+        return
+      }
+      if (result.status === 'invalid') {
+        sendJson(res, 400, { ok: false, error: 'invalid-email' })
+        return
+      }
+      sendJson(res, 503, { ok: false, error: 'unavailable' })
       return
     }
     if (req.method === 'POST' && url === '/auth/principal') {

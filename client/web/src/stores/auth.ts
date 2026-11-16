@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import axios from "axios";
 import { translate } from "@dsh-movie/i18n/vue";
+import { localpartFromEmail } from "@dsh-movie/protocol";
 import {
   loginWithPassword,
   whoami,
@@ -35,9 +36,31 @@ export type AuthSession = {
   displayName: string;
   /** `mxc://` uri or empty string. */
   avatarUrl: string;
+  /** The sign-up email this session's localpart was derived from. */
+  email: string;
 };
 
 type ProfileResponse = { displayname?: string; avatar_url?: string };
+
+type RegisterResponse = { ok?: boolean; userId?: string; error?: string };
+
+/** Which form field a login/register failure should be flagged on. */
+export type AuthField = "email" | "password" | "confirm";
+
+/**
+ * A login/register failure tied to a specific form field, so the Account page
+ * can flag the offending input (red border + inline message) instead of only
+ * showing a generic alert. Failures that are not attributable to a field
+ * (e.g. Synapse unreachable) are thrown as plain `Error`.
+ */
+export class AuthFieldError extends Error {
+  readonly field: AuthField;
+  constructor(field: AuthField, message: string) {
+    super(message);
+    this.name = "AuthFieldError";
+    this.field = field;
+  }
+}
 
 /** Extract the localpart from `@localpart:serverName`, used as a display fallback. */
 export function localpartOf(userId: string): string {
@@ -97,6 +120,14 @@ export const useAuthStore = defineStore(
       () => session.value?.displayName || localpartOf(session.value?.userId ?? ""),
     );
     const avatarUrl = computed(() => session.value?.avatarUrl ?? "");
+    /** The sign-up email of the current session (empty when signed out). */
+    const email = computed(() => session.value?.email ?? "");
+    /**
+     * dsh_movie has no SMTP / email-OTP path, so a signed-up email is never
+     * verified. The Account page shows a standing warning that an unverified
+     * email cannot be used to recover a forgotten password.
+     */
+    const emailVerified = computed(() => false);
 
     /** Read the Matrix profile (displayname/avatar); failure never blocks login. */
     async function refreshProfile(): Promise<void> {
@@ -163,26 +194,73 @@ export const useAuthStore = defineStore(
       }
     }
 
-    /** Log into Synapse with a Matrix username (localpart or full mxid) + password. */
+    /** Log into Synapse with the sign-up email + password (Mode-B, direct). */
     async function login(identifier: string, password: string): Promise<void> {
-      const user = identifier.trim();
-      if (!user) throw new Error(translate("请输入用户名"));
-      if (!password) throw new Error(translate("请输入密码"));
+      const normalized = identifier.trim().toLowerCase();
+      if (!normalized) throw new AuthFieldError("email", translate("请输入邮箱"));
+      if (!password) throw new AuthFieldError("password", translate("请输入密码"));
+      // The Account page is email-keyed, but Synapse only knows the localpart,
+      // so re-derive the same deterministic localpart used at sign-up.
+      const localpart = localpartFromEmail(normalized);
+      if (!localpart) throw new AuthFieldError("email", translate("邮箱格式不正确"));
       busy.value = true;
       try {
-        const matrixSession = await loginWithPassword(sdkConfig, toMatrixId(user), password);
+        const matrixSession = await loginWithPassword(sdkConfig, toMatrixId(localpart), password);
         session.value = {
           userId: matrixSession.userId,
           accessToken: matrixSession.accessToken,
           deviceId: matrixSession.deviceId ?? "",
           displayName: localpartOf(matrixSession.userId),
           avatarUrl: "",
+          email: normalized,
         };
         restored.value = true;
         await refreshProfile();
+      } catch (error) {
+        // A rejected credential is a password-field problem; surface it there.
+        if (error instanceof AuthFieldError) throw error;
+        throw new AuthFieldError("password", translate("邮箱或密码错误"));
       } finally {
         busy.value = false;
       }
+    }
+
+    /**
+     * Register a new account from an email + password (+ optional display name)
+     * through the host `/auth/register` listener, then sign in automatically.
+     * Synapse open registration stays disabled; this is the only way to create
+     * an account. No email verification is performed.
+     * @param email - the sign-up email (case-insensitive).
+     * @param password - the password (must be at least 8 characters).
+     * @param name - an optional display name for the new account.
+     */
+    async function register(email: string, password: string, name: string): Promise<void> {
+      const normalized = email.trim().toLowerCase();
+      if (!normalized) throw new AuthFieldError("email", translate("请输入邮箱"));
+      if (!localpartFromEmail(normalized)) throw new AuthFieldError("email", translate("邮箱格式不正确"));
+      if (password.length < 8) throw new AuthFieldError("password", translate("密码至少需要 8 位"));
+      busy.value = true;
+      try {
+        await axios.post<RegisterResponse>(
+          `${clientConfig.authUrl}/auth/register`,
+          { email: normalized, password, name: name.trim() },
+        );
+      } catch (error) {
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        const code = axios.isAxiosError(error)
+          ? (error.response?.data as RegisterResponse | undefined)?.error
+          : undefined;
+        if (status === 409 || code === "email-taken") throw new AuthFieldError("email", translate("该邮箱已被注册"));
+        if (code === "invalid-email") throw new AuthFieldError("email", translate("邮箱格式不正确"));
+        if (code === "invalid-password") throw new AuthFieldError("password", translate("密码至少需要 8 位"));
+        if (status === 400) throw new AuthFieldError("email", translate("邮箱或密码格式不正确"));
+        if (status === 503) throw new Error(translate("Synapse 暂时不可用，请稍后再试"));
+        throw new Error(translate("注册失败，请稍后再试"));
+      } finally {
+        busy.value = false;
+      }
+      // Auto-login after a successful sign-up (matches vidsay behavior).
+      await login(normalized, password);
     }
 
     /**
@@ -260,9 +338,12 @@ export const useAuthStore = defineStore(
       displayName,
       avatarUrl,
       avatarHttpUrl,
+      email,
+      emailVerified,
       sessionValid,
       revalidating,
       login,
+      register,
       logout,
       restore,
       revalidate,

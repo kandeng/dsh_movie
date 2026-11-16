@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.19.0",
-    "@deepseek-ai/dsh-credentials": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.1",
+    "@dsh-movie/protocol": "workspace:*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",

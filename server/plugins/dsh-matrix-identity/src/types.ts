@@ -67,6 +67,25 @@ export interface ProvisionResult {
 }
 
 /**
+ * Outcome of an email sign-up attempt via {@link MatrixIdentity.registerUser}.
+ * The Account page is the only registration surface; Synapse open registration
+ * stays disabled, so sign-up provisions the account through the Admin API.
+ * - `ok`       - the account was created; {@link RegisterResult.userId} is set.
+ * - `exists`   - an account for that email already exists (rejected, no reset).
+ * - `invalid`  - the email could not be mapped to a usable Matrix localpart.
+ * - `degraded` - Synapse was unreachable/unconfigured; nothing was written.
+ */
+export type RegisterStatus = 'ok' | 'exists' | 'invalid' | 'degraded'
+
+/** Result of {@link MatrixIdentity.registerUser}. */
+export interface RegisterResult {
+  /** The machine-readable outcome; see {@link RegisterStatus}. */
+  status: RegisterStatus
+  /** The fully qualified user id, present when `status` is `ok` or `exists`. */
+  userId?: MatrixUserId
+}
+
+/**
  * Synapse-backed identity provider (Cordis service key `ctx.matrixIdentity`).
  *
  * Authentication modes (Phase 1):
@@ -83,6 +102,14 @@ export interface MatrixIdentity {
   userIdFor(localpart: string): MatrixUserId
   /** Idempotently create/update a hidden Matrix account for a localpart. */
   provisionUser(localpart: string, options?: ProvisionOptions): Promise<ProvisionResult>
+  /**
+   * Register a new account from an email + password (the Account page sign-up
+   * path). Derives a deterministic localpart from the email, rejects an email
+   * that already has an account (never overwrites its password), and otherwise
+   * provisions it through the Synapse Admin API. Synapse open registration
+   * stays disabled — this is the only way in.
+   */
+  registerUser(email: string, password: string, displayName?: string): Promise<RegisterResult>
   /** Broker a client token for a hidden account via the Admin puppet-login flow. */
   brokerToken(userId: MatrixUserId): Promise<BrokeredCredentials | null>
   /** Password login against the CS API (Mode A). Returns credentials or `null`. */
