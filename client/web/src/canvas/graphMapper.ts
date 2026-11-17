@@ -27,6 +27,7 @@ import {
   FUNCTIONAL_NODES,
   MOVIE_NODES,
   SUBTYPE_OF,
+  type ImportedSkillRef,
   type MovieNodeSchema,
   type PromptGraph,
   type PromptGraphNode,
@@ -97,6 +98,14 @@ export interface MovieNodeData {
    * the content value itself lives in the modality widget.
    */
   contentRef?: ContentRef;
+  /**
+   * Optional imported-skill references (Phase-7 D7), persisted additively inside
+   * `properties.importedSkills`. Each entry pins a skill downloaded into the
+   * room's workspace dir (`skills/<id>.md`); the pasted body snapshot lives in
+   * the node's text widget, so a published node stays independent of upstream
+   * (R8). The executor reads this for the mode-2 run-time re-fetch.
+   */
+  importedSkills?: ImportedSkillRef[];
   /** Renderable widgets (schema zipped with current values). */
   widgets: NodeWidgetView[];
   /** Raw positional widget values (mirrors `widgets_values`). */
@@ -269,6 +278,9 @@ export function workflowToVueFlow(graph: WorkflowGraph): VueFlowGraph {
     if (typeof props.contentRef === "object" && props.contentRef !== null) {
       data.contentRef = props.contentRef as ContentRef;
     }
+    if (Array.isArray(props.importedSkills)) {
+      data.importedSkills = props.importedSkills as ImportedSkillRef[];
+    }
     return {
       id: String(node.id),
       type: node.type,
@@ -384,11 +396,12 @@ export function vueFlowToWorkflow(
       widgets_values: [...(node.data?.widgetsValues ?? [])],
     };
     if (node.data?.title !== undefined) workflowNode.title = node.data.title;
-    if (node.data?.description !== undefined || node.data?.contentRef !== undefined) {
+    if (node.data?.description !== undefined || node.data?.contentRef !== undefined || node.data?.importedSkills !== undefined) {
       workflowNode.properties = {
         ...(workflowNode.properties ?? {}),
         ...(node.data.description !== undefined ? { description: node.data.description } : {}),
         ...(node.data.contentRef !== undefined ? { contentRef: node.data.contentRef } : {}),
+        ...(node.data.importedSkills !== undefined ? { importedSkills: node.data.importedSkills } : {}),
       };
     }
     return workflowNode;
@@ -469,6 +482,11 @@ export function workflowToPrompt(graph: WorkflowGraph): PromptGraph {
 
     const spec: PromptGraphNode = { class_type: node.type, inputs };
     if (node.title !== undefined) spec._meta = { title: node.title };
+    // Carry imported-skill refs (Phase-7 D7) into the prompt so the gateway's
+    // mode-2 run-time remedy can re-fetch a missing `skills/<id>.md` before the
+    // node executes. Additive + opaque to validation (only `importedSkills`).
+    const imported = node.properties?.importedSkills;
+    if (Array.isArray(imported) && imported.length > 0) spec.properties = { importedSkills: imported };
     prompt[String(node.id)] = spec;
   }
   return prompt;

@@ -26,7 +26,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import type { MatrixUserId, WorkflowGraph, WorkflowRecord } from '@dsh-movie/protocol'
 import type { CommitMeta, DraftState } from '@dsh-movie/protocol'
 
@@ -75,6 +75,24 @@ export interface WorkspaceStore {
   undo(roomId: string): DraftState
   /** Redo one draft step (server-side); returns the resulting draft state. */
   redo(roomId: string): DraftState
+
+  /* --- Phase-7 D7: per-room imported-skill files + import commits --- */
+
+  /**
+   * Write a skill body to a room-relative path (`skills/<file>.md`). Refuses
+   * (returns `false`) any path that escapes the room dir (zip-slip guard).
+   */
+  writeSkill(roomId: string, relPath: string, body: string): boolean
+  /** Read a skill body by room-relative path, or `null` when absent/escaping. */
+  readSkill(roomId: string, relPath: string): string | null
+  /** True when a skill file exists at the room-relative path. */
+  hasSkill(roomId: string, relPath: string): boolean
+  /**
+   * Record one skill-import commit (`skill import <id>`) against the room's
+   * history. Unlike a graph commit this NEVER deletes the working draft, so
+   * importing a skill cannot wipe the host's uncommitted WIP.
+   */
+  recordSkillImport(roomId: string, author: MatrixUserId | null, skillId: string): CommitMeta
 }
 
 /** Turn a room id into a stable, filesystem-safe directory name. */
@@ -157,6 +175,46 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
     const draftFile = join(roomDir(roomId), 'draft.json')
     if (existsSync(draftFile)) rmSync(draftFile)
     return record
+  }
+
+  /** Resolve (and lazily create) a room's `skills/` directory. */
+  function skillDir(roomId: string): string {
+    const dir = join(roomDir(roomId), 'skills')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    return dir
+  }
+
+  /**
+   * Resolve a room-relative skill path against the room dir, refusing any escape
+   * (zip-slip guard). Returns `null` when the resolved path leaves the room dir.
+   */
+  function safeSkillPath(roomId: string, relPath: string): string | null {
+    const base = roomDir(roomId)
+    const target = resolve(base, relPath)
+    if (target !== base && !target.startsWith(base + sep)) return null
+    return target
+  }
+
+  /**
+   * Append a skill-import commit: snapshot the CURRENT HEAD graph at the next
+   * revision and index it in `commits.json`, but — unlike {@link appendCommit} —
+   * NEVER delete `draft.json`. Importing a skill must not wipe the host's WIP,
+   * yet HEAD's revision still advances so the history stays monotonic.
+   */
+  function appendSkillCommit(roomId: string, author: MatrixUserId | null, skillId: string): CommitMeta {
+    const head = readHead(roomId)
+    const graph = head?.graph ?? emptyGraph()
+    const rev = (head?.rev ?? 0) + 1
+    const file = `history/${rev}.json`
+    writeJson(join(historyDir(roomId), `${rev}.json`), graph)
+    const commits = readCommits(roomId)
+    const meta: CommitMeta = { rev, author, timestamp: Date.now(), message: `skill import ${skillId}`, file }
+    commits.push(meta)
+    writeJson(join(roomDir(roomId), 'commits.json'), commits)
+    const record: WorkflowRecord = { id: roomId, roomId, graph, rev, updatedAt: meta.timestamp, updatedBy: author }
+    writeJson(join(roomDir(roomId), 'head.json'), record)
+    // NOTE: draft.json is deliberately preserved here (see the interface docs).
+    return meta
   }
 
   /** Write a draft snapshot file and return its stored name. */
@@ -277,6 +335,40 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
       persistDraftIndex(roomId, index)
       if (next !== null) writeJson(join(roomDir(roomId), 'draft.json'), next)
       return buildDraftState(roomId)
+    },
+
+    writeSkill(roomId: string, relPath: string, body: string): boolean {
+      const target = safeSkillPath(roomId, relPath)
+      if (target === null) return false
+      const dir = dirname(target)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      // Crash-tolerant write: temp file then atomic rename (mirrors writeJson).
+      const tmp = `${target}.tmp`
+      writeFileSync(tmp, body, 'utf8')
+      renameSync(tmp, target)
+      return true
+    },
+
+    readSkill(roomId: string, relPath: string): string | null {
+      const target = safeSkillPath(roomId, relPath)
+      if (target === null) return null
+      try {
+        if (!existsSync(target)) return null
+        return readFileSync(target, 'utf8')
+      } catch {
+        return null
+      }
+    },
+
+    hasSkill(roomId: string, relPath: string): boolean {
+      const target = safeSkillPath(roomId, relPath)
+      return target !== null && existsSync(target)
+    },
+
+    recordSkillImport(roomId: string, author: MatrixUserId | null, skillId: string): CommitMeta {
+      // Ensure the skills dir exists even before the first body is written.
+      skillDir(roomId)
+      return appendSkillCommit(roomId, author, skillId)
     },
   }
 }

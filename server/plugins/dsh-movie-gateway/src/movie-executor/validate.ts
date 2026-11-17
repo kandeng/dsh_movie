@@ -3,7 +3,7 @@
  *
  * Validates a flattened ComfyUI prompt graph before it is scheduled: every
  * `class_type` must be in the executor {@link registry}, node specs may carry
- * only the known keys (`class_type`, `inputs`, `_meta`), and every link input
+ * only the known keys (`class_type`, `inputs`, `_meta`, `properties`), and every link input
  * `[sourceId, slotIndex]` must reference an existing node and an in-range output
  * slot. Phase-5 D2 adds the link *type-compatibility* check: when both endpoint
  * slots are declared by protocol schemas, the source output type must be
@@ -31,7 +31,7 @@ export type PromptValidation =
   | { ok: false; nodeErrors: Record<string, NodeError> }
 
 /** Node-spec keys the executor accepts (anything else is rejected). */
-const ALLOWED_NODE_KEYS: ReadonlySet<string> = new Set(['class_type', 'inputs', '_meta'])
+const ALLOWED_NODE_KEYS: ReadonlySet<string> = new Set(['class_type', 'inputs', '_meta', 'properties'])
 
 /**
  * Narrow an input value to a ComfyUI link tuple `[sourceId, slotIndex]`.

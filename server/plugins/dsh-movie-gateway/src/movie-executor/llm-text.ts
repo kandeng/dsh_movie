@@ -74,10 +74,25 @@ function resolvedSections(inputs: Record<string, unknown>): string[] {
   return resolved.map((entry): string => display(entry)).filter((entry): boolean => entry !== '')
 }
 
-/** Compose the instruction prompt for one text-generator node. */
-function buildTextPrompt(classType: string, inputs: Record<string, unknown>): string {
+/**
+ * Compose the instruction prompt for one text-generator node.
+ *
+ * This is the SINGLE seam both the legacy `MovieScript`/`MovieShotPlan` steps
+ * (via `deps.stepText`) and the functional `TextGenerator` adapter (via
+ * `ctx.text`) route through, so folding the Phase-7 D12 `inputs.skills` section
+ * here makes the two consume an imported skill identically. Exported so the
+ * download verifier can assert that identity deterministically (key-free).
+ * @param classType - the node class (named in the header).
+ * @param inputs - the node's resolved inputs (`prompt`, `resolved`, `skills`).
+ * @returns the composed prompt.
+ */
+export function buildTextPrompt(classType: string, inputs: Record<string, unknown>): string {
   const instruction = display(inputs['prompt'])
   const sections = resolvedSections(inputs)
+  // The composed, framed `## Craft skills` section (already bounded and wrapped
+  // as quoted untrusted material by `skill-import.composeSkillSection`); appended
+  // verbatim so the frame the model is given is exactly the one the bridge built.
+  const skills = display(inputs['skills'])
   const lines: string[] = [
     `You are the dsh_movie "${classType}" text generator.`,
     'Write the text described below. Reply with ONLY the text — no prose, no markdown fences, no tool calls.',
@@ -85,7 +100,8 @@ function buildTextPrompt(classType: string, inputs: Record<string, unknown>): st
   ]
   if (instruction !== '') lines.push(`INSTRUCTION: ${instruction}`, '')
   if (sections.length > 0) lines.push('CONTEXT (linked upstream sections, in order):', ...sections, '')
-  if (instruction === '' && sections.length === 0) lines.push('No instruction or context was supplied; produce a short, sensible default for this node.', '')
+  if (skills !== '') lines.push(skills, '')
+  if (instruction === '' && sections.length === 0 && skills === '') lines.push('No instruction or context was supplied; produce a short, sensible default for this node.', '')
   return lines.join('\n').trim()
 }
 

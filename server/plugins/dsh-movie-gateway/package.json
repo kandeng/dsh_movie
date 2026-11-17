@@ -32,6 +32,7 @@
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.0",
     "dsh-matrix-chat": "workspace:*",
+    "dsh-movie-market": "workspace:*",
     "typescript": "^6.0.3"
   }
 }

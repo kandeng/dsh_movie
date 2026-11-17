@@ -3,7 +3,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
-import type { NodeRunStatus, WorkflowGraph, WorkflowGroup, MovieStepResult, MovieStepStatus, MovieStepId } from "@dsh-movie/protocol";
+import type { NodeRunStatus, WorkflowGraph, WorkflowGroup, MovieStepResult, MovieStepStatus, MovieStepId, ImportedSkillRef, SkillTarget } from "@dsh-movie/protocol";
 import { FUNCTIONAL_NODES, MOVIE_NODES, templateById } from "@dsh-movie/protocol";
 import groupChat from "@/components/groupChat.vue";
 import modeSwitcher from "@/components/modeSwitcher.vue";
@@ -17,6 +17,7 @@ import { expandTemplate } from "@/canvas/expandTemplate";
 import { DEFAULT_GROUP_COLOR, GROUP_COLOR_KEYS, groupColor } from "@/canvas/groupOverlay";
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
 import { useRoomRole } from "@/composables/useRoomRole";
+import { useImportStore } from "@/stores/import";
 import { useWorkspaceGraph } from "@/composables/useWorkspaceGraph";
 import { useExecStatus } from "@/composables/useExecStatus";
 import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
@@ -142,6 +143,9 @@ function reviewerVerdict(graph: WorkflowGraph | null, id: number, output: unknow
 //    触发主机自动保存。workflowStore 仅保留给 AI 编排执行器的原子提交（host-only）。──
 const roomIdRef = computed(() => activeRoomId.value ?? "");
 const roomRole = useRoomRole(roomIdRef);
+// ACT: 跨路由技能导入暂存（Phase-7 D7 mode-1）：编辑器 Import 跳转 /plugins pick-mode，
+// 返回后由此消费已下载的正文与引用。
+const importStore = useImportStore();
 const workspace = useWorkspaceGraph(roomIdRef, bridge, roomRole);
 
 async function applyGraph(graph: WorkflowGraph): Promise<void> {
@@ -182,6 +186,9 @@ async function hydrate(roomId: string): Promise<void> {
   // Phase-5 M5: announce (never block) a persisted graph that still references
   // the six deprecated step class types (D1 — executable for one more phase).
   notifyDeprecatedSteps(roomId, loaded);
+  // Phase-7 D7 mode-1: on return from the Plugins pick-mode, paste the downloaded
+  // skill body into its node + record the additive ref (no-op when none pending).
+  consumeReturnedImport();
 }
 
 /** The deprecated step class types still present in a persisted graph (Phase-5 M5). */
@@ -482,6 +489,8 @@ interface EditorDraft {
   description: string;
   widgets: NodeWidgetView[];
   contentRef?: ContentRef;
+  /** Phase-7 D7: additive imported-skill refs, persisted under node properties. */
+  importedSkills?: ImportedSkillRef[];
 }
 const editorDraft = ref<EditorDraft | null>(null);
 const editorBase = ref<EditorDraft | null>(null);
@@ -516,6 +525,7 @@ const editorDirty = computed(() => {
   const base = editorBase.value;
   if (draft === null || base === null) return false;
   if (draft.title !== base.title || draft.description !== base.description) return true;
+  if ((draft.importedSkills?.length ?? 0) !== (base.importedSkills?.length ?? 0)) return true;
   return draft.widgets.some((widget, index) => widget.value !== base.widgets[index]?.value);
 });
 
@@ -528,6 +538,7 @@ function cloneDraft(source: EditorDraft): EditorDraft {
     description: source.description,
     widgets: source.widgets.map((widget): NodeWidgetView => ({ ...widget })),
     ...(source.contentRef !== undefined ? { contentRef: { ...source.contentRef } } : {}),
+    ...(source.importedSkills !== undefined ? { importedSkills: source.importedSkills.map((skill) => ({ ...skill })) } : {}),
   };
 }
 
@@ -551,6 +562,7 @@ function openEditor(id: number): void {
     description: data.description ?? "",
     widgets: (data.widgets ?? []).map((widget): NodeWidgetView => ({ ...widget })),
     ...(data.contentRef !== undefined ? { contentRef: { ...data.contentRef } } : {}),
+    ...(data.importedSkills !== undefined ? { importedSkills: data.importedSkills.map((skill) => ({ ...skill })) } : {}),
   };
   editorBase.value = base;
   editorDraft.value = cloneDraft(base);
@@ -599,6 +611,7 @@ function saveEditor(): void {
     title: draft.title.trim(),
     description: draft.description,
     ...(draft.contentRef !== undefined ? { contentRef: draft.contentRef } : {}),
+    ...(draft.importedSkills !== undefined ? { importedSkills: draft.importedSkills } : {}),
   });
   draft.widgets.forEach((widget, index) => {
     if (widget.value !== base.widgets[index]?.value) {
@@ -606,7 +619,7 @@ function saveEditor(): void {
     }
   });
   // Rebase so the editor stays open with a clean dirty state.
-  editorBase.value = cloneDraft({ title: draft.title.trim(), description: draft.description, widgets: draft.widgets, contentRef: draft.contentRef });
+  editorBase.value = cloneDraft({ title: draft.title.trim(), description: draft.description, widgets: draft.widgets, contentRef: draft.contentRef, importedSkills: draft.importedSkills });
 }
 
 /** Widget values are `unknown`; the draft controls need concrete types. */
@@ -631,6 +644,100 @@ function setDraftTitle(value: string): void {
 }
 function setDraftDescription(value: string): void {
   if (editorDraft.value !== null) editorDraft.value.description = value;
+}
+
+// ── Phase-7 D7 mode-1: the editor Import flow. A node whose schema declares
+//    `supportsSkillImport` (Text Input, the four generators, the legacy six) gets
+//    an Import button that stashes the pick context, routes to the Plugins page in
+//    pick-mode, and — on return — pastes the downloaded SKILL.md body into the
+//    node's primary text widget and records the additive `importedSkills` ref. ──
+
+/** True when the edited node's schema opts into skill imports (D7/D11). */
+const editorCanImport = computed(() => selectedSchema.value?.supportsSkillImport === true);
+
+/** The primary text widget to paste a skill body into ("" when the node has none). */
+const editorImportWidget = computed<string>(() => {
+  const widgets = editorDraft.value?.widgets ?? [];
+  const multiline = widgets.find((widget) => widget.type === "STRING" && widget.multiline === true);
+  if (multiline !== undefined) return multiline.name;
+  const single = widgets.find((widget) => widget.type === "STRING");
+  return single?.name ?? "";
+});
+
+/** Map a node's class type to the skill target used to pre-rank the Skills view (D10). */
+function importTargetFor(classType: string): SkillTarget {
+  if (classType === "MovieShotPlan") return "shot-plan";
+  if (classType === "MovieScript" || classType === "TextGenerator") return "script";
+  if (classType === "TextInput") return "text";
+  return "any";
+}
+
+/** Import button: stash the pick context (intent-prefilled) and route to /plugins. */
+function startImport(): void {
+  const id = editingNodeId.value;
+  const draft = editorDraft.value;
+  if (editorReadonly.value || id === null || draft === null) return;
+  const roomId = roomIdRef.value;
+  if (roomId === "") {
+    ElMessage.warning(translate("请先进入一个房间再导入技能"));
+    return;
+  }
+  // Persist in-flight edits so the return re-opens from the saved canonical data.
+  if (editorDirty.value) saveEditor();
+  const widgetName = editorImportWidget.value;
+  const seed = widgetName === ""
+    ? ""
+    : asString(draft.widgets.find((widget) => widget.name === widgetName)?.value ?? "").trim();
+  importStore.begin({
+    roomId,
+    nodeId: String(id),
+    widgetName,
+    insertionPoint: -1,
+    query: seed.slice(0, 60),
+    target: importTargetFor(editorClassType.value),
+  });
+  void router.push({ path: "/plugins", query: { category: "skills", mode: "pick" } });
+}
+
+/** Remove one imported-skill ref from the draft (the pasted snapshot stays). */
+function removeImportedSkill(index: number): void {
+  const draft = editorDraft.value;
+  if (editorReadonly.value || draft === null) return;
+  const next = [...(draft.importedSkills ?? [])];
+  next.splice(index, 1);
+  draft.importedSkills = next;
+}
+
+/**
+ * Consume a completed pick-mode download exactly once (called after hydrate so the
+ * target node exists): re-open its editor, splice the body into the target widget,
+ * append the additive ref, and Save as one canonical mutation. Guest returns and
+ * vanished nodes are silent no-ops (D7).
+ */
+function consumeReturnedImport(): void {
+  if (importStore.completed === null) return;
+  const taken = importStore.takeCompleted();
+  if (taken === null) return;
+  if (editorReadonly.value) return;
+  const nodeId = Number(taken.nodeId);
+  if (!Number.isFinite(nodeId) || bridge.flow.findNode(taken.nodeId) === undefined) return;
+  openEditor(nodeId);
+  const draft = editorDraft.value;
+  if (draft === null) return;
+  if (taken.widgetName !== "") {
+    const index = draft.widgets.findIndex((widget) => widget.name === taken.widgetName);
+    if (index >= 0) {
+      const widget = draft.widgets[index];
+      if (widget !== undefined) {
+        const current = asString(widget.value);
+        const point = taken.insertionPoint < 0 ? current.length : Math.min(taken.insertionPoint, current.length);
+        widget.value = `${current.slice(0, point)}${taken.body}${current.slice(point)}`;
+      }
+    }
+  }
+  draft.importedSkills = [...(draft.importedSkills ?? []), taken.ref];
+  saveEditor();
+  ElMessage.success(translate("技能已下载到工作区"));
 }
 
 /** Double-click entry (D3): the canvas already gated this to the cursor state. */
@@ -1490,11 +1597,6 @@ function goLogin() {
               <el-button size="small" :disabled="editorReadonly" @click="openPickFromChat">
                 {{ translate("选择聊天消息") }}
               </el-button>
-              <el-tooltip :content="translate('即将推出')" placement="top" :show-arrow="false" :hide-after="0">
-                <span class="marketWrap">
-                  <el-button size="small" disabled>{{ translate("浏览市场（即将推出）") }}</el-button>
-                </span>
-              </el-tooltip>
               <el-button v-if="draftContentUrl !== ''" size="small" text @click="openContentViewer">
                 {{ translate("打开") }}
               </el-button>
@@ -1559,6 +1661,38 @@ function goLogin() {
                 @update:model-value="(value) => setDraftWidget(index, value)" />
               <span v-else class="fieldRaw">{{ asString(widget.value) }}</span>
             </div>
+          </div>
+
+          <!-- Row 4c: imported craft skills (Phase-7 D7). Shown for any node whose
+               schema opts into skill imports — the Import button stashes the pick
+               context and routes to the Plugins page; downloaded skills appear as
+               removable chips (the pasted body snapshot lives in the text widget). -->
+          <div v-if="editorCanImport" class="fieldGroup">
+            <div class="outputLabel">
+              {{ translate("技能") }}
+              <el-button
+                class="openButton"
+                text
+                size="small"
+                :disabled="editorReadonly"
+                @click="startImport">
+                {{ translate("导入") }}
+              </el-button>
+            </div>
+            <div v-if="(editorDraft?.importedSkills?.length ?? 0) > 0" class="skillChips">
+              <el-tag
+                v-for="(skill, index) in editorDraft?.importedSkills ?? []"
+                :key="`${skill.id}-${index}`"
+                class="skillChip"
+                size="small"
+                type="success"
+                effect="plain"
+                :closable="!editorReadonly"
+                @close="removeImportedSkill(index)">
+                {{ skill.id }}
+              </el-tag>
+            </div>
+            <p v-else class="contentHint">{{ translate("尚未导入技能") }}</p>
           </div>
 
           <!-- Row 5: the produced output — read-only; re-run to change it. -->
@@ -2682,8 +2816,14 @@ function goLogin() {
   display: none;
 }
 
-.marketWrap {
-  display: inline-flex;
+.skillChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.skillChip {
+  max-width: 100%;
 }
 
 .contentHint {

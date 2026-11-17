@@ -21,11 +21,11 @@
  */
 
 import type { SkillProfile, SkillTarget, SourceStatus, ToolStatus, WarningLevel } from '@dsh-movie/protocol'
-import type { SourceProfileResult, SourceSearchResult, SourceSkillRecord } from './adapters/contract.ts'
+import type { SourceDownloadResult, SourceProfileResult, SourceSearchResult, SourceSkillRecord } from './adapters/contract.ts'
 import { SOURCE_TOOL_NAMES } from './adapters/contract.ts'
 import type { FlagStore } from './flagStore.ts'
 import type { ToolRegistry } from './registry.ts'
-import { Blocklist, maxLevel, scanProfile } from './trust.ts'
+import { Blocklist, maxLevel, scanProfile, scanText } from './trust.ts'
 import type { IndexOptions, MarketLogger, RankedSkill, SkillSearchOptions, TrustTier } from './types.ts'
 
 /** The source-facing search client (implemented over the supervisor). */
@@ -34,6 +34,16 @@ export interface SourceClient {
   search(toolId: string, q: string, target?: string | undefined): Promise<SourceSearchResult>
   /** Fetch one skill's profile from one tool's `skills/profile`. */
   profile(toolId: string, slug: string): Promise<SourceProfileResult>
+  /** Fetch one skill's full SKILL.md body from one tool's `skills/download`. */
+  download(toolId: string, slug: string): Promise<SourceDownloadResult>
+}
+
+/** One resolved skill download: the full body plus its trust-layered profile. */
+export interface SkillDownloadResult {
+  /** The full SKILL.md body as the source returned it. */
+  body: string
+  /** The version-pinned profile, with the body scan + blocklist layered on. */
+  profile: SkillProfile
 }
 
 /** The valid `SkillTarget` strings (protocol union, mirrored for validation). */
@@ -347,6 +357,63 @@ export class SkillIndex {
     })
   }
 
+  /**
+   * Resolve one skill's full body + trust-layered profile by global id
+   * (`<toolId>:<slug>`) for the Phase-7 D7 download path. The body scan
+   * ({@link scanText}) and the blocklist-with-body check are layered on top of
+   * the profile-level verdict, so a credential-shaped or known-bad body raises
+   * the level the gateway enforces before writing it into a room.
+   * @param id - the global skill id.
+   * @returns the body + profile, or `null` when not found / the source failed.
+   */
+  async download(id: string): Promise<SkillDownloadResult | null> {
+    const sep = id.indexOf(':')
+    if (sep <= 0) return null
+    const toolId = id.slice(0, sep)
+    const slug = id.slice(sep + 1)
+    // R3/D8: a tool that is uninstalled or disabled is treated as an
+    // unavailable source — never re-spawn it just to fetch a body. This mirrors
+    // `enabledSearchIds()` (search skips disabled tools) so the mode-2 run-time
+    // remedy proceeds skill-less instead of resurrecting a stopped source.
+    const record = this.registry.get(toolId)
+    if (record === null || !record.installed || !record.enabled) {
+      this.logger.warn('[market:index] download %s skipped: tool %s is unavailable', id, toolId)
+      return null
+    }
+    try {
+      const [dl, prof] = await Promise.all([
+        this.withTimeout(this.client.download(toolId, slug), this.options.perToolTimeoutMs, toolId),
+        this.withTimeout(this.client.profile(toolId, slug), this.options.perToolTimeoutMs, toolId),
+      ])
+      // Prefer the source's profile record (title/description/target); fall back
+      // to a minimal record synthesized from the download payload.
+      const record: SourceSkillRecord = prof.skill ?? {
+        slug: dl.slug,
+        title: dl.slug,
+        description: '',
+        target: 'any',
+        version: dl.version,
+        license: dl.license,
+        provider: dl.provider,
+      }
+      const base = this.toProfile(toolId, {
+        ...record,
+        slug: dl.slug,
+        version: dl.version,
+        license: dl.license,
+        provider: dl.provider,
+      }, Date.now())
+      // Layer the body scan + blocklist-with-body onto the profile-level verdict.
+      const scanned = maxLevel(base.warningLevel, scanText(dl.body).level)
+      const blocked = this.blocklist.match(id, slug, dl.body)
+      const warningLevel = blocked !== null ? maxLevel(scanned, 'red') : scanned
+      return { body: dl.body, profile: { ...base, warningLevel } }
+    } catch (error) {
+      this.logger.warn('[market:index] download %s failed: %s', id, String(error))
+      return null
+    }
+  }
+
   /** Drop every cache entry (used after a flag/blocklist change). */
   invalidate(): void {
     this.cache.clear()
@@ -407,5 +474,11 @@ export class McpSourceClient implements SourceClient {
   async profile(toolId: string, slug: string): Promise<SourceProfileResult> {
     const result = await this.caller(toolId, SOURCE_TOOL_NAMES.profile, { slug })
     return decodeJson<SourceProfileResult>(result, `${toolId}.profile`)
+  }
+
+  /** @inheritdoc */
+  async download(toolId: string, slug: string): Promise<SourceDownloadResult> {
+    const result = await this.caller(toolId, SOURCE_TOOL_NAMES.download, { slug })
+    return decodeJson<SourceDownloadResult>(result, `${toolId}.download`)
   }
 }

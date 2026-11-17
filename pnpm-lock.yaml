@@ -263,6 +263,9 @@ importers:
       dsh-matrix-chat:
         specifier: workspace:*
         version: link:../dsh-matrix-chat
+      dsh-movie-market:
+        specifier: workspace:*
+        version: link:../dsh-movie-market
       typescript:
         specifier: ^6.0.3
         version: 6.0.3

@@ -21,7 +21,7 @@
  * @module dsh-movie-gateway/movie-executor/runner
  */
 
-import type { ExecMessage, PromptGraph } from '@dsh-movie/protocol'
+import type { ExecMessage, PromptGraph, PromptGraphNode } from '@dsh-movie/protocol'
 import type { JobHooks, JobId, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MediaProvider } from './media-provider.ts'
 import { handlerFor, modalityOf, type NodeHandler, type NodeHandlerContext } from './registry.ts'
@@ -55,6 +55,19 @@ export interface StepTextGenerator {
   (classType: string, inputs: Record<string, unknown>): Promise<string>
 }
 
+/**
+ * Resolves one node's imported skills into a composed prompt section plus
+ * lifecycle notes (Phase-7 D7 mode-2). `skill-import.resolveNodeSkills` bound to
+ * a room satisfies this; the runner injects `section` into `inputs.skills` (the
+ * shared text seam folds it in) and logs each note. It must never throw into the
+ * run — a stopped tool yields an empty section + a "skill-less" note (R3).
+ * @param node - the prompt node about to execute.
+ * @returns the composed section + lifecycle notes.
+ */
+export interface SkillResolver {
+  (node: PromptGraphNode): Promise<{ section: string; notes: string[] }>
+}
+
 /** Everything the runner needs to schedule and drive one prompt job. */
 export interface RunPromptDeps {
   /** The background-job registry (`ctx.jobs`), controller already attached. */
@@ -67,6 +80,12 @@ export interface RunPromptDeps {
   stepText?: StepTextGenerator | undefined
   /** Real reviewer seam (D5); canned verdict when absent. */
   review?: ReviewFn | undefined
+  /**
+   * Optional Phase-7 D7 mode-2 skill resolver. When present, each node's
+   * imported skills are resolved (re-fetching any missing file) before it runs.
+   * Absent without a market + room, so runs are unaffected when none applies.
+   */
+  resolveSkills?: SkillResolver | undefined
   /** The D15 model-availability gate consulted before any model call. */
   availability: ModelAvailability
   /** The room this run was triggered from; empty/undefined → no room notices. */
@@ -139,6 +158,16 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
             const node = graph[id]
             currentType = node?.class_type ?? ''
             currentInputs = (node?.inputs ?? {}) as Record<string, unknown>
+
+            // Phase-7 D7 mode-2: resolve this node's imported skills (re-fetching
+            // any missing file) and fold the composed section into the inputs the
+            // shared text seam reads. Lifecycle notes go to the job log; a
+            // stopped/failing tool yields an empty section + a note, never a fail.
+            if (deps.resolveSkills !== undefined && node !== undefined) {
+              const resolvedSkills = await deps.resolveSkills(node)
+              for (const note of resolvedSkills.notes) job.append(`[skill] ${note}\n`, { channel: 'log' })
+              if (resolvedSkills.section !== '') currentInputs = { ...currentInputs, skills: resolvedSkills.section }
+            }
 
             deps.broadcast([
               { type: 'executing', data: { prompt_id: promptId, node: id } },

@@ -121,6 +121,12 @@ export interface PromptGraphNode {
   inputs: Record<string, unknown>
   /** Optional display metadata. */
   _meta?: { title?: string }
+  /**
+   * Optional additive node properties carried through from the editor
+   * (`WorkflowNode.properties`). The executor reads `importedSkills` from here
+   * for the Phase-7 D7 mode-2 run-time re-fetch; it is opaque to validation.
+   */
+  properties?: Record<string, unknown>
 }
 
 /** The flattened execution graph: node id (string) -> node spec. */

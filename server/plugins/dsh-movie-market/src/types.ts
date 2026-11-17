@@ -12,7 +12,7 @@
  */
 
 import type {
-  SkillProfile, SkillTarget, SourceStatus, ToolManifest, ToolRecord, ToolStatus, WarningLevel,
+  SkillProfile, SkillTarget, SourceStatus, ToolInstallSpec, ToolManifest, ToolRecord, ToolStatus, WarningLevel,
 } from '@dsh-movie/protocol'
 
 export type {
@@ -301,6 +301,30 @@ export interface MarketService {
   sourcesStatus(): Promise<SourceStatus[]>
   /** Raise/clear a server-global flag against a skill (D8); returns the level. */
   flagSkill(id: string, level: WarningLevel, reason: string, actor: string): Promise<WarningLevel>
+
+  /* --- P7-M4: skill download + server-global tool lifecycle (Leg C handlers) --- */
+
+  /**
+   * Resolve one skill's full SKILL.md body + trust-layered profile by global id
+   * (`<toolId>:<slug>`) for the D7 download path. The returned profile's
+   * `warningLevel` already folds in the body scan + blocklist-with-body, so the
+   * gateway only enforces the size cap / filename / red-block. `null` when the
+   * skill is unknown or the source failed (the run-time remedy then proceeds
+   * skill-less rather than failing, R3).
+   */
+  downloadSkill(id: string): Promise<{ body: string; profile: SkillProfile } | null>
+  /**
+   * Install a third-party/user tool from an install spec (host-only, D2) and
+   * register its spawn spec with the supervisor (lazy — nothing spawns until
+   * first use). Returns the created record.
+   */
+  installTool(spec: ToolInstallSpec): Promise<ToolRecord>
+  /** Uninstall a tool (built-ins refuse); stops any live child first. */
+  uninstallTool(toolId: string): Promise<boolean>
+  /** Enable/disable a tool; disabling stops any live child. `null` when unknown. */
+  setToolEnabled(toolId: string, enabled: boolean): Promise<ToolRecord | null>
+  /** One tool's health row (D5), or `null` when the tool is unknown. */
+  toolStatus(toolId: string): Promise<SourceStatus | null>
 }
 
 declare module '@deepseek-ai/cordis' {

@@ -34,6 +34,9 @@ import type { MovieGateway, MovieGatewayInfo } from './types.ts'
 // Pulls the optional `ctx.matrixChat` service-key merge used for the D15 room
 // notice + D8 artifact echo (type-only; the poster is fetched with `ctx.get`).
 import type {} from 'dsh-matrix-chat/types'
+// Pulls the optional `ctx.movieMarket` service-key merge used for the Phase-7
+// `plugins/*` namespace + D7 skill import (type-only; fetched with `ctx.get`).
+import type {} from 'dsh-movie-market/types'
 
 export type { MovieGateway, MovieGatewayInfo } from './types.ts'
 
@@ -232,6 +235,10 @@ export function apply(ctx: Context, config: Config): void {
     // the isolated verifier (matrix-chat disabled) -> the notifier degrades to
     // log-only.
     const matrixChat = ctx.get('matrixChat')
+    // Optional plugins marketplace (Phase-7 D5/D7). Absent without the
+    // dsh-movie-market plugin -> the `plugins/*` namespace answers
+    // `unimplemented` and runs proceed skill-less.
+    const movieMarket = ctx.get('movieMarket')
     ctx.effect(() => {
       // The Leg B executor schedules prompts as `movie-exec` background jobs.
       // `ctx.jobs.start` refuses work unless an attached controller serves the
@@ -252,6 +259,7 @@ export function apply(ctx: Context, config: Config): void {
         ...(llmText === undefined ? {} : { stepText: (classType: string, inputs: Record<string, unknown>): Promise<string> => llmText.text(classType, inputs) }),
         ...(llmText === undefined ? {} : { review: (classType: string, artifact: unknown, criteria: string): Promise<string> => llmText.review(classType, artifact, criteria) }),
         ...(matrixChat === undefined ? {} : { matrixChat }),
+        ...(movieMarket === undefined ? {} : { movieMarket }),
         // P5-M4 D7: conversation → graph. The Bailian-backed text seam doubles as
         // the cheap intent router (`mineIntent`); without it (no subagents/key) D7
         // stays off and the chat relay is unaffected. `onRoomMessage` subscribes to

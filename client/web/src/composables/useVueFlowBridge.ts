@@ -30,6 +30,7 @@ import { useVueFlow, type Connection, type VueFlowStore } from "@vue-flow/core";
 import type {
   BridgeCommandPayloads,
   BridgeCommandType,
+  ImportedSkillRef,
   NodeRunStatus,
   WorkflowGraph,
   WorkflowGroup,
@@ -87,7 +88,10 @@ export interface VueFlowBridge extends CanvasBridge {
    * paints these ARE canonical node data, so the write schedules a
    * `graphChanged` (host autosave → room sync) like any other edit.
    */
-  setNodeMeta: (id: number, patch: { title?: string; description?: string; contentRef?: ContentRef }) => void;
+  setNodeMeta: (
+    id: number,
+    patch: { title?: string; description?: string; contentRef?: ContentRef; importedSkills?: ImportedSkillRef[] },
+  ) => void;
 }
 
 /** Options for {@link useVueFlowBridge}. */
@@ -292,12 +296,17 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
   }
 
   /** Write node name/description/content provenance (Phase-6 D5/D11) — canonical, so it syncs. */
-  function setNodeMeta(id: number, patch: { title?: string; description?: string; contentRef?: ContentRef }): void {
+  function setNodeMeta(
+    id: number,
+    patch: { title?: string; description?: string; contentRef?: ContentRef; importedSkills?: ImportedSkillRef[] },
+  ): void {
     if (flow.findNode(String(id)) === undefined) return;
     const data: Partial<MovieNodeData> = {};
     if (patch.title !== undefined) data.title = patch.title;
     if (patch.description !== undefined) data.description = patch.description;
     if (patch.contentRef !== undefined) data.contentRef = patch.contentRef;
+    // Phase-7 D7: imported-skill refs persist additively alongside contentRef.
+    if (patch.importedSkills !== undefined) data.importedSkills = patch.importedSkills;
     flow.updateNodeData(String(id), data);
     scheduleGraphChanged();
   }

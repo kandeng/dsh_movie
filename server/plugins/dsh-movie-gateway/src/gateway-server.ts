@@ -43,9 +43,16 @@ import type {
   OpResult,
   Principal,
   PromptGraph,
+  PromptGraphNode,
+  SkillProfile,
+  SkillTarget,
+  SourceStatus,
   StreamControl,
   StreamFrame,
   StreamOpen,
+  ToolInstallSpec,
+  ToolRecord,
+  WarningLevel,
   WorkflowGraph,
   WorkflowWatchFrame,
   MatrixUserId,
@@ -72,6 +79,7 @@ import { createRoomNotifier, type RoomPoster } from './movie-executor/room-notif
 import { applyOpsToGraph } from './movie-executor/apply-ops.ts'
 import { availabilityFromInventory, type ModelAvailability } from './movie-executor/model-catalog.ts'
 import type { ReviewFn } from './movie-executor/llm-text.ts'
+import { downloadSkillToRoom, resolveNodeSkills } from './skill-import.ts'
 import type { JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MovieGatewayInfo } from './types.ts'
 import type { CanvasScriptAgent, CanvasGenerateResult } from './canvas-agent.ts'
@@ -175,6 +183,43 @@ export interface GatewayServerDeps {
    * AND {@link GatewayServerDeps.canvasAgent} are all present.
    */
   onRoomMessage?: RoomMessageSubscribe | undefined
+  /**
+   * Optional plugins-marketplace bridge (`ctx.movieMarket`, Phase-7 D5). When
+   * present the Leg C `plugins/*` namespace is served and `POST /prompt` arms
+   * the D7 mode-2 run-time skill resolver; when absent every `plugins/*` method
+   * answers `unimplemented` and runs proceed skill-less.
+   */
+  movieMarket?: MarketBridge | undefined
+}
+
+/**
+ * The structural view of `ctx.movieMarket` the gateway drives for the Leg C
+ * `plugins/*` namespace (Phase-7 D5). It mirrors `MarketService`'s method
+ * signatures so the injected service is assignable WITHOUT the gateway taking a
+ * hard runtime dependency on the market plugin (the type-only import in
+ * `index.ts` supplies the Cordis service-key merge for `ctx.get`).
+ */
+export interface MarketBridge {
+  /** All tool records (built-in + installed), with merged runtime status. */
+  toolRecords(): ToolRecord[]
+  /** Fan-out skill search (merge/dedup/rank/trust). */
+  searchSkills(options: { q: string; target?: SkillTarget | undefined; toolId?: string | undefined }): Promise<SkillProfile[]>
+  /** Resolve one skill profile by global id. */
+  skillProfile(id: string): Promise<SkillProfile | null>
+  /** Fetch one skill's body + trust-layered profile (D7 download). */
+  downloadSkill(id: string): Promise<{ body: string; profile: SkillProfile } | null>
+  /** Per-tool health rows (D5). */
+  sourcesStatus(): Promise<SourceStatus[]>
+  /** Raise/clear a server-global flag against a skill (D8). */
+  flagSkill(id: string, level: WarningLevel, reason: string, actor: string): Promise<WarningLevel>
+  /** Install a third-party/user tool (host-only, D2). */
+  installTool(spec: ToolInstallSpec): Promise<ToolRecord>
+  /** Uninstall a tool (built-ins refuse). */
+  uninstallTool(toolId: string): Promise<boolean>
+  /** Enable/disable a tool; `null` when unknown. */
+  setToolEnabled(toolId: string, enabled: boolean): Promise<ToolRecord | null>
+  /** One tool's health row, or `null` when unknown. */
+  toolStatus(toolId: string): Promise<SourceStatus | null>
 }
 
 /** The D7 intent-mining seam: classify + distill one room utterance. */
@@ -390,7 +435,7 @@ const MAX_REPLANS = 2
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage, movieMarket } = deps
   const execClients = new Set<WebSocket>()
   // D15/D8: the `customer_service` room notifier (posts the unavailable-model
   // notice and echoes executed artifacts) and the model-availability gate. Both
@@ -756,6 +801,181 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
 
   /* ---------------------------- Leg C dispatch --------------------------- */
 
+  /**
+   * Serve the Leg C `plugins/*` namespace (Phase-7 D5/D7).
+   *
+   * M4 governance: READS (`tools.list`/`tools.status`, `skills.search`/
+   * `skills.profile`, `sources.status`) are open to any authenticated principal.
+   * `skills.download` writes the room workspace + records an import commit, so it
+   * is HOST-gated like every other room mutation. The server-GLOBAL writes
+   * (`tools.install`/`uninstall`/`enable`, `skills.flag`) are authenticated-only
+   * for M4 because the protocol exposes no global-admin primitive (`whoami`
+   * carries no admin flag); the M5 Plugins page enforces guest read-only on top
+   * of this transport-level policy.
+   * @param method - the dispatched `plugins/*` method.
+   * @param params - the parsed request body.
+   * @param principal - the authenticated caller.
+   * @param res - the response to settle.
+   * @param market - the (defined) marketplace bridge.
+   */
+  async function handlePlugins(
+    method: LegCMethod,
+    params: Record<string, unknown>,
+    principal: MatrixPrincipal,
+    res: ServerResponse,
+    market: MarketBridge,
+  ): Promise<void> {
+    switch (method) {
+      case 'plugins/tools.list': {
+        const payload: LegCResponse<'plugins/tools.list'> = { tools: market.toolRecords() }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/tools.install': {
+        const rawSpec = params['spec']
+        if (typeof rawSpec !== 'object' || rawSpec === null) {
+          sendApi(res, err('bad-request', 'spec is required'))
+          return
+        }
+        const spec = rawSpec as ToolInstallSpec
+        if (typeof spec.name !== 'string' || spec.name === ''
+          || typeof spec.command !== 'string' || spec.command === ''
+          || typeof spec.manifest !== 'object' || spec.manifest === null) {
+          sendApi(res, err('bad-request', 'spec.name, spec.command, and spec.manifest are required'))
+          return
+        }
+        const tool = await market.installTool(spec)
+        const payload: LegCResponse<'plugins/tools.install'> = { tool }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/tools.uninstall': {
+        const toolId = stringParam(params, 'toolId')
+        if (toolId === undefined) {
+          sendApi(res, err('bad-request', 'toolId is required'))
+          return
+        }
+        const removed = await market.uninstallTool(toolId)
+        const payload: LegCResponse<'plugins/tools.uninstall'> = { removed }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/tools.enable': {
+        const toolId = stringParam(params, 'toolId')
+        const enabled = params['enabled']
+        if (toolId === undefined || typeof enabled !== 'boolean') {
+          sendApi(res, err('bad-request', 'toolId and a boolean enabled are required'))
+          return
+        }
+        const tool = await market.setToolEnabled(toolId, enabled)
+        if (tool === null) {
+          sendApi(res, err('not-found', `unknown tool "${toolId}"`))
+          return
+        }
+        const payload: LegCResponse<'plugins/tools.enable'> = { tool }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/tools.status': {
+        const toolId = stringParam(params, 'toolId')
+        if (toolId === undefined) {
+          sendApi(res, err('bad-request', 'toolId is required'))
+          return
+        }
+        const status = await market.toolStatus(toolId)
+        const payload: LegCResponse<'plugins/tools.status'> = { status }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/skills.search': {
+        const q = stringParam(params, 'q')
+        if (q === undefined) {
+          sendApi(res, err('bad-request', 'q is required'))
+          return
+        }
+        const target = stringParam(params, 'target') as SkillTarget | undefined
+        const toolId = stringParam(params, 'toolId')
+        const skills = await market.searchSkills({
+          q,
+          ...(target === undefined ? {} : { target }),
+          ...(toolId === undefined ? {} : { toolId }),
+        })
+        const payload: LegCResponse<'plugins/skills.search'> = { skills }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/skills.profile': {
+        const id = stringParam(params, 'id')
+        if (id === undefined) {
+          sendApi(res, err('bad-request', 'id is required'))
+          return
+        }
+        const skill = await market.skillProfile(id)
+        const payload: LegCResponse<'plugins/skills.profile'> = { skill }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/skills.download': {
+        // D7 mode 1: host-gated (it writes the room workspace + records a commit).
+        const id = stringParam(params, 'id')
+        const roomId = stringParam(params, 'roomId')
+        if (id === undefined || roomId === undefined) {
+          sendApi(res, err('bad-request', 'id and roomId are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not import a skill; host seat required`))
+          return
+        }
+        const result = await downloadSkillToRoom({ roomId, market, workspace: workflowStore }, id, principal.userId)
+        if (!result.ok) {
+          if (result.reason === 'blocked') {
+            sendApi(res, err('forbidden', `skill "${id}" is blocked (red) and cannot be imported`))
+            return
+          }
+          if (result.reason === 'path-escape') {
+            sendApi(res, err('bad-request', `skill "${id}" resolved to an unsafe workspace path`))
+            return
+          }
+          sendApi(res, err('not-found', `skill "${id}" was not found or its source is unavailable`))
+          return
+        }
+        const payload: LegCResponse<'plugins/skills.download'> = {
+          download: { path: result.path, body: result.body, profile: result.profile },
+        }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/skills.flag': {
+        const id = stringParam(params, 'id')
+        const level = stringParam(params, 'level')
+        const reason = stringParam(params, 'reason')
+        if (id === undefined || level === undefined || reason === undefined) {
+          sendApi(res, err('bad-request', 'id, level, and reason are required'))
+          return
+        }
+        if (level !== 'clean' && level !== 'yellow' && level !== 'orange' && level !== 'red') {
+          sendApi(res, err('bad-request', `unknown warning level "${level}"`))
+          return
+        }
+        const warningLevel = await market.flagSkill(id, level, reason, principal.userId)
+        const payload: LegCResponse<'plugins/skills.flag'> = { warningLevel }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/sources.status': {
+        const sources = await market.sourcesStatus()
+        const payload: LegCResponse<'plugins/sources.status'> = { sources }
+        sendApi(res, ok(payload))
+        return
+      }
+      default:
+        sendApi(res, err('unimplemented', `${method} is not implemented`))
+        return
+    }
+  }
+
   async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
     if (req.method !== 'POST') {
       sendApi(res, err('bad-request', 'Leg C methods are POST /api/<ns>/<method>'))
@@ -788,6 +1008,18 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     const principal = await identity.whoami(token)
     if (principal === null) {
       sendApi(res, err('invalid-token', 'the Matrix access token was rejected'))
+      return
+    }
+
+    // The `plugins/*` namespace (Phase-7 D5) is served by a dedicated handler so
+    // the marketplace bridge is narrowed to defined ONCE here rather than in
+    // every case. When it is absent the whole namespace answers `unimplemented`.
+    if (method.startsWith('plugins/')) {
+      if (movieMarket === undefined) {
+        sendApi(res, err('unimplemented', 'the plugins marketplace is not available on this host'))
+        return
+      }
+      await handlePlugins(method, params, principal, res, movieMarket)
       return
     }
 
@@ -1348,6 +1580,15 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     const promptId = randomUUID()
     const number = ++queueCounter
 
+    // Phase-7 D7 mode-2: arm the run-time skill remedy only when a marketplace
+    // bridge is wired AND the run carries a room (the skill files live in the
+    // room's workspace dir). The closure re-fetches any missing imported skill
+    // before its node executes; a stopped tool simply runs skill-less (R3).
+    const resolveSkills = movieMarket !== undefined && roomId !== ''
+      ? (node: PromptGraphNode): Promise<{ section: string; notes: string[] }> =>
+          resolveNodeSkills({ roomId, market: movieMarket, workspace: workflowStore }, node)
+      : undefined
+
     if (jobs !== undefined) {
       try {
         startPromptJob({
@@ -1356,6 +1597,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           mediaProvider: mediaProvider ?? cannedMediaProvider,
           ...(stepText === undefined ? {} : { stepText }),
           ...(review === undefined ? {} : { review }),
+          ...(resolveSkills === undefined ? {} : { resolveSkills }),
           availability: executorAvailability,
           ...(roomId === '' ? {} : { roomId }),
           notifier,

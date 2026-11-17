@@ -10,6 +10,8 @@ import iconOneShot from "@/icons/generator_one_shot.svg";
 import iconStepByStep from "@/icons/generator_step_by_step.svg";
 import iconAccount from "@/icons/user.svg";
 import iconSettings from "@/icons/settings.svg";
+// ACT: 插件市场左栏图标（Phase-7 M5）；同样以 CSS mask 取 alpha，颜色随 currentColor。
+import iconPlugins from "@/icons/page_plugin.svg";
 // ACT: 顶栏品牌 logo 与标题作为一个整体居中；mask 只取 alpha，颜色随 currentColor。
 import iconLogo from "@/icons/logo_dsh_movie.svg";
 import languageSelect from "@/components/languageSelect.vue";
@@ -28,6 +30,8 @@ const topNav: { path: string; label: string; icon: string; size?: number }[] = [
   { path: "/chat", label: "一键生成", icon: iconOneShot, size: 28.4 },
   // ACT: 分步生成字形高度满幅：按需求放大 120% → 容器 26.4px。
   { path: "/studio", label: "分步生成", icon: iconStepByStep, size: 26.4 },
+  // ACT: 插件市场（Phase-7 M5）：工具/技能浏览与 pick-mode 导入入口，置于分步生成之后。
+  { path: "/plugins", label: "插件", icon: iconPlugins },
 ];
 const bottomNav = [
   { path: "/account", label: "账户", icon: iconAccount },

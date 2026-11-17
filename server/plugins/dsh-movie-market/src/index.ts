@@ -21,7 +21,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { SkillProfile, SourceStatus, ToolRecord, WarningLevel } from '@dsh-movie/protocol'
+import type { SkillProfile, SourceStatus, ToolInstallSpec, ToolRecord, WarningLevel } from '@dsh-movie/protocol'
 import { builtinToolDefs } from './builtinTools.ts'
 import { FlagStore } from './flagStore.ts'
 import { ToolRegistry } from './registry.ts'
@@ -32,7 +32,7 @@ import type { MarketLogger, MarketService, MarketToolInfo, SandboxBackend, Skill
 
 export type { MarketService, MarketToolInfo, ToolSpec, ToolRuntimeStatus } from './types.ts'
 export { ToolRegistry } from './registry.ts'
-export { SkillIndex, McpSourceClient } from './skillIndex.ts'
+export { SkillIndex, McpSourceClient, type SkillDownloadResult } from './skillIndex.ts'
 export { FlagStore } from './flagStore.ts'
 export { Blocklist, scanProfile, scanText, maxLevel } from './trust.ts'
 export { builtinToolDefs, CURATED_SKILLS_DIR } from './builtinTools.ts'
@@ -199,6 +199,34 @@ export function apply(ctx: Context, config: Config): void {
       // fallback cache is preserved (R11).
       return flags.get(id)?.level ?? 'clean'
     },
+
+    /* --- P7-M4: skill download + server-global tool lifecycle --- */
+
+    downloadSkill: async (id: string): Promise<{ body: string; profile: SkillProfile } | null> => index.download(id),
+    installTool: async (spec: ToolInstallSpec): Promise<ToolRecord> => {
+      // Host-only action (D2): the registry assigns an id when the spec omits
+      // one, then we hand the resolved spawn spec to the supervisor (lazy — it
+      // spawns on first use, never here).
+      const record = registry.install(spec, serverRoot)
+      const resolved = registry.spec(record.id)
+      if (resolved !== null) supervisor.register(resolved)
+      return record
+    },
+    uninstallTool: async (toolId: string): Promise<boolean> => {
+      // Stop any live sandboxed child first, then drop the registry entry
+      // (built-ins refuse and stay installed-but-disableable).
+      await supervisor.stop(toolId)
+      return registry.uninstall(toolId)
+    },
+    setToolEnabled: async (toolId: string, enabled: boolean): Promise<ToolRecord | null> => {
+      const record = registry.setEnabled(toolId, enabled)
+      // Disabling tears down a live child so it stops answering fan-outs; the
+      // supervisor also refuses to re-spawn a `disabled` tool (ensureRunning).
+      if (record !== null && !enabled) await supervisor.stop(toolId)
+      return record
+    },
+    toolStatus: async (toolId: string): Promise<SourceStatus | null> =>
+      index.sourcesStatus().find((row): boolean => row.toolId === toolId) ?? null,
   }
 
   ctx.provide('movieMarket', service)
