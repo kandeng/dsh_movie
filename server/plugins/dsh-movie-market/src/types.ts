@@ -11,7 +11,13 @@
  * @module dsh-movie-market/types
  */
 
-import type { ToolManifest, ToolStatus } from '@dsh-movie/protocol'
+import type {
+  SkillProfile, SkillTarget, SourceStatus, ToolManifest, ToolRecord, ToolStatus, WarningLevel,
+} from '@dsh-movie/protocol'
+
+export type {
+  SourceDownloadResult, SourceProfileResult, SourceSearchResult, SourceSkillRecord,
+} from './adapters/contract.ts'
 
 /**
  * The minimal structured logger the supervisor/sandbox need. `ctx.logger`
@@ -167,6 +173,95 @@ export interface MarketToolInfo {
   description?: string | undefined
 }
 
+/* -------------------------------------------------------------------------- */
+/* Trust: heuristic scanner + seed blocklist (Phase-7 D8)                      */
+/* -------------------------------------------------------------------------- */
+
+/** One heuristic reason contributing to a scan verdict. */
+export interface ScanSignal {
+  /** The level this signal alone implies. */
+  level: Exclude<WarningLevel, 'clean'>
+  /** Short human-readable reason (surfaced in the card tooltip / audit). */
+  reason: string
+}
+
+/** The verdict of scanning a skill's profile (or downloaded body) text. */
+export interface ScanResult {
+  /** The highest level implied by the signals (`clean` when none). */
+  level: WarningLevel
+  /** Every signal found, highest-first. */
+  signals: ScanSignal[]
+}
+
+/* -------------------------------------------------------------------------- */
+/* Trust: the server-global flag store (Phase-7 D8)                            */
+/* -------------------------------------------------------------------------- */
+
+/** One persisted user/operator flag against a skill (server-global). */
+export interface FlagRecord {
+  /** The flagged skill id (`<toolId>:<slug>`). */
+  id: string
+  /** The flagged level. */
+  level: WarningLevel
+  /** Free-text reason. */
+  reason: string
+  /** Who raised it (Matrix user id, or `host`). */
+  actor: string
+  /** When it was raised (epoch ms). */
+  flaggedAt: number
+}
+
+/** One append-only audit entry (last-write-wins + audit, R10). */
+export interface FlagAuditEntry {
+  /** The affected skill id. */
+  id: string
+  /** The action taken. */
+  action: 'set' | 'clear'
+  /** The level set (or the prior level on clear). */
+  level: WarningLevel
+  /** Who acted. */
+  actor: string
+  /** When (epoch ms). */
+  at: number
+}
+
+/* -------------------------------------------------------------------------- */
+/* Skill index: fan-out search + cache (Phase-7 D4/D10/R11)                    */
+/* -------------------------------------------------------------------------- */
+
+/** Provenance tier driving the ranking trust weight (D10). */
+export type TrustTier = 'curated' | 'registry' | 'installed'
+
+/** A search request as the host index understands it. */
+export interface SkillSearchOptions {
+  /** Free-text query (already intent-prefixed by the client, D10). */
+  q: string
+  /** Optional generator-target filter. */
+  target?: SkillTarget | undefined
+  /** Restrict the fan-out to one tool. */
+  toolId?: string | undefined
+}
+
+/** Tunables for the skill index. */
+export interface IndexOptions {
+  /** Cache time-to-live (ms); a fresh entry is served without a fan-out. */
+  ttlMs: number
+  /** Per-tool fan-out timeout (ms); a slow tool degrades rather than blocks. */
+  perToolTimeoutMs: number
+  /** Logger. */
+  logger: MarketLogger
+}
+
+/** One row of the merged, ranked search result (a profile + its score). */
+export interface RankedSkill {
+  /** The mapped protocol profile. */
+  profile: SkillProfile
+  /** The composite ranking score (higher = better). */
+  score: number
+  /** The provenance tier of the providing tool. */
+  tier: TrustTier
+}
+
 /**
  * The `ctx.movieMarket` service surface (Phase-7 D3). In P7-M2 this is the tool
  * lifecycle only; skill search/index/download and the Leg C `plugins/*`
@@ -189,6 +284,23 @@ export interface MarketService {
   ids(): string[]
   /** Stop a tool (retain its spec for lazy re-spawn). */
   stopTool(id: string): Promise<void>
+
+  /* --- P7-M3: skill discovery, trust, and the server-global tool registry --- */
+
+  /** All tool records (built-in + installed), with merged runtime status. */
+  toolRecords(): ToolRecord[]
+  /**
+   * Fan out `skills/search` across every enabled tool, then merge, dedup, scan,
+   * apply flags, and rank (D4/D8/D10). Cache-first: a rate-limited or failing
+   * tool falls back to its last-good cache and is surfaced as `degraded` (R11).
+   */
+  searchSkills(options: SkillSearchOptions): Promise<SkillProfile[]>
+  /** Resolve one skill profile by global id (`<toolId>:<slug>`). */
+  skillProfile(id: string): Promise<SkillProfile | null>
+  /** Per-tool health rows for the badges/chips (D5). */
+  sourcesStatus(): Promise<SourceStatus[]>
+  /** Raise/clear a server-global flag against a skill (D8); returns the level. */
+  flagSkill(id: string, level: WarningLevel, reason: string, actor: string): Promise<WarningLevel>
 }
 
 declare module '@deepseek-ai/cordis' {

@@ -4,9 +4,11 @@
  *
  * In P7-M2 this plugin hosts the **SPR supervisor** (`supervisor.ts`): every
  * external skill/tool source runs as an OS-sandboxed MCP stdio child, spawned
- * and lifecycle-managed entirely server-side (see `sandbox.ts`). The service
- * surface here is the tool lifecycle only; skill search/index/download and the
- * Leg C `plugins/*` handlers are layered on in P7-M3/M4.
+ * and lifecycle-managed entirely server-side (see `sandbox.ts`). P7-M3 layers on
+ * the **server-global tool registry** (`registry.ts` + `builtinTools.ts`), the
+ * **skill index** (`skillIndex.ts`: fan-out search, merge/dedup/rank, TTL
+ * cache-first), and **trust** (`trust.ts` scanner + blocklist, `flagStore.ts`).
+ * The Leg C `plugins/*` HTTP handlers are wired on top in P7-M4.
  *
  * Lifecycle is a reversible Cordis effect: activation constructs the supervisor
  * (which arms the idle-reap sweeper), disposal stops every sandboxed child, so a
@@ -15,12 +17,25 @@
  * @module dsh-movie-market
  */
 
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type { SkillProfile, SourceStatus, ToolRecord, WarningLevel } from '@dsh-movie/protocol'
+import { builtinToolDefs } from './builtinTools.ts'
+import { FlagStore } from './flagStore.ts'
+import { ToolRegistry } from './registry.ts'
+import { McpSourceClient, SkillIndex, type McpTextResult } from './skillIndex.ts'
 import { SprSupervisor } from './supervisor.ts'
-import type { MarketService, MarketToolInfo, SandboxBackend, ToolSpec } from './types.ts'
+import { Blocklist } from './trust.ts'
+import type { MarketLogger, MarketService, MarketToolInfo, SandboxBackend, SkillSearchOptions, ToolSpec } from './types.ts'
 
 export type { MarketService, MarketToolInfo, ToolSpec, ToolRuntimeStatus } from './types.ts'
+export { ToolRegistry } from './registry.ts'
+export { SkillIndex, McpSourceClient } from './skillIndex.ts'
+export { FlagStore } from './flagStore.ts'
+export { Blocklist, scanProfile, scanText, maxLevel } from './trust.ts'
+export { builtinToolDefs, CURATED_SKILLS_DIR } from './builtinTools.ts'
 
 /** Stable Loader identity. */
 export const name = 'movie-market'
@@ -46,6 +61,12 @@ export interface Config {
   defaultTasksMax: number
   /** Default `TimeoutStopSec`. */
   defaultTimeoutStopSec: number
+  /** Skill-index cache time-to-live (ms); a fresh entry skips a fan-out. */
+  cacheTtlMs: number
+  /** Per-tool fan-out timeout (ms); a slow tool degrades rather than blocks. */
+  searchPerToolTimeoutMs: number
+  /** Data dir for the flag store; `''` resolves to `<server>/.dsh/market`. */
+  dataDir: string
 }
 
 /** Schemastery validation + defaults for {@link Config}. */
@@ -58,6 +79,9 @@ export const Config: z<Config> = z.object({
   defaultCpuQuotaPct: z.number().min(1).default(100),
   defaultTasksMax: z.number().min(1).default(128),
   defaultTimeoutStopSec: z.number().min(1).default(10),
+  cacheTtlMs: z.number().min(0).default(300_000),
+  searchPerToolTimeoutMs: z.number().min(1).default(8_000),
+  dataDir: z.string().default(''),
 })
 
 /** Coerce the free-form `sandbox` config into a {@link SandboxBackend} (or `auto`). */
@@ -74,12 +98,13 @@ function backendOf(value: string): SandboxBackend | 'auto' {
 }
 
 /**
- * Activate the marketplace runtime: provide `ctx.movieMarket` and arm the
- * supervisor as a reversible effect.
+ * Activate the marketplace runtime: provide `ctx.movieMarket`, seed the built-in
+ * tools, and arm the supervisor + flag store as reversible effects.
  * @param ctx - host context (logger source).
  * @param config - validated plugin configuration.
  */
 export function apply(ctx: Context, config: Config): void {
+  const logger: MarketLogger = ctx.logger
   const envBackend = process.env['DSH_MARKET_SANDBOX']
   const preferred = backendOf(envBackend !== undefined && envBackend !== '' ? envBackend : config.sandbox)
 
@@ -96,7 +121,41 @@ export function apply(ctx: Context, config: Config): void {
     defaultTasksMax: config.defaultTasksMax,
     defaultTimeoutStopSec: config.defaultTimeoutStopSec,
     reapSweepMs: Math.max(1_000, Math.floor(config.idleReapMs / 4)),
-    logger: ctx.logger,
+    logger,
+  })
+
+  // The server-global tool registry (D2/D4): seed the built-ins and register
+  // every spawn spec with the supervisor (lazy — nothing spawns until first use).
+  // `statusOf` merges the supervisor's live lifecycle onto each record.
+  const registry = new ToolRegistry(
+    (id: string) => {
+      try {
+        return supervisor.status(id)
+      } catch {
+        return null // not (yet) known to the supervisor
+      }
+    },
+    builtinToolDefs(),
+  )
+  for (const spec of registry.specs()) supervisor.register(spec)
+
+  // The flag store persists under `<server>/.dsh/market` (mirrors the gateway's
+  // workspace-root resolution) unless an explicit dataDir is configured.
+  const here = fileURLToPath(import.meta.url)
+  const serverRoot = resolve(here, '..', '..', '..', '..')
+  const dataDir = config.dataDir !== '' ? resolve(config.dataDir) : resolve(serverRoot, '.dsh', 'market')
+  const flags = new FlagStore(resolve(dataDir, 'flags.json'), logger)
+  const blocklist = new Blocklist()
+
+  // The skill index fans out over the supervisor via the MCP source client.
+  const sourceClient = new McpSourceClient(
+    async (toolId: string, name: string, args: Readonly<Record<string, unknown>>): Promise<McpTextResult> =>
+      (await supervisor.callTool(toolId, name, args)) as unknown as McpTextResult,
+  )
+  const index = new SkillIndex(sourceClient, registry, flags, blocklist, {
+    ttlMs: config.cacheTtlMs,
+    perToolTimeoutMs: config.searchPerToolTimeoutMs,
+    logger,
   })
 
   const service: MarketService = {
@@ -118,6 +177,28 @@ export function apply(ctx: Context, config: Config): void {
     status: (id: string) => supervisor.status(id),
     ids: () => supervisor.ids(),
     stopTool: async (id: string): Promise<void> => supervisor.stop(id),
+
+    /* --- P7-M3: registry, discovery, and trust --- */
+
+    toolRecords: (): ToolRecord[] => registry.records(),
+    searchSkills: async (options: SkillSearchOptions): Promise<SkillProfile[]> => {
+      const ranked = await index.search(options)
+      return ranked.map((row): SkillProfile => row.profile)
+    },
+    skillProfile: async (id: string): Promise<SkillProfile | null> => index.profile(id),
+    sourcesStatus: async (): Promise<SourceStatus[]> => index.sourcesStatus(),
+    flagSkill: async (id: string, level: WarningLevel, reason: string, actor: string): Promise<WarningLevel> => {
+      if (level === 'clean') {
+        flags.clear(id, actor)
+      } else {
+        flags.set(id, level, reason, actor)
+      }
+      // No cache invalidation is needed: the cache stores raw source records and
+      // `warningLevel` is recomputed from the live flag store on every map, so a
+      // flag change is reflected on the next search — and the rate-limit
+      // fallback cache is preserved (R11).
+      return flags.get(id)?.level ?? 'clean'
+    },
   }
 
   ctx.provide('movieMarket', service)
