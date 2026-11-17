@@ -15,7 +15,7 @@
  */
 
 import type {
-  SourceDownloadResult, SourceProfileResult, SourceSearchResult,
+  SourceDownloadResult, SourceProfileResult, SourceRunResult, SourceSearchResult,
 } from './contract.ts'
 import { SOURCE_TOOL_NAMES } from './contract.ts'
 
@@ -27,6 +27,13 @@ export interface SourceHandlers {
   profile(slug: string): Promise<SourceProfileResult>
   /** Answer a `skills/download`. */
   download(slug: string): Promise<SourceDownloadResult>
+  /**
+   * Answer a `skills/run` (Phase-7 D9). OPTIONAL: a source that does not declare
+   * it simply does not advertise the executable entrypoint, and the host treats
+   * its skills as non-executable. It runs inside the tool's already-sandboxed
+   * process, so the manifest allow-list + caps bound it (D3).
+   */
+  run?(slug: string, args: Readonly<Record<string, unknown>>): Promise<SourceRunResult>
 }
 
 /** Identity advertised in the MCP `initialize` result. */
@@ -48,7 +55,7 @@ interface JsonRpcRequest {
 }
 
 /** The static tool catalog every skill-source adapter advertises. */
-const TOOLS: readonly unknown[] = [
+const BASE_TOOLS: readonly unknown[] = [
   {
     name: SOURCE_TOOL_NAMES.search,
     description: 'Search this source for skills matching a query (JSON result).',
@@ -69,6 +76,17 @@ const TOOLS: readonly unknown[] = [
     inputSchema: { type: 'object', properties: { slug: { type: 'string' } }, required: ['slug'] },
   },
 ]
+
+/** The executable-entrypoint tool (Phase-7 D9), advertised only when implemented. */
+const RUN_TOOL: unknown = {
+  name: SOURCE_TOOL_NAMES.run,
+  description: 'Execute one skill\'s entrypoint in this sandbox and return its output (JSON result).',
+  inputSchema: {
+    type: 'object',
+    properties: { slug: { type: 'string' }, args: { type: 'object' } },
+    required: ['slug'],
+  },
+}
 
 /** Write one newline-delimited JSON message to stdout. */
 function send(message: unknown): void {
@@ -102,6 +120,9 @@ function encode(payload: unknown): unknown {
  */
 export function runSourceServer(info: SourceServerInfo, handlers: SourceHandlers): void {
   const tag = info.name
+  // Advertise the executable entrypoint only when this source implements it, so
+  // a non-executable source never offers a `skills/run` that would just error.
+  const tools: readonly unknown[] = handlers.run === undefined ? BASE_TOOLS : [...BASE_TOOLS, RUN_TOOL]
 
   /** Route one `tools/call` to a handler, encoding the JSON result. */
   async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -115,6 +136,11 @@ export function runSourceServer(info: SourceServerInfo, handlers: SourceHandlers
     }
     if (name === SOURCE_TOOL_NAMES.download) {
       return encode(await handlers.download(String(args['slug'] ?? '')))
+    }
+    if (name === SOURCE_TOOL_NAMES.run) {
+      if (handlers.run === undefined) throw new Error('this source does not support execution')
+      const runArgs = (args['args'] as Record<string, unknown> | undefined) ?? {}
+      return encode(await handlers.run(String(args['slug'] ?? ''), runArgs))
     }
     return { content: [{ type: 'text', text: JSON.stringify({ error: `unknown tool ${name}` }) }], isError: true }
   }
@@ -144,7 +170,7 @@ export function runSourceServer(info: SourceServerInfo, handlers: SourceHandlers
         if (id !== undefined) replyResult(id, {})
         return
       case 'tools/list':
-        if (id !== undefined) replyResult(id, { tools: TOOLS })
+        if (id !== undefined) replyResult(id, { tools })
         return
       case 'tools/call': {
         if (id === undefined) return

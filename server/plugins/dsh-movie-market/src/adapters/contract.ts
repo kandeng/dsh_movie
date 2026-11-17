@@ -40,6 +40,8 @@ export interface SourceSkillRecord {
   relevance?: number | undefined
   /** True when the skill declares executable entrypoints (Phase-7 D9). */
   executable?: boolean | undefined
+  /** The MCP tool name of the executable entrypoint, when declared (D9). */
+  entrypoint?: string | undefined
 }
 
 /** The `skills/search` payload. */
@@ -74,9 +76,34 @@ export interface SourceDownloadResult {
   provider: string
 }
 
-/** The three MCP tool names every skill-source adapter must expose. */
+/** One file produced by an executable-skill run (Phase-7 D9). */
+export interface SourceRunFile {
+  /** Source-provided file name (the host sanitizes + maps it to a room path). */
+  name: string
+  /** The file text content. */
+  body: string
+}
+
+/**
+ * The `skills/run` payload (Phase-7 D9): the result of executing a skill's
+ * entrypoint inside the tool's already-sandboxed process. `content` is the
+ * primary text output (it lands in the node); `files` are optional artifacts the
+ * gateway writes under the room dir.
+ */
+export interface SourceRunResult {
+  /** Source-local skill id that was run. */
+  slug: string
+  /** The primary text output. */
+  content: string
+  /** Optional file artifacts produced by the run. */
+  files?: SourceRunFile[] | undefined
+}
+
+/** The MCP tool names every skill-source adapter must expose. */
 export const SOURCE_TOOL_NAMES = {
   search: 'skills/search',
   profile: 'skills/profile',
   download: 'skills/download',
+  /** Executable-skill entrypoint (Phase-7 D9); advertised only when a source implements it. */
+  run: 'skills/run',
 } as const

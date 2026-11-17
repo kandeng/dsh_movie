@@ -20,6 +20,8 @@ import { LegCError, RpcClient } from "@dsh-movie/sdk";
 import type {
   SkillDownload,
   SkillProfile,
+  SkillRunResult,
+  SkillRunStatus,
   SkillTarget,
   SourceStatus,
   ToolInstallSpec,
@@ -55,6 +57,15 @@ export interface PluginsHandle {
   download(id: string, roomId: string): Promise<SkillDownload>;
   /** Raise/clear a server-global skill flag (host action, `plugins/skills.flag`). */
   flag(id: string, level: WarningLevel, reason: string): Promise<WarningLevel>;
+  /**
+   * Run an executable skill into a room (D9a, host action, `plugins/skills.run`).
+   * Returns the typed `{ run, status }` envelope: `status === "ok"` carries the
+   * run content + written artifacts; `consent-required` means the skill is orange
+   * and the caller must record consent (then retry); the rest are refusals.
+   */
+  run(id: string, roomId: string, args?: Record<string, unknown>): Promise<{ run: SkillRunResult | null; status: SkillRunStatus }>;
+  /** Record/revoke execution consent for an orange skill (`plugins/skills.consent`). */
+  consent(id: string, granted: boolean): Promise<boolean>;
   /** Install a third-party/user tool (host action, `plugins/tools.install`). */
   install(spec: ToolInstallSpec): Promise<ToolRecord>;
   /** Uninstall a user tool (host action, `plugins/tools.uninstall`). */
@@ -177,6 +188,42 @@ export function usePlugins(): PluginsHandle {
     }
   }
 
+  async function run(
+    id: string,
+    roomId: string,
+    args?: Record<string, unknown>,
+  ): Promise<{ run: SkillRunResult | null; status: SkillRunStatus }> {
+    busy.value = true;
+    try {
+      const res = await rpc.call("plugins/skills.run", {
+        id,
+        roomId,
+        ...(args === undefined ? {} : { args }),
+      });
+      error.value = null;
+      return { run: res.run, status: res.status };
+    } catch (caught) {
+      error.value = describeError(caught);
+      throw caught;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function consent(id: string, granted: boolean): Promise<boolean> {
+    busy.value = true;
+    try {
+      const res = await rpc.call("plugins/skills.consent", { id, granted });
+      error.value = null;
+      return res.consented;
+    } catch (caught) {
+      error.value = describeError(caught);
+      throw caught;
+    } finally {
+      busy.value = false;
+    }
+  }
+
   async function install(spec: ToolInstallSpec): Promise<ToolRecord> {
     busy.value = true;
     try {
@@ -243,6 +290,8 @@ export function usePlugins(): PluginsHandle {
     profile,
     download,
     flag,
+    run,
+    consent,
     install,
     uninstall,
     setEnabled,

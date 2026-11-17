@@ -86,5 +86,6 @@ export function recordFromSkill(
     provider: f['provider'] !== undefined && f['provider'] !== '' ? f['provider'] : fallbackProvider,
   }
   if (f['executable'] === 'true') record.executable = true
+  if (f['entrypoint'] !== undefined && f['entrypoint'] !== '') record.entrypoint = f['entrypoint']
   return record
 }

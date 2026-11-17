@@ -68,6 +68,21 @@ export interface SkillResolver {
   (node: PromptGraphNode): Promise<{ section: string; notes: string[] }>
 }
 
+/**
+ * Executes one node's imported skills that declare an executable entrypoint
+ * (Phase-7 D9b), returning a composed output section plus lifecycle notes.
+ * `skill-import.executeNodeSkills` bound to a room satisfies this; the runner
+ * merges `section` into `inputs.skills` (after any {@link SkillResolver} section)
+ * and logs each note. The market gates every call by warning level (clean/yellow
+ * auto, orange only after recorded consent, red never); it must never throw into
+ * the run — a skipped skill yields a note, not a failure (R3).
+ * @param node - the prompt node about to execute.
+ * @returns the composed run-output section + lifecycle notes.
+ */
+export interface SkillExecutor {
+  (node: PromptGraphNode): Promise<{ section: string; notes: string[] }>
+}
+
 /** Everything the runner needs to schedule and drive one prompt job. */
 export interface RunPromptDeps {
   /** The background-job registry (`ctx.jobs`), controller already attached. */
@@ -86,6 +101,13 @@ export interface RunPromptDeps {
    * Absent without a market + room, so runs are unaffected when none applies.
    */
   resolveSkills?: SkillResolver | undefined
+  /**
+   * Optional Phase-7 D9b skill executor. When present, each node's executable
+   * imported skills are run (gated by warning level) before the node executes,
+   * and their bounded output section is folded into the inputs. Absent without a
+   * market + room, so runs are unaffected when none applies.
+   */
+  executeSkills?: SkillExecutor | undefined
   /** The D15 model-availability gate consulted before any model call. */
   availability: ModelAvailability
   /** The room this run was triggered from; empty/undefined → no room notices. */
@@ -167,6 +189,23 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
               const resolvedSkills = await deps.resolveSkills(node)
               for (const note of resolvedSkills.notes) job.append(`[skill] ${note}\n`, { channel: 'log' })
               if (resolvedSkills.section !== '') currentInputs = { ...currentInputs, skills: resolvedSkills.section }
+            }
+
+            // Phase-7 D9b: execute this node's imported skills that declare an
+            // executable entrypoint (the market gates each call by warning level)
+            // and merge their bounded output section into the inputs the shared
+            // text seam reads. Notes go to the job log; an orange-without-consent
+            // / red / unavailable skill is skipped with a note, never a fail (R3).
+            if (deps.executeSkills !== undefined && node !== undefined) {
+              const runSkills = await deps.executeSkills(node)
+              for (const note of runSkills.notes) job.append(`[skill-run] ${note}\n`, { channel: 'log' })
+              if (runSkills.section !== '') {
+                const prior = currentInputs['skills']
+                const merged = typeof prior === 'string' && prior !== ''
+                  ? `${prior}\n\n${runSkills.section}`
+                  : runSkills.section
+                currentInputs = { ...currentInputs, skills: merged }
+              }
             }
 
             deps.broadcast([

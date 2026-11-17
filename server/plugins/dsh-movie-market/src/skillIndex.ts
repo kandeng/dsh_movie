@@ -20,9 +20,10 @@
  * @module dsh-movie-market/skillIndex
  */
 
-import type { SkillProfile, SkillTarget, SourceStatus, ToolStatus, WarningLevel } from '@dsh-movie/protocol'
-import type { SourceDownloadResult, SourceProfileResult, SourceSearchResult, SourceSkillRecord } from './adapters/contract.ts'
+import type { SkillProfile, SkillRunOutcome, SkillTarget, SourceStatus, ToolStatus, WarningLevel } from '@dsh-movie/protocol'
+import type { SourceDownloadResult, SourceProfileResult, SourceRunResult, SourceSearchResult, SourceSkillRecord } from './adapters/contract.ts'
 import { SOURCE_TOOL_NAMES } from './adapters/contract.ts'
+import type { ConsentStore } from './consentStore.ts'
 import type { FlagStore } from './flagStore.ts'
 import type { ToolRegistry } from './registry.ts'
 import { Blocklist, maxLevel, scanProfile, scanText } from './trust.ts'
@@ -36,6 +37,8 @@ export interface SourceClient {
   profile(toolId: string, slug: string): Promise<SourceProfileResult>
   /** Fetch one skill's full SKILL.md body from one tool's `skills/download`. */
   download(toolId: string, slug: string): Promise<SourceDownloadResult>
+  /** Execute one skill's entrypoint via one tool's `skills/run` (Phase-7 D9). */
+  run(toolId: string, slug: string, args: Readonly<Record<string, unknown>>): Promise<SourceRunResult>
 }
 
 /** One resolved skill download: the full body plus its trust-layered profile. */
@@ -93,6 +96,7 @@ export class SkillIndex {
   private readonly registry: ToolRegistry
   private readonly flags: FlagStore
   private readonly blocklist: Blocklist
+  private readonly consent: ConsentStore | null
   private readonly options: IndexOptions
   private readonly logger: MarketLogger
   private readonly cache = new Map<string, CacheEntry>()
@@ -104,6 +108,8 @@ export class SkillIndex {
    * @param flags - the server-global flag store.
    * @param blocklist - the seed blocklist.
    * @param options - TTL/timeout/logger tunables.
+   * @param consent - the server-global execution-consent store (D9 orange gate);
+   *   when omitted, an orange skill is never auto-consented (fail-closed).
    */
   constructor(
     client: SourceClient,
@@ -111,11 +117,13 @@ export class SkillIndex {
     flags: FlagStore,
     blocklist: Blocklist,
     options: IndexOptions,
+    consent: ConsentStore | null = null,
   ) {
     this.client = client
     this.registry = registry
     this.flags = flags
     this.blocklist = blocklist
+    this.consent = consent
     this.options = options
     this.logger = options.logger
   }
@@ -153,6 +161,8 @@ export class SkillIndex {
       license: record.license,
       provider: record.provider,
       warningLevel: this.levelOf(id, record.slug, record),
+      ...(record.executable === true ? { executable: true } : {}),
+      ...(record.entrypoint !== undefined ? { entrypoint: record.entrypoint } : {}),
       updatedAt,
     }
   }
@@ -418,6 +428,52 @@ export class SkillIndex {
   invalidate(): void {
     this.cache.clear()
   }
+
+  /**
+   * Execute one skill's entrypoint by global id (`<toolId>:<slug>`) for the
+   * Phase-7 D9 run path. The tool must be installed + enabled (a stopped tool is
+   * an unavailable source, never re-spawned just to run — mirrors `download`);
+   * the skill must declare `executable`. Trust then gates the call exactly as D9
+   * specifies: **red** is refused, **orange** requires recorded consent (the
+   * server-global {@link ConsentStore}), clean/yellow run outright. The actual
+   * `tools/call` happens inside the tool's already-sandboxed process, so the
+   * manifest allow-list + caps bound it (D3).
+   * @param id - the global skill id.
+   * @param args - arguments forwarded to the entrypoint.
+   * @returns the discriminated run outcome.
+   */
+  async run(id: string, args: Readonly<Record<string, unknown>>): Promise<SkillRunOutcome> {
+    const sep = id.indexOf(':')
+    if (sep <= 0) return { status: 'not-found' }
+    const toolId = id.slice(0, sep)
+    const slug = id.slice(sep + 1)
+    // R3/D8: an uninstalled/disabled tool is an unavailable source — never run it.
+    const tool = this.registry.get(toolId)
+    if (tool === null || !tool.installed || !tool.enabled) {
+      this.logger.warn('[market:index] run %s skipped: tool %s is unavailable', id, toolId)
+      return { status: 'not-found' }
+    }
+    // Resolve the profile to learn executability + the trust level (D9 gate).
+    let profile: SourceProfileResult
+    try {
+      profile = await this.withTimeout(this.client.profile(toolId, slug), this.options.perToolTimeoutMs, toolId)
+    } catch (error) {
+      this.logger.warn('[market:index] run %s profile failed: %s', id, String(error))
+      return { status: 'not-found' }
+    }
+    if (profile.skill === null) return { status: 'not-found' }
+    if (profile.skill.executable !== true) return { status: 'not-executable' }
+    const level = this.levelOf(id, slug, profile.skill)
+    if (level === 'red') return { status: 'blocked', warningLevel: level }
+    if (level === 'orange' && this.consent?.granted(id) !== true) return { status: 'consent-required', warningLevel: level }
+    try {
+      const result = await this.withTimeout(this.client.run(toolId, slug, args), this.options.perToolTimeoutMs, toolId)
+      return { status: 'ok', content: result.content, files: result.files ?? [], warningLevel: level }
+    } catch (error) {
+      this.logger.warn('[market:index] run %s failed: %s', id, String(error))
+      return { status: 'not-found' }
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -480,5 +536,11 @@ export class McpSourceClient implements SourceClient {
   async download(toolId: string, slug: string): Promise<SourceDownloadResult> {
     const result = await this.caller(toolId, SOURCE_TOOL_NAMES.download, { slug })
     return decodeJson<SourceDownloadResult>(result, `${toolId}.download`)
+  }
+
+  /** @inheritdoc */
+  async run(toolId: string, slug: string, args: Readonly<Record<string, unknown>>): Promise<SourceRunResult> {
+    const result = await this.caller(toolId, SOURCE_TOOL_NAMES.run, { slug, args })
+    return decodeJson<SourceRunResult>(result, `${toolId}.run`)
   }
 }

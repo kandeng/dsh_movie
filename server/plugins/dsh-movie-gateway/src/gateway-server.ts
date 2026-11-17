@@ -45,6 +45,7 @@ import type {
   PromptGraph,
   PromptGraphNode,
   SkillProfile,
+  SkillRunOutcome,
   SkillTarget,
   SourceStatus,
   StreamControl,
@@ -79,7 +80,7 @@ import { createRoomNotifier, type RoomPoster } from './movie-executor/room-notif
 import { applyOpsToGraph } from './movie-executor/apply-ops.ts'
 import { availabilityFromInventory, type ModelAvailability } from './movie-executor/model-catalog.ts'
 import type { ReviewFn } from './movie-executor/llm-text.ts'
-import { downloadSkillToRoom, resolveNodeSkills } from './skill-import.ts'
+import { downloadSkillToRoom, resolveNodeSkills, executeSkillToRoom, executeNodeSkills } from './skill-import.ts'
 import type { JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MovieGatewayInfo } from './types.ts'
 import type { CanvasScriptAgent, CanvasGenerateResult } from './canvas-agent.ts'
@@ -220,6 +221,12 @@ export interface MarketBridge {
   setToolEnabled(toolId: string, enabled: boolean): Promise<ToolRecord | null>
   /** One tool's health row, or `null` when unknown. */
   toolStatus(toolId: string): Promise<SourceStatus | null>
+  /** Execute one skill's entrypoint (D9 run); trust + consent gated in the market. */
+  runSkill(id: string, args: Readonly<Record<string, unknown>>): Promise<SkillRunOutcome>
+  /** Record/revoke execution consent for an orange skill (D9); returns the state. */
+  setSkillConsent(id: string, granted: boolean, actor: string): Promise<boolean>
+  /** Whether execution consent is currently granted for a skill (D9). */
+  skillConsent(id: string): Promise<boolean>
 }
 
 /** The D7 intent-mining seam: classify + distill one room utterance. */
@@ -970,6 +977,53 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
         sendApi(res, ok(payload))
         return
       }
+      case 'plugins/skills.run': {
+        // D9a: host-gated (it writes run artifacts into the room workspace).
+        const id = stringParam(params, 'id')
+        const roomId = stringParam(params, 'roomId')
+        if (id === undefined || roomId === undefined) {
+          sendApi(res, err('bad-request', 'id and roomId are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not run a skill; host seat required`))
+          return
+        }
+        const rawArgs = params['args']
+        const args = typeof rawArgs === 'object' && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {}
+        const result = await executeSkillToRoom({ roomId, runner: market, workspace: workflowStore }, id, args)
+        if (!result.ok) {
+          if (result.reason === 'path-escape') {
+            sendApi(res, err('bad-request', `skill "${id}" produced an unsafe artifact path`))
+            return
+          }
+          // consent-required / blocked / not-found / not-executable are typed
+          // outcomes, not transport errors: the client switches on `status`.
+          const refused: LegCResponse<'plugins/skills.run'> = { run: null, status: result.reason }
+          sendApi(res, ok(refused))
+          return
+        }
+        const payload: LegCResponse<'plugins/skills.run'> = {
+          run: { content: result.content, artifacts: result.artifacts, warningLevel: result.warningLevel },
+          status: 'ok',
+        }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'plugins/skills.consent': {
+        // D9: a server-GLOBAL write (like skills.flag) — authenticated-only.
+        const id = stringParam(params, 'id')
+        const granted = params['granted']
+        if (id === undefined || typeof granted !== 'boolean') {
+          sendApi(res, err('bad-request', 'id and a boolean granted are required'))
+          return
+        }
+        const consented = await market.setSkillConsent(id, granted, principal.userId)
+        const payload: LegCResponse<'plugins/skills.consent'> = { consented }
+        sendApi(res, ok(payload))
+        return
+      }
       default:
         sendApi(res, err('unimplemented', `${method} is not implemented`))
         return
@@ -1589,6 +1643,15 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           resolveNodeSkills({ roomId, market: movieMarket, workspace: workflowStore }, node)
       : undefined
 
+    // Phase-7 D9b: arm the director-agent execution trigger under the same guard
+    // (a market bridge + a room to write artifacts into). Each node's executable
+    // imported skills are run (gated by warning level inside the market) before
+    // the node executes; a skipped skill yields a note, never a failure (R3).
+    const executeSkills = movieMarket !== undefined && roomId !== ''
+      ? (node: PromptGraphNode): Promise<{ section: string; notes: string[] }> =>
+          executeNodeSkills({ roomId, runner: movieMarket, workspace: workflowStore }, node)
+      : undefined
+
     if (jobs !== undefined) {
       try {
         startPromptJob({
@@ -1598,6 +1661,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           ...(stepText === undefined ? {} : { stepText }),
           ...(review === undefined ? {} : { review }),
           ...(resolveSkills === undefined ? {} : { resolveSkills }),
+          ...(executeSkills === undefined ? {} : { executeSkills }),
           availability: executorAvailability,
           ...(roomId === '' ? {} : { roomId }),
           notifier,

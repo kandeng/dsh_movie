@@ -45,13 +45,21 @@ application functions as plugins on top of the DSH + Synapse + Canvas foundation
   enterprise firewall** (any OpenAI-compatible runtime such as vLLM, Ollama, or
   SGLang).
 
-**Roadmap.** On this foundation we plan world-model tooling — e.g. **3D Gaussian
-Splatting (3DGS)** and an **asset market** for movie-making skills, characters,
-and scenes — to make it easier to generate movies (especially interactive ones)
-and to support world-model research. As a future step we also plan to reach
-external services through **MCP (Model Context Protocol) plugins** (DSH already
-ships MCP client/resources packages), complementing the off-host model access
-described above.
+**Roadmap.** A first slice of this vision has **shipped**: a **plugins marketplace**
+(Phase 7) reaching external services through **MCP (Model Context Protocol) tool
+plugins** (DSH already ships MCP client/resources packages), complementing the
+off-host model access described above. Every external source — a built-in adapter
+or a third-party/user MCP server — runs as a **sandboxed OS child process** under
+the **SPR supervisor** (`systemd-run --user --scope` wrapping `bwrap`, with
+network allow-lists and memory/CPU caps), so no third-party code ever executes
+inside the host. It surfaces **`SKILL.md` craft skills** through a Plugins page
+and a two-trigger editor **Import**/**Run** flow, guarded by a server-global
+**yellow/orange/red trust ladder** (heuristic scan + user reports; orange gates
+execution behind explicit consent, red blocks it). On this foundation we still
+plan broader world-model tooling — e.g. **3D Gaussian Splatting (3DGS)** and a
+full **asset market** for movie-making characters and scenes — to make it easier
+to generate movies (especially interactive ones) and to support world-model
+research.
 
 For the full system design see [`doc/architecture.md`](doc/architecture.md) and
 the phase plans under [`doc/design/`](doc/design/).
@@ -287,4 +295,4 @@ pnpm dump:config    # print the resolved DSH server config
 | `client/web/`     | `@dsh-movie/web`      | Vue 3 + Vue Flow canvas and chat client          |
 | `client/i18n/`    | `@dsh-movie/i18n`     | Locale catalogs + Vite CJK-extraction plugin     |
 | `server/`         | `dsh-movie-server`    | DSH host, profiles, and scripts                  |
-| `server/plugins/` | —                     | Matrix identity, Matrix chat, and movie gateway  |
+| `server/plugins/` | —                     | Matrix identity, Matrix chat, movie gateway, and the plugins marketplace (SPR supervisor) |

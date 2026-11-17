@@ -21,8 +21,9 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { SkillProfile, SourceStatus, ToolInstallSpec, ToolRecord, WarningLevel } from '@dsh-movie/protocol'
+import type { SkillProfile, SkillRunOutcome, SourceStatus, ToolInstallSpec, ToolRecord, WarningLevel } from '@dsh-movie/protocol'
 import { builtinToolDefs } from './builtinTools.ts'
+import { ConsentStore } from './consentStore.ts'
 import { FlagStore } from './flagStore.ts'
 import { ToolRegistry } from './registry.ts'
 import { McpSourceClient, SkillIndex, type McpTextResult } from './skillIndex.ts'
@@ -34,6 +35,7 @@ export type { MarketService, MarketToolInfo, ToolSpec, ToolRuntimeStatus } from 
 export { ToolRegistry } from './registry.ts'
 export { SkillIndex, McpSourceClient, type SkillDownloadResult } from './skillIndex.ts'
 export { FlagStore } from './flagStore.ts'
+export { ConsentStore } from './consentStore.ts'
 export { Blocklist, scanProfile, scanText, maxLevel } from './trust.ts'
 export { builtinToolDefs, CURATED_SKILLS_DIR } from './builtinTools.ts'
 
@@ -63,7 +65,13 @@ export interface Config {
   defaultTimeoutStopSec: number
   /** Skill-index cache time-to-live (ms); a fresh entry skips a fan-out. */
   cacheTtlMs: number
-  /** Per-tool fan-out timeout (ms); a slow tool degrades rather than blocks. */
+  /**
+   * Per-tool fan-out timeout (ms); a slow tool degrades rather than blocks.
+   * Tuned above the adapters' internal search HTTP timeout (9 s for the
+   * GitHub/ClawHub/git-repo sources) so a slow-but-rate-limited registry
+   * surfaces its structured `rateLimited` verdict — which drives cache-first
+   * last-good serving (R11) — instead of a bare host-side timeout.
+   */
   searchPerToolTimeoutMs: number
   /** Data dir for the flag store; `''` resolves to `<server>/.dsh/market`. */
   dataDir: string
@@ -80,7 +88,7 @@ export const Config: z<Config> = z.object({
   defaultTasksMax: z.number().min(1).default(128),
   defaultTimeoutStopSec: z.number().min(1).default(10),
   cacheTtlMs: z.number().min(0).default(300_000),
-  searchPerToolTimeoutMs: z.number().min(1).default(8_000),
+  searchPerToolTimeoutMs: z.number().min(1).default(12_000),
   dataDir: z.string().default(''),
 })
 
@@ -145,6 +153,7 @@ export function apply(ctx: Context, config: Config): void {
   const serverRoot = resolve(here, '..', '..', '..', '..')
   const dataDir = config.dataDir !== '' ? resolve(config.dataDir) : resolve(serverRoot, '.dsh', 'market')
   const flags = new FlagStore(resolve(dataDir, 'flags.json'), logger)
+  const consent = new ConsentStore(resolve(dataDir, 'consent.json'), logger)
   const blocklist = new Blocklist()
 
   // The skill index fans out over the supervisor via the MCP source client.
@@ -156,7 +165,7 @@ export function apply(ctx: Context, config: Config): void {
     ttlMs: config.cacheTtlMs,
     perToolTimeoutMs: config.searchPerToolTimeoutMs,
     logger,
-  })
+  }, consent)
 
   const service: MarketService = {
     backend: () => supervisor.currentBackend(),
@@ -227,6 +236,15 @@ export function apply(ctx: Context, config: Config): void {
     },
     toolStatus: async (toolId: string): Promise<SourceStatus | null> =>
       index.sourcesStatus().find((row): boolean => row.toolId === toolId) ?? null,
+
+    /* --- P7-M6: executable-skill run + orange-consent gate (D9) --- */
+
+    runSkill: async (id: string, args: Readonly<Record<string, unknown>>): Promise<SkillRunOutcome> => index.run(id, args),
+    setSkillConsent: async (id: string, granted: boolean, actor: string): Promise<boolean> => {
+      consent.set(id, granted, actor)
+      return consent.granted(id)
+    },
+    skillConsent: async (id: string): Promise<boolean> => consent.granted(id),
   }
 
   ctx.provide('movieMarket', service)

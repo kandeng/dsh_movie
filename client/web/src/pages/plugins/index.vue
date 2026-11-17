@@ -14,8 +14,10 @@ import {
   IconAlertTriangle,
   IconShieldLock,
   IconDownload,
+  IconPlayerPlay,
 } from "@tabler/icons-vue";
 import type {
+  SkillArtifact,
   SkillProfile,
   SkillTarget,
   ToolInstallSpec,
@@ -75,6 +77,14 @@ const reportReason = ref("");
 
 // ACT: 内联反馈（本项目不使用 ElMessage，沿用 error/notice ref 就地提示）。
 const notice = ref<string | null>(null);
+
+// ACT: 可执行技能运行（D9a）。「运行」在技能卡上触发 plugins/skills.run，输出以
+// 结果对话框展示；橙色技能先弹授权对话框，记录同意后再运行；红色技能按钮禁用。
+const runVisible = ref(false);
+const runContent = ref("");
+const runArtifacts = ref<SkillArtifact[]>([]);
+const consentVisible = ref(false);
+const consentSkill = ref<SkillProfile | null>(null);
 
 onMounted(async () => {
   bannerVisible.value = localStorage.getItem(BANNER_KEY) === null;
@@ -238,6 +248,55 @@ async function submitReport(): Promise<void> {
     reportVisible.value = false;
     await runSearch();
     notice.value = translate("已举报");
+  } catch {
+    /* plugins.error 已记录 */
+  }
+}
+
+// ACT: 运行一个可执行技能（D9a）。状态判别：ok→结果对话框；consent-required→
+// 授权对话框；blocked（红）/not-executable/not-found→就地提示。房间取 pick 目标或活动房间。
+async function runSkill(skill: SkillProfile): Promise<void> {
+  const roomId = pickRoomId.value;
+  if (roomId === "") {
+    notice.value = translate("运行失败");
+    return;
+  }
+  notice.value = null;
+  try {
+    const { run, status } = await plugins.run(skill.id, roomId);
+    if (status === "ok" && run !== null) {
+      runContent.value = run.content;
+      runArtifacts.value = run.artifacts;
+      runVisible.value = true;
+      return;
+    }
+    if (status === "consent-required") {
+      consentSkill.value = skill;
+      consentVisible.value = true;
+      return;
+    }
+    if (status === "blocked") {
+      notice.value = translate("恶意内容已被阻止运行");
+      return;
+    }
+    if (status === "not-executable") {
+      notice.value = translate("此技能不可执行");
+      return;
+    }
+    notice.value = translate("运行失败");
+  } catch {
+    notice.value = translate("运行失败");
+  }
+}
+
+// ACT: 橙色技能授权后记录服务器全局同意（D9），随即重试运行。
+async function submitConsent(): Promise<void> {
+  const skill = consentSkill.value;
+  if (skill === null) return;
+  try {
+    await plugins.consent(skill.id, true);
+    consentVisible.value = false;
+    await runSkill(skill);
   } catch {
     /* plugins.error 已记录 */
   }
@@ -479,6 +538,31 @@ function sourceStatus(toolId: string): ToolStatus | null {
                 {{ translate("举报") }}
               </el-button>
               <span class="spacer" />
+              <!-- ACT: 运行（D9a）。红色技能禁用并提示；其余主机可运行。 -->
+              <el-tooltip
+                v-if="skill.executable && skill.warningLevel === 'red'"
+                :content="translate('恶意内容已被阻止运行')"
+                placement="top"
+                :show-arrow="false"
+                :hide-after="0">
+                <span class="marketWrap">
+                  <el-button size="small" type="warning" plain disabled>
+                    <icon-player-play :size="14" aria-hidden="true" />
+                    {{ translate("运行") }}
+                  </el-button>
+                </span>
+              </el-tooltip>
+              <el-button
+                v-else-if="skill.executable"
+                size="small"
+                type="warning"
+                plain
+                :loading="plugins.busy.value"
+                :disabled="!canManage"
+                @click="runSkill(skill)">
+                <icon-player-play :size="14" aria-hidden="true" />
+                {{ translate("运行") }}
+              </el-button>
               <el-tooltip
                 v-if="skill.warningLevel === 'red'"
                 :content="translate('恶意内容已被阻止导入')"
@@ -553,6 +637,33 @@ function sourceStatus(toolId: string): ToolStatus | null {
         <el-button @click="reportVisible = false">{{ translate("取消") }}</el-button>
         <el-button type="primary" :loading="plugins.busy.value" @click="submitReport">
           {{ translate("举报") }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ACT: 运行结果对话框（D9a）。展示技能执行的文本输出与写入房间的产物。 -->
+    <el-dialog v-model="runVisible" :title="translate('运行结果')" width="560px">
+      <pre class="runOutput">{{ runContent }}</pre>
+      <div v-if="runArtifacts.length > 0" class="runArtifacts">
+        <p class="runArtifactsTitle">{{ translate("执行输出") }}</p>
+        <ul class="runArtifactList">
+          <li v-for="artifact in runArtifacts" :key="artifact.path">{{ artifact.path }}</li>
+        </ul>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="runVisible = false">{{ translate("关闭") }}</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ACT: 橙色技能授权对话框（D9）。运行前需用户明确授权，记录到服务器全局同意存储。 -->
+    <el-dialog v-model="consentVisible" :title="translate('授权运行')" width="440px">
+      <el-alert type="warning" :closable="false" show-icon :title="translate('需要授权后运行')">
+        <p class="bannerBody">{{ translate("该技能为可疑内容，运行前需要你的授权。") }}</p>
+      </el-alert>
+      <template #footer>
+        <el-button @click="consentVisible = false">{{ translate("拒绝") }}</el-button>
+        <el-button type="warning" :loading="plugins.busy.value" @click="submitConsent">
+          {{ translate("授权运行") }}
         </el-button>
       </template>
     </el-dialog>
@@ -784,6 +895,40 @@ function sourceStatus(toolId: string): ToolStatus | null {
 }
 
 .marketWrap { display: inline-flex; }
+
+// ACT: 运行结果对话框（D9a）的输出与产物样式。
+.runOutput {
+  margin: 0;
+  padding: 12px;
+  max-height: 280px;
+  overflow: auto;
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.runArtifacts {
+  margin-top: 12px;
+
+  .runArtifactsTitle {
+    margin: 0 0 4px;
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+  }
+
+  .runArtifactList {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--el-text-color-regular);
+    font-size: 12px;
+    line-height: 1.7;
+    word-break: break-all;
+  }
+}
 
 @media (max-width: 700px) {
   .pluginsGrid {

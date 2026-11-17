@@ -322,3 +322,50 @@ The per-node lifecycle broadcast (`executing → progress → executed → execu
 
 Chat → graph now also travels **server-side** (D7): `customer_service` mines a room conversation for graph-edit intents (a cheap router LLM), invokes the canvas planner, and applies the resulting op-script to the **authoritative** `WorkflowGraph` (`apply-ops.ts`) — then commits, fans the new HEAD out to `workflow/watch` subscribers, and **narrates once** (D9). Graph → chat travels as **artifact echoes** (D8) plus **one batched, collapsible narration system message per committed txn** (e.g. `+ ImageGenerator #7; edge #3→#7`, sentinel-prefixed so the timeline renders it as a system entry, never a chat bubble). Per-keystroke or per-op mirroring is deliberately rejected: the conversation stays the audit log, the graph stays the executable projection of current intent (R4 drift guard: the chat path and the template path source from the same functional catalog, so they produce equivalent pipelines).
 
+## 9. Plugins marketplace & the SPR supervisor (Phase 7)
+
+Phase 7 adds a **plugins marketplace**: a way to discover, install, and use external *skills* (and the *tools* that carry them) to empower the generators, without ever letting third-party code run inside the DSH host process. It is one first-party Cordis plugin, `dsh-movie-market`, plus a `plugins/*` Leg C namespace, a Plugins web page, and the editor **Import**/**Run** flow.
+
+### 9.1 Tools, skills, and the two-trigger model
+
+- **A tool is an MCP server** (`ToolRecord`), installed **server-globally** and visible to all users — a built-in first-party adapter shipped in-repo, or a third-party/user-provided stdio server. Every tool, first-party or not, runs as a **sandboxed OS child** (§9.2); nothing external executes in the host.
+- **A skill is a `SKILL.md` bundle** following the ecosystem front-matter standard. A masonry **card is profile-only** (`SkillProfile`); the **full content** exists in dsh_movie only after download, as a per-room workspace file `<roomDir>/skills/<id>.md`.
+- **Two triggers move a skill into a node** (D7): **mode 1** — the editor **Import** button stashes the pick context, routes to the Plugins page in pick-mode, **Confirm** downloads the body into the room workspace and pastes it into the node's text widget (one draft-preserving commit); **mode 2** — if the file is missing at graph **Run**, the runner **re-fetches** automatically before executing. Skill bodies are folded into generator prompts as a bounded, **quoted-as-untrusted** `## Craft skills` section.
+- **Executable skills** (D9): a bundle declaring `executable` + `entrypoint` runs as its providing tool's MCP `tools/call` **inside the already-sandboxed process**; text/file results land as node content and room artifacts under `<roomDir>/artifacts/<safeId>/<name>`. Two run triggers share one gate (`SkillIndex.run`): explicit card/chip **Run**, and director-agent invocation during a generator run.
+
+### 9.2 The SPR supervisor: every tool runs in an OS sandbox, automatically
+
+DSH cannot sandbox (Cordis is in-process DI), so the **Source-Plugin-Runtime (SPR) supervisor** uses the OS, entirely server-side and automatic — the user never runs a command. The default spawn wrapper (verified on Ubuntu 22.04 / systemd 249) is `systemd-run --user --scope` supplying **cgroup** enforcement (`MemoryMax=`, the mandatory `MemorySwapMax=0` swap-escape fix, `CPUQuota=`, `TasksMax=`, `TimeoutStopSec=`, best-effort `IPAddressAllow=`/`IPAddressDeny=any`) wrapping **`bwrap`** supplying **namespace** isolation (`--ro-bind / /`, `--tmpfs /tmp`, `--unshare-all`; `--share-net` only when the manifest declares network). A scope rejects the FS/exec service properties, so FS/net isolation comes from bwrap inside the scope. **bwrap-alone** is the fallback where no user systemd instance is reachable; **docker/podman** is an operator-selected stronger runtime (env switch `DSH_MARKET_SANDBOX`); `auto` probes strongest-first. Children are health-checked, **idle-reaped** past a TTL, and **transparently re-spawned** if killed — killing a fixture never affects the host. Manifest **network allow-lists and resource caps** (D3) bound every search, download, and execution.
+
+### 9.3 The trust ladder (D8)
+
+Every profile carries `warningLevel = max(scanner, blocklist→red, flagStore)`, a **server-global** verdict surfaced as a badge on each card:
+
+- **clean** — first-party/curated or nothing flagged; auto-imports and auto-runs.
+- **yellow** — heuristic scanner raises it for URLs / install steps / service coupling; a one-time **unaudited-content banner** covers the open registries (enabled by default).
+- **orange** — credential-shaped text, `curl | sh`, or a bundled binary; **execution is gated behind explicit consent**, recorded server-globally in the `consentStore` (the orange-consent dialog). Import is still allowed; *run* requires the recorded grant.
+- **red** — blocklist seed or an explicit user **report** (`flagStore`); **blocks both import and run**.
+
+The scanner only ever raises yellow/orange; **red comes only from the blocklist or a flag**. `SkillIndex.run` is the single enforcement point both run triggers share: tool installed+enabled (else `not-found`), profile executable (else `not-executable`), red → `blocked`, orange-without-consent → `consent-required`, else execute → `ok`. The client switches on this **typed status** channel — never on error strings.
+
+### 9.4 Skill index: fan-out, merge/rank, cache-first under rate limits
+
+The host `SkillIndex` fans a query out to every enabled tool in parallel, **merges/dedups** (`provider::title`), and **ranks** (`relevance·0.35 + lexical·0.3 + trust·0.2 + target·0.15`). A **TTL cache** (`cacheTtlMs`, default 5 min) serves a fresh entry without a fan-out. Each tool has a **per-tool fan-out timeout** (`searchPerToolTimeoutMs`, default 12 s — tuned *above* the adapters' 9 s internal HTTP timeout so a slow-but-rate-limited registry surfaces its structured `rateLimited` verdict rather than a bare host timeout). On a rate-limit/error the source serves its **last-good cache** (even stale) and is marked **`degraded`** — never overwritten with an empty payload (R11). A disabled/uninstalled tool is treated as an **unavailable source**: it is never re-spawned, so import/run proceed skill-less or return `not-found`.
+
+### 9.5 The vendored suite & adapters (license/attribution)
+
+The offline **zero-config floor** is a vendored suite of **9 first-party curated `SKILL.md`** files (`skills/`), all `license: MIT`, `provider: dsh_movie` — entirely first-party, so there are **no third-party attribution obligations**. The four open-registry adapters (`clawhub`, `github`, `directory` → skills.sh/lobehub, `gitrepo`) are first-party MCP stdio code that **call public registry APIs over an allow-list**; they **vendor no third-party source**. The GitHub adapter treats `GITHUB_TOKEN` as **optional** (it only lifts the 10 req/min unauthenticated cap), so GitHub stays usable unauthenticated and degrades to cache-first when the budget is exhausted.
+
+```mermaid
+graph LR
+    UI[Plugins page / editor Import + Run] --> LegC[plugins/* Leg C handlers]
+    LegC --> Index[SkillIndex: fan-out, merge/rank, TTL cache, trust]
+    LegC --> Bridge[gateway skill-import bridge]
+    Index --> SPR[SPR supervisor]
+    Bridge --> SPR
+    SPR --> Tools[Sandboxed MCP tool children]
+    Bridge --> WS[Per-room workspace: skills/ + artifacts/]
+    Index --> Trust[consentStore + flagStore + blocklist]
+```
+
+

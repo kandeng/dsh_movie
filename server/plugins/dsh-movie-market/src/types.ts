@@ -12,11 +12,11 @@
  */
 
 import type {
-  SkillProfile, SkillTarget, SourceStatus, ToolInstallSpec, ToolManifest, ToolRecord, ToolStatus, WarningLevel,
+  SkillProfile, SkillRunOutcome, SkillTarget, SourceStatus, ToolInstallSpec, ToolManifest, ToolRecord, ToolStatus, WarningLevel,
 } from '@dsh-movie/protocol'
 
 export type {
-  SourceDownloadResult, SourceProfileResult, SourceSearchResult, SourceSkillRecord,
+  SourceDownloadResult, SourceProfileResult, SourceRunFile, SourceRunResult, SourceSearchResult, SourceSkillRecord,
 } from './adapters/contract.ts'
 
 /**
@@ -325,6 +325,24 @@ export interface MarketService {
   setToolEnabled(toolId: string, enabled: boolean): Promise<ToolRecord | null>
   /** One tool's health row (D5), or `null` when the tool is unknown. */
   toolStatus(toolId: string): Promise<SourceStatus | null>
+
+  /* --- P7-M6: executable-skill run + orange-consent gate (D9) --- */
+
+  /**
+   * Execute one skill's entrypoint by global id (`<toolId>:<slug>`) inside its
+   * tool's already-sandboxed process (`tools/call`). Trust gates the call: red
+   * is refused, orange requires recorded consent, clean/yellow run outright. The
+   * returned outcome is discriminated so the gateway never string-matches.
+   */
+  runSkill(id: string, args: Readonly<Record<string, unknown>>): Promise<SkillRunOutcome>
+  /**
+   * Record (or revoke) execution consent for an orange skill (D9). Server-global
+   * so a consent given on a card also covers the director-agent trigger (D9b).
+   * @returns the resulting consent state.
+   */
+  setSkillConsent(id: string, granted: boolean, actor: string): Promise<boolean>
+  /** Whether execution consent is currently granted for a skill. */
+  skillConsent(id: string): Promise<boolean>
 }
 
 declare module '@deepseek-ai/cordis' {

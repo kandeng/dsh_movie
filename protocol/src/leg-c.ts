@@ -328,6 +328,10 @@ export interface SkillProfile {
   provider: string
   /** Server-global warning-ladder level (D8). */
   warningLevel: WarningLevel
+  /** True when the skill declares an executable entrypoint (Phase-7 D9). */
+  executable?: boolean | undefined
+  /** The MCP tool name of the executable entrypoint, when declared (D9). */
+  entrypoint?: string | undefined
   /** Last index update (epoch ms). */
   updatedAt: number
 }
@@ -424,6 +428,64 @@ export interface SkillDownload {
 }
 
 /**
+ * One raw file produced by an executable-skill run (Phase-7 D9), before the
+ * gateway maps it onto a room-relative workspace path. The market returns these;
+ * the gateway writes them under `<roomDir>/artifacts/` and reports the path.
+ */
+export interface SkillRunFile {
+  /** Source-provided file name (the gateway sanitizes + maps it to a path). */
+  name: string
+  /** The file text content. */
+  body: string
+}
+
+/**
+ * The market's discriminated run outcome (Phase-7 D9), consumed by the gateway.
+ * `ok` carries the text content + raw files; `consent-required` means the skill
+ * is orange with no recorded consent yet; `blocked` means red (never runs);
+ * `not-found` / `not-executable` are self-explanatory. The trust + consent gate
+ * lives in the market so BOTH run triggers (card Run and director-agent) share
+ * one enforcement point.
+ */
+export type SkillRunOutcome =
+  | { status: 'ok'; content: string; files: SkillRunFile[]; warningLevel: WarningLevel }
+  | { status: 'consent-required'; warningLevel: WarningLevel }
+  | { status: 'blocked'; warningLevel: WarningLevel }
+  | { status: 'not-found' }
+  | { status: 'not-executable' }
+
+/**
+ * One file artifact written into a room by an executable-skill run (Phase-7 D9).
+ * `path` is workspace-relative (`artifacts/<skill>/<file>`); `body` is the text
+ * the gateway wrote, returned so the client can preview without a second read.
+ */
+export interface SkillArtifact {
+  /** Workspace-relative path written under the room dir. */
+  path: string
+  /** The artifact text content. */
+  body: string
+}
+
+/** The successful payload of one `plugins/skills.run` (Phase-7 D9). */
+export interface SkillRunResult {
+  /** The primary text output (lands in the node / prompt). */
+  content: string
+  /** Files written into the room workspace dir. */
+  artifacts: SkillArtifact[]
+  /** The warning level the run was gated at. */
+  warningLevel: WarningLevel
+}
+
+/**
+ * The outcome discriminator of a run attempt surfaced to the client (Phase-7
+ * D9). `ok` carries a {@link SkillRunResult}; `consent-required` means the skill
+ * is orange and the client must show the consent dialog (then record consent via
+ * `plugins/skills.consent` and retry); `blocked` means red; the rest map to a
+ * disabled/refused Run button.
+ */
+export type SkillRunStatus = 'ok' | 'consent-required' | 'blocked' | 'not-found' | 'not-executable'
+
+/**
  * A node-property reference recorded when a skill is imported (Phase-7 D7),
  * persisted additively under `WorkflowNode.properties.importedSkills`.
  */
@@ -466,6 +528,11 @@ export interface PluginsNamespace {
     { id: string; level: WarningLevel; reason: string },
     { warningLevel: WarningLevel }
   >
+  'plugins/skills.run': Method<
+    { id: string; roomId: MatrixRoomId; args?: Record<string, unknown> | undefined },
+    { run: SkillRunResult | null; status: SkillRunStatus }
+  >
+  'plugins/skills.consent': Method<{ id: string; granted: boolean }, { consented: boolean }>
   'plugins/sources.status': Method<Record<string, never>, { sources: SourceStatus[] }>
 }
 
@@ -517,6 +584,9 @@ export const IMPLEMENTED_METHODS: readonly LegCMethod[] = [
   'plugins/skills.profile',
   'plugins/skills.download',
   'plugins/skills.flag',
+  // Phase-7 P7-M6: executable-skill run + orange-consent recording (D9).
+  'plugins/skills.run',
+  'plugins/skills.consent',
   'plugins/sources.status',
 ] as const
 
