@@ -16,6 +16,8 @@
  * @module @dsh-movie/protocol/nodes
  */
 
+import type { ImportedSkillRef } from './leg-c.ts'
+
 /** A typed connection slot (input or output) on a movie node. */
 export interface NodeSlotSchema {
   /** Slot name shown on the node. */
@@ -68,6 +70,13 @@ export interface MovieNodeSchema {
   modality?: NodeModality
   /** Whether the class type is deprecated (legacy step nodes, Phase-5 D1). */
   deprecated?: boolean
+  /**
+   * Whether the node supports skill imports (Phase-7 D7): the editor card
+   * shows the Import button and persists `properties.importedSkills`
+   * ({@link ImportedSkillRef}[]). Flagged on Text Input, the four generators,
+   * and the six legacy step classes (kept as newbie shortcuts, D11).
+   */
+  supportsSkillImport?: boolean
   /** Connection inputs. */
   inputs: readonly NodeSlotSchema[]
   /** Connection outputs. */
@@ -91,6 +100,7 @@ export const MOVIE_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/script',
     step: 1,
     deprecated: true,
+    supportsSkillImport: true,
     inputs: [],
     outputs: [{ name: 'script', type: 'SCRIPT' }],
     widgets: [{ name: 'prompt', type: 'STRING', multiline: true, default: '' }],
@@ -102,6 +112,7 @@ export const MOVIE_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/shot-plan',
     step: 2,
     deprecated: true,
+    supportsSkillImport: true,
     inputs: [{ name: 'script', type: 'SCRIPT' }],
     outputs: [{ name: 'shot_plan', type: 'SHOT_PLAN' }],
     widgets: [{ name: 'shots', type: 'INT', default: 6, min: 1, max: 64 }],
@@ -113,6 +124,7 @@ export const MOVIE_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/asset',
     step: 3,
     deprecated: true,
+    supportsSkillImport: true,
     inputs: [
       { name: 'script', type: 'SCRIPT' },
       { name: 'shot_plan', type: 'SHOT_PLAN' },
@@ -129,6 +141,7 @@ export const MOVIE_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/storyboard',
     step: 4,
     deprecated: true,
+    supportsSkillImport: true,
     inputs: [
       { name: 'shot_plan', type: 'SHOT_PLAN' },
       { name: 'asset', type: 'ASSET' },
@@ -143,6 +156,7 @@ export const MOVIE_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/clip',
     step: 5,
     deprecated: true,
+    supportsSkillImport: true,
     inputs: [{ name: 'storyboard', type: 'STORYBOARD' }],
     outputs: [{ name: 'clip', type: 'CLIP' }],
     widgets: [{ name: 'duration', type: 'FLOAT', default: 4, min: 0.5, max: 60 }],
@@ -154,6 +168,7 @@ export const MOVIE_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/output',
     step: 6,
     deprecated: true,
+    supportsSkillImport: true,
     inputs: [{ name: 'clip', type: 'CLIP' }],
     outputs: [{ name: 'movie', type: 'MOVIE' }],
     widgets: [],
@@ -175,6 +190,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/source',
     family: 'source',
     modality: 'text',
+    supportsSkillImport: true,
     inputs: [],
     outputs: [{ name: 'text', type: 'TEXT' }],
     widgets: [{ name: 'text', type: 'STRING', multiline: true, default: '' }],
@@ -220,6 +236,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/generator',
     family: 'generator',
     modality: 'text',
+    supportsSkillImport: true,
     inputs: [{ name: 'context', type: 'TEXT', optional: true }],
     outputs: [{ name: 'text', type: 'TEXT' }],
     widgets: [{ name: 'prompt', type: 'STRING', multiline: true, default: '' }],
@@ -231,6 +248,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/generator',
     family: 'generator',
     modality: 'image',
+    supportsSkillImport: true,
     inputs: [
       { name: 'prompt', type: 'TEXT', optional: true },
       { name: 'image', type: 'IMAGE', optional: true },
@@ -247,6 +265,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/generator',
     family: 'generator',
     modality: 'video',
+    supportsSkillImport: true,
     inputs: [
       { name: 'prompt', type: 'TEXT', optional: true },
       { name: 'image', type: 'IMAGE', optional: true },
@@ -264,6 +283,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     category: 'movie/generator',
     family: 'generator',
     modality: 'audio',
+    supportsSkillImport: true,
     inputs: [{ name: 'prompt', type: 'TEXT', optional: true }],
     outputs: [{ name: 'audio', type: 'AUDIO' }],
     widgets: [{ name: 'kind', type: 'COMBO', options: ['sound', 'music'], default: 'sound' }],
@@ -416,6 +436,44 @@ export const MOVIE_SLOT_TYPES: readonly string[] = [
   'CLIP',
   'MOVIE',
 ]
+
+/**
+ * The `WorkflowNode.properties` key holding {@link ImportedSkillRef} entries
+ * (Phase-7 D7). Additive persistence, same pattern as the phase-6 `contentRef`.
+ */
+export const IMPORTED_SKILLS_PROPERTY = 'importedSkills'
+
+/**
+ * Read a node's imported-skill refs out of arbitrary `properties` (Phase-7
+ * D7). Tolerant reader for the runner's mode-2 re-fetch: malformed entries are
+ * dropped instead of throwing, so a corrupted graph never fails a run.
+ * @param properties - the node's `WorkflowNode.properties` bag.
+ * @returns the well-formed {@link ImportedSkillRef} entries.
+ */
+export function importedSkillsOf(properties: Record<string, unknown> | undefined): ImportedSkillRef[] {
+  const raw = properties?.[IMPORTED_SKILLS_PROPERTY]
+  if (!Array.isArray(raw)) return []
+  const refs: ImportedSkillRef[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue
+    const candidate = item as Record<string, unknown>
+    if (
+      typeof candidate.id !== 'string'
+      || typeof candidate.toolId !== 'string'
+      || typeof candidate.version !== 'string'
+      || typeof candidate.path !== 'string'
+      || typeof candidate.downloadedAt !== 'number'
+    ) continue
+    refs.push({
+      id: candidate.id,
+      toolId: candidate.toolId,
+      version: candidate.version,
+      path: candidate.path,
+      downloadedAt: candidate.downloadedAt,
+    })
+  }
+  return refs
+}
 
 /** A ComfyUI `/object_info` entry for one node type. */
 export interface ObjectInfoEntry {

@@ -1,0 +1,27 @@
+{
+  "name": "dsh-movie-market",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH plugin: the Phase-7 plugins marketplace. Hosts the Source-Plugin-Runtime (SPR) supervisor that spawns every external skill/tool source as an OS-sandboxed MCP stdio child (systemd-run --user scope wrapping bubblewrap; docker optional), speaks MCP to it with @modelcontextprotocol/client, and provides the ctx.movieMarket service for tool lifecycle and skill search/download.",
+  "type": "module",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.2.0",
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@dsh-movie/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3"
+  }
+}

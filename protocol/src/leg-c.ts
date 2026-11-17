@@ -290,8 +290,187 @@ export interface QuotaNamespace {
   'quota/get': Method<{ userId?: MatrixUserId }, { used: number; limit: number }>
 }
 
+/* -------------------------------------------------------------------------- */
+/* Plugins marketplace (Phase-7)                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The community-content warning ladder (Phase-7 D8): heuristic scans default
+ * to `clean`; user/operator flags raise yellow/orange/red. `red` blocks
+ * import and execution; `orange` gates execution behind explicit consent.
+ */
+export type WarningLevel = 'clean' | 'yellow' | 'orange' | 'red'
+
+/** The generator target a skill serves (Phase-7 D1). */
+export type SkillTarget = 'script' | 'shot-plan' | 'text' | 'review' | 'any'
+
+/**
+ * A skill-card profile (Phase-7 D1): SKILL.md front-matter only - the masonry
+ * card never carries the body. Full content exists in dsh_movie only after
+ * `plugins/skills/download` writes it into the room's workspace directory.
+ */
+export interface SkillProfile {
+  /** Stable skill id (unique across tools, e.g. `<toolId>:<slug>`). */
+  id: string
+  /** The tool (MCP server) providing this skill. */
+  toolId: string
+  /** Human-readable title (front-matter `name`). */
+  title: string
+  /** One-line summary (front-matter `description`). */
+  description: string
+  /** The generator target the skill serves. */
+  target: SkillTarget
+  /** Upstream version string, pinned at download time. */
+  version: string
+  /** SPDX-style license label, when known. */
+  license: string | null
+  /** Provider/author display name. */
+  provider: string
+  /** Server-global warning-ladder level (D8). */
+  warningLevel: WarningLevel
+  /** Last index update (epoch ms). */
+  updatedAt: number
+}
+
+/** Tool process lifecycle state shown on Tools cards (Phase-7 D3). */
+export type ToolStatus = 'running' | 'stopped' | 'degraded' | 'error' | 'disabled'
+
+/**
+ * The non-secret sandbox manifest a tool declares (Phase-7 D3). The spawn
+ * command stays server-side; credential entries are env-var NAMES only -
+ * values live in `server/.env`.
+ */
+export interface ToolManifest {
+  /** Egress allow-list (hosts/CIDRs) enforced by the sandbox. */
+  networkAllowlist: readonly string[]
+  /** Memory cap in MB enforced by the sandbox. */
+  memoryMaxMb?: number | undefined
+  /** CPU quota percent enforced by the sandbox. */
+  cpuQuotaPct?: number | undefined
+  /** Env-var names whose values the tool needs (operator-configured). */
+  credentialsEnv?: readonly string[] | undefined
+}
+
+/** Install spec for a third-party/user-provided tool (host-only action). */
+export interface ToolInstallSpec {
+  /** Requested tool id; the server assigns one when omitted. */
+  id?: string | undefined
+  /** Display name. */
+  name: string
+  /** The executable speaking MCP over stdio. */
+  command: string
+  /** Command arguments. */
+  args?: readonly string[] | undefined
+  /** Extra non-secret env (secrets go through `credentialsEnv`). */
+  env?: Readonly<Record<string, string>> | undefined
+  /** The sandbox manifest. */
+  manifest: ToolManifest
+}
+
+/**
+ * One tool = one sandboxed MCP server (Phase-7 D2). Tools are installed
+ * server-globally and are visible to every user; `pricing` is declarative
+ * only (payment/entitlement mechanics are out of scope).
+ */
+export interface ToolRecord {
+  /** Stable tool id. */
+  id: string
+  /** Display name. */
+  name: string
+  /** Provider/author. */
+  provider: string
+  /** Where the tool came from. */
+  kind: 'builtin' | 'third-party' | 'user'
+  /** Transport contract (Phase-7 D3: MCP over stdio for every tool). */
+  transport: 'mcp-stdio'
+  /** The sandbox manifest (non-secret subset). */
+  manifest: ToolManifest
+  /** Whether the tool is installed on this host. */
+  installed: boolean
+  /** Whether the supervisor may spawn/query it. */
+  enabled: boolean
+  /** True while `credentialsEnv` entries are still unset. */
+  requiresCredentials: boolean
+  /** Declarative pricing note, when the provider charges. */
+  pricing?: string | undefined
+  /** Current lifecycle state. */
+  status: ToolStatus
+  /** Highest warning level flagged against this tool (D8). */
+  warningLevel: WarningLevel
+}
+
+/** Per-tool health row driving badges/chips (Phase-7 D5). */
+export interface SourceStatus {
+  /** The tool this row describes. */
+  toolId: string
+  /** Lifecycle state. */
+  status: ToolStatus
+  /** Last error message, when degraded/errored. */
+  lastError?: string | undefined
+  /** Last fan-out query latency in ms. */
+  latencyMs?: number | undefined
+  /** Skill profiles currently indexed from this tool. */
+  skillCount: number
+}
+
+/** The result of one `plugins/skills/download` (Phase-7 D7 mode 1). */
+export interface SkillDownload {
+  /** Workspace-relative path written: `skills/<skillId>.md`. */
+  path: string
+  /** The sanitized SKILL.md body (also pasted into the node). */
+  body: string
+  /** The version-pinned profile that was downloaded. */
+  profile: SkillProfile
+}
+
+/**
+ * A node-property reference recorded when a skill is imported (Phase-7 D7),
+ * persisted additively under `WorkflowNode.properties.importedSkills`.
+ */
+export interface ImportedSkillRef {
+  /** Skill id. */
+  id: string
+  /** Providing tool id. */
+  toolId: string
+  /** Version pinned at download time. */
+  version: string
+  /** Workspace-relative path of the downloaded body. */
+  path: string
+  /** Download timestamp (epoch ms). */
+  downloadedAt: number
+}
+
+/**
+ * `plugins.*` - the plugins marketplace namespace (Phase-7 D5): server-global
+ * tool lifecycle plus skill search/profile/download/flag. There is deliberately
+ * no `plugins/apply`: node mutation stays a client-side draft + workspace
+ * commit, so P3-M5 host-only publish governance is untouched. Method names use
+ * the dotted two-segment convention (`plugins/tools.list`, same as
+ * `workspace/draft.get`) because `methodFromApiPath` splits exactly
+ * `<ns>/<method>`. Typed in P7-M1; gateway handlers land in P7-M4 (until then
+ * the switch default answers `unimplemented`).
+ */
+export interface PluginsNamespace {
+  'plugins/tools.list': Method<Record<string, never>, { tools: ToolRecord[] }>
+  'plugins/tools.install': Method<{ spec: ToolInstallSpec }, { tool: ToolRecord }>
+  'plugins/tools.uninstall': Method<{ toolId: string }, { removed: boolean }>
+  'plugins/tools.enable': Method<{ toolId: string; enabled: boolean }, { tool: ToolRecord }>
+  'plugins/tools.status': Method<{ toolId: string }, { status: SourceStatus | null }>
+  'plugins/skills.search': Method<
+    { q: string; target?: SkillTarget | undefined; toolId?: string | undefined },
+    { skills: SkillProfile[] }
+  >
+  'plugins/skills.profile': Method<{ id: string }, { skill: SkillProfile | null }>
+  'plugins/skills.download': Method<{ id: string; roomId: MatrixRoomId }, { download: SkillDownload }>
+  'plugins/skills.flag': Method<
+    { id: string; level: WarningLevel; reason: string },
+    { warningLevel: WarningLevel }
+  >
+  'plugins/sources.status': Method<Record<string, never>, { sources: SourceStatus[] }>
+}
+
 /** Every Leg C namespace method map, keyed by namespace. */
-export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, WorkspaceNamespace, RoomNamespace, CanvasNamespace, MovieNamespace, AgentNamespace, QuotaNamespace {}
+export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, WorkspaceNamespace, RoomNamespace, CanvasNamespace, MovieNamespace, AgentNamespace, QuotaNamespace, PluginsNamespace {}
 
 /** Every Leg C method name (`<namespace>/<method>`). */
 export type LegCMethod = keyof LegCNamespaces
@@ -326,6 +505,19 @@ export const IMPLEMENTED_METHODS: readonly LegCMethod[] = [
   'canvas/replan',
   'movie/run',
   'movie/status',
+  // Phase-7 P7-M1: the plugins marketplace methods are enumerated up front;
+  // the gateway answers `unimplemented` (switch default) until P7-M4 wires the
+  // dsh-movie-market handlers.
+  'plugins/tools.list',
+  'plugins/tools.install',
+  'plugins/tools.uninstall',
+  'plugins/tools.enable',
+  'plugins/tools.status',
+  'plugins/skills.search',
+  'plugins/skills.profile',
+  'plugins/skills.download',
+  'plugins/skills.flag',
+  'plugins/sources.status',
 ] as const
 
 /**
