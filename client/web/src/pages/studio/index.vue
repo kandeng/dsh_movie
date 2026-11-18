@@ -785,9 +785,12 @@ async function attemptChipRun(skill: ImportedSkillRef, roomId: string): Promise<
 
 /**
  * Consume a completed pick-mode download exactly once (called after hydrate so the
- * target node exists): re-open its editor, splice the body into the target widget,
- * append the additive ref, and Save as one canonical mutation. Guest returns and
- * vanished nodes are silent no-ops (D7).
+ * target node exists): re-open its editor, splice the body into the target widget
+ * and append the additive ref — as a DIRTY DRAFT, not an auto-commit. Save stays
+ * the single canonical mutation (D6): the user reviews the pasted skill and clicks
+ * Save to publish (Cancel offers the discard confirm). Auto-saving here rebased
+ * the draft clean and left Save disabled, which read as a dead button. Guest
+ * returns and vanished nodes are silent no-ops (D7).
  */
 function consumeReturnedImport(): void {
   if (importStore.completed === null) return;
@@ -811,8 +814,7 @@ function consumeReturnedImport(): void {
     }
   }
   draft.importedSkills = [...(draft.importedSkills ?? []), taken.ref];
-  saveEditor();
-  ElMessage.success(translate("技能已下载到工作区"));
+  ElMessage.success(translate("技能已导入编辑器，点击保存生效"));
 }
 
 /** Double-click entry (D3): the canvas already gated this to the cursor state. */

@@ -2,7 +2,7 @@
 // ACT: 插件市场页（Phase-7 P7-M5, D6）。左栏分类（工具 / 技能）+ 右栏瀑布流卡片，
 // 布局对齐设置页。工具卡：名称/来源/种类徽章/状态徽章/警告徽章/定价与授权提示/
 // 启用开关/安装·卸载；技能卡：标题/描述/目标 chip/来源工具/版本/许可/警告徽章，
-// pick-mode 下出现「确认」按钮（D7 mode-1 触发）。顶部一次性社区内容警告横幅（D8）。
+// pick-mode 下出现「选择」按钮（D7 mode-1 触发）。顶部一次性社区内容警告横幅（D8）。
 // 访客只读：安装/卸载/启用/举报/确认均为主机动作（D6/D2），由 useRoomRole.isHost 网关。
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -166,7 +166,7 @@ function cancelPick(): void {
   void router.push({ path: "/studio" });
 }
 
-// ACT: pick-mode「确认」→ 下载技能正文写入房间工作区（D7 mode-1）→ 暂存 completed →
+// ACT: pick-mode「选择」→ 下载技能正文写入房间工作区（D7 mode-1）→ 暂存 completed →
 // 回到 Studio 由其消费粘贴（b5/b6）。
 async function confirmImport(skill: SkillProfile): Promise<void> {
   const target = pending.value;
@@ -596,7 +596,7 @@ function sourceStatus(toolId: string): ToolStatus | null {
                 :show-arrow="false"
                 :hide-after="0">
                 <span class="marketWrap">
-                  <el-button size="small" type="primary" disabled>{{ translate("确认") }}</el-button>
+                  <el-button size="small" type="primary" disabled>{{ translate("选择") }}</el-button>
                 </span>
               </el-tooltip>
               <el-button
@@ -606,7 +606,7 @@ function sourceStatus(toolId: string): ToolStatus | null {
                 :loading="plugins.busy.value"
                 :disabled="!canManage"
                 @click="confirmImport(skill)">
-                {{ translate("确认") }}
+                {{ translate("选择") }}
               </el-button>
             </footer>
           </article>
