@@ -895,7 +895,10 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
         return
       }
       case 'plugins/skills.search': {
-        const q = stringParam(params, 'q')
+        // Empty q is a legitimate *browse* query (the curated source lists its
+        // whole suite for q=''); only a missing/non-string q is a bad request.
+        const qRaw = params['q']
+        const q = typeof qRaw === 'string' ? qRaw : undefined
         if (q === undefined) {
           sendApi(res, err('bad-request', 'q is required'))
           return

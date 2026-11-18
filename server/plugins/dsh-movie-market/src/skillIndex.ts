@@ -278,9 +278,15 @@ export class SkillIndex {
    * @returns merged, ranked skill rows (highest score first).
    */
   async search(options: SkillSearchOptions): Promise<RankedSkill[]> {
-    const toolIds = options.toolId !== undefined && options.toolId !== ''
-      ? [options.toolId]
-      : this.registry.enabledSearchIds()
+    const explicit = options.toolId !== undefined && options.toolId !== ''
+    const ids = explicit ? [options.toolId as string] : this.registry.enabledSearchIds()
+    // Browse (empty q) is an offline catalog view: only the curated vendored
+    // suite can enumerate without a query. Remote search registries need a real
+    // query and would add latency/flakiness to every page load / category click,
+    // so keep browse instant + deterministic (curated tier only).
+    const toolIds = !explicit && options.q.trim() === ''
+      ? ids.filter((id): boolean => this.registry.tier(id) === 'curated')
+      : ids
     const updatedAt = Date.now()
 
     const perTool = await Promise.all(

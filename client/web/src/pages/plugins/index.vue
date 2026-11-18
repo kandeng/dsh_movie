@@ -4,12 +4,10 @@
 // 启用开关/安装·卸载；技能卡：标题/描述/目标 chip/来源工具/版本/许可/警告徽章，
 // pick-mode 下出现「确认」按钮（D7 mode-1 触发）。顶部一次性社区内容警告横幅（D8）。
 // 访客只读：安装/卸载/启用/举报/确认均为主机动作（D6/D2），由 useRoomRole.isHost 网关。
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { translate } from "@dsh-movie/i18n/vue";
 import {
-  IconPlug,
-  IconSparkles,
   IconSearch,
   IconAlertTriangle,
   IconShieldLock,
@@ -54,8 +52,30 @@ const activeCategory = ref<Category>(route.query.category === "skills" ? "skills
 
 // ACT: 技能搜索框，pick-mode 下由 pending.query 意图预填（D10）。
 const searchQuery = ref<string>(pending.value?.query ?? "");
-const searchTarget = ref<SkillTarget | undefined>(pending.value?.target);
 const searched = ref(false);
+
+// ACT: 左栏「技能」子菜单 = 电影管线七阶段；activeSub=null 表示父级「技能」（全部）。
+const SKILL_SUBCATS: ReadonlyArray<{ id: string; label: string; targets: readonly string[] }> = [
+  { id: "script", label: "剧本", targets: ["script"] },
+  { id: "shot-plan", label: "分镜", targets: ["shot-plan"] },
+  { id: "asset", label: "角色与资产", targets: ["asset"] },
+  { id: "storyboard", label: "故事板", targets: ["storyboard"] },
+  { id: "clip", label: "片段", targets: ["clip"] },
+  { id: "montage", label: "蒙太奇", targets: ["montage"] },
+  { id: "others", label: "其他", targets: ["text", "review", "any"] },
+];
+function subForTarget(target: SkillTarget | undefined): string | null {
+  if (target === "script") return "script";
+  if (target === "shot-plan") return "shot-plan";
+  return null;
+}
+const activeSub = ref<string | null>(subForTarget(pending.value?.target));
+// ACT: 内容面板 = 搜索结果按当前子菜单 scope 过滤；父级「技能」显示全部。
+const visibleSkills = computed(() => {
+  const sub = SKILL_SUBCATS.find((entry) => entry.id === activeSub.value);
+  if (sub === undefined) return plugins.skills.value;
+  return plugins.skills.value.filter((skill) => sub.targets.includes(skill.target));
+});
 
 // ACT: 一次性社区内容警告横幅（D8）。用 localStorage 记住已读，跨会话只出现一次。
 const BANNER_KEY = "dsh-movie.plugins.bannerSeen";
@@ -93,11 +113,6 @@ onMounted(async () => {
   if (activeCategory.value === "skills" || pickMode.value) await runSearch();
 });
 
-// ACT: 分类切换时确保技能视图已有搜索结果。
-watch(activeCategory, async (category) => {
-  if (category === "skills" && !searched.value) await runSearch();
-});
-
 async function refresh(): Promise<void> {
   notice.value = null;
   try {
@@ -111,7 +126,7 @@ async function runSearch(): Promise<void> {
   notice.value = null;
   searched.value = true;
   try {
-    await plugins.search(searchQuery.value, searchTarget.value);
+    await plugins.search(searchQuery.value);
   } catch {
     /* plugins.error 已记录 */
   }
@@ -131,6 +146,19 @@ function switchCategory(category: Category): void {
       ...(pickMode.value ? { mode: "pick" } : {}),
     },
   });
+  // ACT: 进入「技能」父级 = 清空子菜单与查询，浏览全部技能卡（需求 4）。
+  if (category === "skills") {
+    activeSub.value = null;
+    searchQuery.value = "";
+    void runSearch();
+  }
+}
+
+// ACT: 点击子菜单 = 限定 scope 并浏览该子类别全部技能卡（无需输入查询，需求 3/4）。
+function selectSub(id: string): void {
+  activeSub.value = id;
+  searchQuery.value = "";
+  void runSearch();
 }
 
 function cancelPick(): void {
@@ -360,17 +388,26 @@ function sourceStatus(toolId: string): ToolStatus | null {
           class="navButton"
           :aria-current="activeCategory === 'tools' ? 'page' : undefined"
           @click="switchCategory('tools')">
-          <icon-plug :size="18" />
           <span>{{ translate("工具") }}</span>
         </button>
         <button
           type="button"
           class="navButton"
-          :aria-current="activeCategory === 'skills' ? 'page' : undefined"
+          :aria-current="activeCategory === 'skills' && activeSub === null ? 'page' : undefined"
           @click="switchCategory('skills')">
-          <icon-sparkles :size="18" />
           <span>{{ translate("技能") }}</span>
         </button>
+        <div v-if="activeCategory === 'skills'" class="subNav">
+          <button
+            v-for="sub in SKILL_SUBCATS"
+            :key="sub.id"
+            type="button"
+            class="navButton subButton"
+            :aria-current="activeSub === sub.id ? 'page' : undefined"
+            @click="selectSub(sub.id)">
+            <span>{{ translate(sub.label) }}</span>
+          </button>
+        </div>
       </nav>
     </aside>
 
@@ -489,29 +526,18 @@ function sourceStatus(toolId: string): ToolStatus | null {
             @keyup.enter="runSearch">
             <template #prefix><icon-search :size="15" aria-hidden="true" /></template>
           </el-input>
-          <el-select
-            v-model="searchTarget"
-            class="targetSelect"
-            :placeholder="translate('通用')"
-            clearable>
-            <el-option :label="translate('剧本')" value="script" />
-            <el-option :label="translate('分镜')" value="shot-plan" />
-            <el-option :label="translate('文本')" value="text" />
-            <el-option :label="translate('审阅')" value="review" />
-            <el-option :label="translate('通用')" value="any" />
-          </el-select>
           <el-button type="primary" :loading="plugins.loading.value" @click="runSearch">
             {{ translate("搜索") }}
           </el-button>
         </div>
-        <div v-if="plugins.loading.value && plugins.skills.value.length === 0" class="empty">
+        <div v-if="plugins.loading.value && visibleSkills.length === 0" class="empty">
           {{ translate("连接中…") }}
         </div>
-        <div v-else-if="searched && plugins.skills.value.length === 0" class="empty">
+        <div v-else-if="searched && visibleSkills.length === 0" class="empty">
           {{ translate("无匹配技能") }}
         </div>
         <div v-else class="masonry">
-          <article v-for="skill in plugins.skills.value" :key="skill.id" class="card">
+          <article v-for="skill in visibleSkills" :key="skill.id" class="card">
             <header class="cardHead">
               <span class="cardTitle">{{ skill.title }}</span>
               <span
@@ -929,6 +955,15 @@ function sourceStatus(toolId: string): ToolStatus | null {
     word-break: break-all;
   }
 }
+
+.subNav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 12px;
+}
+
+.pluginsNav .subButton { font-size: 12px; }
 
 @media (max-width: 700px) {
   .pluginsGrid {

@@ -26,6 +26,10 @@
         agentEnabled: true
         replyWithMentions: true
         maxReconnectDelayMs: 30000
+    - id: movie-market
+      name: '../../../plugins/dsh-movie-market/src/index.ts'
+      config:
+        sandbox: auto
     - id: movie-gateway
       name: '../../../plugins/dsh-movie-gateway/src/index.ts'
       inject: [matrixIdentity, agents, agentDefaultModel, sessions, subagents, jobs]

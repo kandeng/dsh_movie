@@ -77,6 +77,16 @@ export class McpChildTransport implements Transport {
         this.onerror?.(error instanceof Error ? error : new Error(String(error)))
       }
     })
+    // A dead/reaped child makes stdin writes fail with EPIPE. Node raises that
+    // as a stream 'error' EVENT; without a listener it becomes an UNCAUGHT
+    // exception and kills the whole DSH host. Route pipe errors to onerror so a
+    // dead tool degrades the request instead of crashing the server.
+    this.child.stdin?.on('error', (error: Error): void => {
+      this.onerror?.(error)
+    })
+    stdout.on('error', (error: Error): void => {
+      this.onerror?.(error)
+    })
     this.child.on('error', (error: Error): void => {
       this.onerror?.(error)
     })
@@ -94,12 +104,19 @@ export class McpChildTransport implements Transport {
    */
   async send(message: JSONRPCMessage, _options?: TransportSendOptions): Promise<void> {
     const stdin = this.child.stdin
-    if (stdin === null || stdin.destroyed) throw new Error('sandboxed child stdin unavailable')
+    if (this.closed || stdin === null || stdin.destroyed) throw new Error('sandboxed child stdin unavailable')
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      throw new Error('sandboxed child already exited')
+    }
     await new Promise<void>((resolve, reject) => {
-      stdin.write(serializeMessage(message), (error) => {
-        if (error !== null && error !== undefined) reject(error)
-        else resolve()
-      })
+      try {
+        stdin.write(serializeMessage(message), (error) => {
+          if (error !== null && error !== undefined) reject(error)
+          else resolve()
+        })
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   }
 
