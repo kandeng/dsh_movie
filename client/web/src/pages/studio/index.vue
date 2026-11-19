@@ -172,7 +172,7 @@ watch(execStatus.outputById, (byId) => {
       bridge.setNodeMeta(id, { contentRef });
     }
     if (contentRef.uri.startsWith("mxc://") && !generatedMediaById.value.has(id)) {
-      void fetchMediaBlobUrl(contentRef.uri, auth.accessToken.value)
+      void fetchMediaBlobUrl(contentRef.uri, auth.accessToken)
         .then((blobUrl) => {
           if (!blobUrl) return;
           const next = new Map(generatedMediaById.value);

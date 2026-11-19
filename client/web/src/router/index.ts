@@ -8,7 +8,9 @@ import { useAuthStore } from "@/stores/auth";
  * - `/account`  Mode-B login / profile edit / change password / logout (M3).
  * - `/settings` placeholder entry (full settings UI not ported; M3).
  * - `/studio`   the step-by-step Studio shell: stage slot + docked chatbox (M4).
- * - `/plugins`  the plugins marketplace: Tools/Skills browse + pick-mode import (Phase-7 M5).
+ * - `/plugins`  the plugins marketplace: Models/Tools/Skills/Assets browse + pick-mode import (Phase-7 M5, Phase-9 §4).
+ * - `/account`  Mode-B login / profile edit / change password / logout (M3).
+ * - `/supply`   per-user Supply page: grey left menu Model/Tool/Skill/Asset + cascade (Phase-10).
  */
 const router = createRouter({
   history: createWebHashHistory(),
@@ -43,6 +45,15 @@ const router = createRouter({
       path: "/plugins",
       component: () => import("@/pages/plugins/index.vue"),
       meta: { requiresAuth: true, shell: true },
+    },
+    {
+      path: "/supply",
+      component: () => import("@/pages/supply/index.vue"),
+      meta: { requiresAuth: true, shell: true },
+    },
+    {
+      path: "/provider",
+      redirect: "/supply",
     },
   ],
 });

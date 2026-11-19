@@ -4,7 +4,7 @@
 // 启用开关/安装·卸载；技能卡：标题/描述/目标 chip/来源工具/版本/许可/警告徽章，
 // pick-mode 下出现「选择」按钮（D7 mode-1 触发）。顶部一次性社区内容警告横幅（D8）。
 // 访客只读：安装/卸载/启用/举报/确认均为主机动作（D6/D2），由 useRoomRole.isHost 网关。
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { translate } from "@dsh-movie/i18n/vue";
 import {
@@ -25,11 +25,14 @@ import type {
   WarningLevel,
 } from "@dsh-movie/protocol";
 import { usePlugins } from "@/composables/usePlugins";
+import { useProviders, type CardFeedRow } from "@/composables/useProviders";
+import { useExecStatus } from "@/composables/useExecStatus";
+import type { CardKind, Modality, ResourceCard } from "@/lib/providerCatalog";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useRoomRole } from "@/composables/useRoomRole";
 import { useImportStore } from "@/stores/import";
 
-type Category = "tools" | "skills";
+type Category = "models" | "tools" | "skills" | "assets";
 
 const route = useRoute();
 const router = useRouter();
@@ -47,8 +50,14 @@ const pickMode = computed(() => route.query.mode === "pick");
 const pending = computed(() => importStore.pending);
 const pickRoomId = computed(() => pending.value?.roomId ?? activeRoomId.value ?? "");
 
-// ACT: 左栏分类，初值来自路由 query.category（编辑器 Import 跳转时带 category=skills）。
-const activeCategory = ref<Category>(route.query.category === "skills" ? "skills" : "tools");
+// ACT: 左栏分类（Phase-9 §4 顺序：模型→工具→技能→资产）；初值来自路由 query.category
+// （编辑器 Import 跳转时带 category=skills）；pick-mode 强制技能视图。
+const queryCategory = route.query.category;
+const initialCategory: Category =
+  route.query.mode === "pick" ? "skills"
+  : queryCategory === "tools" || queryCategory === "skills" || queryCategory === "assets" ? queryCategory
+  : "models";
+const activeCategory = ref<Category>(initialCategory);
 
 // ACT: 技能搜索框，pick-mode 下由 pending.query 意图预填（D10）。
 const searchQuery = ref<string>(pending.value?.query ?? "");
@@ -142,7 +151,7 @@ function switchCategory(category: Category): void {
   void router.replace({
     path: "/plugins",
     query: {
-      ...(category === "skills" ? { category: "skills" } : {}),
+      ...(category === "models" ? {} : { category }),
       ...(pickMode.value ? { mode: "pick" } : {}),
     },
   });
@@ -374,6 +383,228 @@ function targetLabel(target: SkillTarget): string {
 function sourceStatus(toolId: string): ToolStatus | null {
   return plugins.sources.value.find((row) => row.toolId === toolId)?.status ?? null;
 }
+
+// ── Phase-9 §4：模型/资产子页 + 提供商卡片_feed（状态 + 价格）─────────────
+const registry = useProviders();
+const exec = useExecStatus();
+
+const modelQuery = ref("");
+const modelModality = ref<"all" | Modality>("all");
+const assetQuery = ref("");
+const assetModality = ref<"all" | Modality>("all");
+
+const MODEL_MODALITIES: ReadonlyArray<{ id: "all" | Modality; label: string }> = [
+  { id: "all", label: "全部" },
+  { id: "text", label: "文本" },
+  { id: "image", label: "图像" },
+  { id: "video", label: "视频" },
+  { id: "audio", label: "音频" },
+];
+const ASSET_MODALITIES: ReadonlyArray<{ id: "all" | Modality; label: string }> = [
+  { id: "all", label: "全部" },
+  { id: "image", label: "图像" },
+  { id: "video", label: "视频" },
+  { id: "3dgs", label: "3DGS" },
+  { id: "mesh", label: "网格" },
+];
+
+function matchesQuery(row: CardFeedRow, q: string): boolean {
+  const needle = q.trim().toLowerCase();
+  if (needle === "") return true;
+  return row.card.name.toLowerCase().includes(needle) || row.card.description.toLowerCase().includes(needle);
+}
+const visibleModels = computed(() =>
+  registry.cardsOf("models").filter((row) =>
+    (modelModality.value === "all" || row.card.modality === modelModality.value) && matchesQuery(row, modelQuery.value)),
+);
+const visibleAssets = computed(() =>
+  registry.cardsOf("assets").filter((row) =>
+    (assetModality.value === "all" || row.card.modality === assetModality.value) && matchesQuery(row, assetQuery.value)),
+);
+// ACT: Phase-9 §4 提供商供给的工具/技能卡片（带价格与连接状态）。
+const providerToolRows = computed(() => registry.cardsOf("tools"));
+const providerSkillRows = computed(() =>
+  registry.cardsOf("skills").filter((row) => matchesQuery(row, searchQuery.value)),
+);
+
+function modalityLabel(modality: Modality | undefined): string {
+  if (modality === "text") return translate("文本");
+  if (modality === "image") return translate("图像");
+  if (modality === "video") return translate("视频");
+  if (modality === "audio") return translate("音频");
+  if (modality === "3dgs") return "3DGS";
+  if (modality === "mesh") return translate("网格");
+  return "";
+}
+function stateLabel(state: "ready" | "not-installed" | "offline" | null): string {
+  if (state === "ready") return translate("就绪");
+  if (state === "not-installed") return translate("未安装");
+  if (state === "offline") return translate("离线");
+  return "";
+}
+function stateType(state: "ready" | "not-installed" | "offline" | null): "success" | "warning" | "info" {
+  if (state === "ready") return "success";
+  if (state === "not-installed") return "warning";
+  return "info";
+}
+function priceText(card: ResourceCard): string {
+  const price = card.price;
+  if (price === null || price.amount === 0) return translate("免费");
+  const symbol = price.currency === "USD" ? "$" : "¥";
+  const units: Record<string, string> = {
+    image: "每张图",
+    second: "每秒",
+    call: "每次调用",
+    download: "每次下载",
+    ktoken: "每千 token",
+  };
+  return `${symbol}${price.amount} / ${translate(units[price.unit] ?? "")}`;
+}
+function metaLabel(key: string): string {
+  if (key === "license") return translate("许可");
+  if (key === "vram") return translate("显存");
+  if (key === "size") return translate("大小");
+  if (key === "version") return translate("版本");
+  if (key === "format") return translate("格式");
+  if (key === "target") return translate("阶段");
+  return key;
+}
+function metaEntries(card: ResourceCard): Array<[string, string]> {
+  return Object.entries(card.meta).slice(0, 4);
+}
+function usageOf(row: CardFeedRow): number {
+  return row.provider.usage[row.card.id] ?? 0;
+}
+
+// ACT: 工具/技能卡的价格与连接状态叠加：按名称匹配提供商目录中的同名卡片。
+function feedRowFor(kind: CardKind, name: string): CardFeedRow | undefined {
+  return registry.cardsOf(kind).find((row) => row.card.name === name);
+}
+function feedPriceText(kind: CardKind, name: string): string {
+  const row = feedRowFor(kind, name);
+  return row === undefined ? "" : priceText(row.card);
+}
+function feedStateLabel(kind: CardKind, name: string): string {
+  const row = feedRowFor(kind, name);
+  return row === undefined ? "" : stateLabel(registry.cardState(row));
+}
+function feedStateType(kind: CardKind, name: string): "success" | "warning" | "info" {
+  const row = feedRowFor(kind, name);
+  return row === undefined ? "info" : stateType(registry.cardState(row));
+}
+
+// ACT: 模型详情抽屉 + 真实测试生成（仅本机 ComfyUI 已连接时就绪的图像模型）。
+// POST /comfy/api/prompt 走真实 P8 管线；Leg B /ws 回灌 executed 产物后展示并计一次用量。
+const drawerVisible = ref(false);
+const drawerRow = ref<CardFeedRow | null>(null);
+const testState = ref<"idle" | "running" | "done" | "error">("idle");
+const testImage = ref("");
+const testError = ref("");
+let testStop: (() => void) | null = null;
+let testTimer: ReturnType<typeof setTimeout> | null = null;
+
+function openModel(row: CardFeedRow): void {
+  drawerRow.value = row;
+  drawerVisible.value = true;
+}
+function canTest(row: CardFeedRow): boolean {
+  return row.provider.id === "local-comfy"
+    && row.provider.status === "connected"
+    && row.card.modality === "image"
+    && row.card.status === "ready";
+}
+function stopTestWatch(): void {
+  if (testStop !== null) { testStop(); testStop = null; }
+  if (testTimer !== null) { clearTimeout(testTimer); testTimer = null; }
+}
+async function runModelTest(): Promise<void> {
+  const row = drawerRow.value;
+  if (row === null || !canTest(row)) return;
+  stopTestWatch();
+  exec.reset();
+  testState.value = "running";
+  testImage.value = "";
+  testError.value = "";
+  try {
+    const resp = await fetch("/comfy/api/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: {
+          "1": { class_type: "TextInput", inputs: { text: "a cinematic teal ocean at sunset, concept art" } },
+          "2": { class_type: "ImageGenerator", inputs: { prompt: ["1", 0], image: "" } },
+        },
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  } catch {
+    testState.value = "error";
+    testError.value = translate("运行失败");
+    return;
+  }
+  const stopOutput = watch(() => exec.outputById.value.get(2), (output) => {
+    if (typeof output !== "object" || output === null) return;
+    const artifact = (output as Record<string, unknown>)["artifact"];
+    if (typeof artifact !== "string" || artifact === "") return;
+    testImage.value = artifact;
+    testState.value = "done";
+    registry.recordUsage(row.provider.id, row.card.id, 1);
+    stopTestWatch();
+  });
+  const stopStatus = watch(() => exec.statusById.value.get(2), (status) => {
+    if (status !== "error") return;
+    testState.value = "error";
+    testError.value = translate("运行失败");
+    stopTestWatch();
+  });
+  testStop = () => { stopOutput(); stopStatus(); };
+  testTimer = setTimeout(() => {
+    if (testState.value !== "running") return;
+    testState.value = "error";
+    testError.value = translate("连接超时");
+    stopTestWatch();
+  }, 300000);
+}
+function testHint(): string {
+  const gpu = drawerRow.value?.provider.engine?.gpu ?? "";
+  return gpu.toLowerCase().includes("cpu")
+    ? translate("CPU 引擎模式：生成约需 2–3 分钟，请耐心等待。")
+    : translate("正在调用真实生成管线，请稍候…");
+}
+function drawerMemLabel(): string {
+  const gpu = drawerRow.value?.provider.engine?.gpu ?? "";
+  return gpu.toLowerCase().includes("cpu") ? translate("内存") : translate("显存");
+}
+function testFromCard(row: CardFeedRow): void {
+  openModel(row);
+  void runModelTest();
+}
+onBeforeUnmount(stopTestWatch);
+
+// ACT: 资产预览与下载（下载计一次账单用量）。
+const assetPreviewVisible = ref(false);
+const assetPreview = ref<CardFeedRow | null>(null);
+function openAsset(row: CardFeedRow): void {
+  assetPreview.value = row;
+  assetPreviewVisible.value = true;
+}
+async function downloadAsset(row: CardFeedRow): Promise<void> {
+  const thumb = row.card.thumb;
+  if (thumb === undefined) return;
+  try {
+    const blob = await (await fetch(thumb)).blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${row.card.id}.svg`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    registry.recordUsage(row.provider.id, row.card.id, 1);
+    notice.value = translate("已下载");
+  } catch {
+    notice.value = translate("下载失败");
+  }
+}
 </script>
 
 <template>
@@ -383,6 +614,13 @@ function sourceStatus(toolId: string): ToolStatus | null {
         <h2>{{ translate("插件") }}</h2>
       </div>
       <nav class="pluginsNav" :aria-label="translate('插件')">
+        <button
+          type="button"
+          class="navButton"
+          :aria-current="activeCategory === 'models' ? 'page' : undefined"
+          @click="switchCategory('models')">
+          <span>{{ translate("模型") }}</span>
+        </button>
         <button
           type="button"
           class="navButton"
@@ -408,6 +646,13 @@ function sourceStatus(toolId: string): ToolStatus | null {
             <span>{{ translate(sub.label) }}</span>
           </button>
         </div>
+        <button
+          type="button"
+          class="navButton"
+          :aria-current="activeCategory === 'assets' ? 'page' : undefined"
+          @click="switchCategory('assets')">
+          <span>{{ translate("资产") }}</span>
+        </button>
       </nav>
     </aside>
 
@@ -449,8 +694,61 @@ function sourceStatus(toolId: string): ToolStatus | null {
         show-icon
         :title="notice" />
 
+      <!-- ── 模型视图（Phase-9 §4：提供商 /info 卡片 + 连接状态 + 价格）── -->
+      <template v-if="activeCategory === 'models'">
+        <div class="viewHeader">
+          <h3>{{ translate("模型") }}</h3>
+        </div>
+        <div class="filterRow">
+          <button
+            v-for="m in MODEL_MODALITIES" :key="m.id"
+            type="button" class="chipFilter" :class="{ on: modelModality === m.id }"
+            @click="modelModality = m.id">
+            {{ translate(m.label) }}
+          </button>
+          <el-input
+            v-model="modelQuery" class="searchInput" clearable
+            :placeholder="translate('搜索模型')">
+            <template #prefix><icon-search :size="15" aria-hidden="true" /></template>
+          </el-input>
+        </div>
+        <div v-if="visibleModels.length === 0" class="empty">{{ translate("无匹配模型") }}</div>
+        <div v-else class="masonry">
+          <article v-for="row in visibleModels" :key="row.provider.id + ':' + row.card.id" class="card">
+            <header class="cardHead">
+              <span class="cardTitle">{{ row.card.name }}</span>
+              <el-tag size="small" :type="stateType(registry.cardState(row))" effect="plain">
+                {{ stateLabel(registry.cardState(row)) }}
+              </el-tag>
+            </header>
+            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <div class="chipRow">
+              <el-tag v-if="row.card.modality" size="small" type="primary" effect="plain">
+                {{ modalityLabel(row.card.modality) }}
+              </el-tag>
+              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
+                {{ metaLabel(entry[0]) }} {{ entry[1] }}
+              </el-tag>
+            </div>
+            <p class="cardProvider">{{ translate("来源") }}：{{ row.provider.name }}</p>
+            <footer class="cardActions">
+              <el-button size="small" text @click="openModel(row)">{{ translate("详情") }}</el-button>
+              <span class="spacer" />
+              <el-button
+                v-if="canTest(row)"
+                size="small" type="primary" plain
+                @click="testFromCard(row)">
+                <icon-player-play :size="14" aria-hidden="true" />
+                {{ translate("测试生成") }}
+              </el-button>
+            </footer>
+          </article>
+        </div>
+      </template>
+
       <!-- ── 工具视图 ── -->
-      <template v-if="activeCategory === 'tools'">
+      <template v-else-if="activeCategory === 'tools'">
         <div class="viewHeader">
           <h3>{{ translate("工具") }}</h3>
           <el-button type="primary" size="small" :disabled="!canManage" @click="openInstall">
@@ -461,10 +759,10 @@ function sourceStatus(toolId: string): ToolStatus | null {
         <div v-if="plugins.loading.value && plugins.tools.value.length === 0" class="empty">
           {{ translate("连接中…") }}
         </div>
-        <div v-else-if="plugins.tools.value.length === 0" class="empty">
+        <div v-else-if="plugins.tools.value.length === 0 && providerToolRows.length === 0" class="empty">
           {{ translate("暂无工具") }}
         </div>
-        <div v-else class="masonry">
+        <div v-if="plugins.tools.value.length > 0" class="masonry">
           <article v-for="tool in plugins.tools.value" :key="tool.id" class="card">
             <header class="cardHead">
               <span class="cardTitle">{{ tool.name }}</span>
@@ -484,6 +782,12 @@ function sourceStatus(toolId: string): ToolStatus | null {
               </el-tag>
               <el-tag v-if="tool.installed" size="small" type="success" effect="plain">
                 {{ translate("已安装") }}
+              </el-tag>
+              <el-tag v-if="feedPriceText('tools', tool.name)" size="small" type="warning" effect="plain">
+                {{ feedPriceText('tools', tool.name) }}
+              </el-tag>
+              <el-tag v-if="feedStateLabel('tools', tool.name)" size="small" :type="feedStateType('tools', tool.name)" effect="plain">
+                {{ feedStateLabel('tools', tool.name) }}
               </el-tag>
             </div>
             <p v-if="tool.pricing" class="cardNote">{{ tool.pricing }}</p>
@@ -510,10 +814,28 @@ function sourceStatus(toolId: string): ToolStatus | null {
             </footer>
           </article>
         </div>
+        <div v-if="providerToolRows.length > 0" class="masonry">
+          <article v-for="row in providerToolRows" :key="row.provider.id + ':' + row.card.id" class="card">
+            <header class="cardHead">
+              <span class="cardTitle">{{ row.card.name }}</span>
+              <el-tag size="small" :type="stateType(registry.cardState(row))" effect="plain">
+                {{ stateLabel(registry.cardState(row)) }}
+              </el-tag>
+            </header>
+            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <div class="chipRow">
+              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
+                {{ metaLabel(entry[0]) }} {{ entry[1] }}
+              </el-tag>
+            </div>
+            <p class="cardProvider">{{ translate("来源") }}：{{ row.provider.name }}</p>
+          </article>
+        </div>
       </template>
 
       <!-- ── 技能视图 ── -->
-      <template v-else>
+      <template v-else-if="activeCategory === 'skills'">
         <div class="viewHeader">
           <h3>{{ translate("技能") }}</h3>
         </div>
@@ -530,13 +852,13 @@ function sourceStatus(toolId: string): ToolStatus | null {
             {{ translate("搜索") }}
           </el-button>
         </div>
-        <div v-if="plugins.loading.value && visibleSkills.length === 0" class="empty">
+        <div v-if="plugins.loading.value && visibleSkills.length === 0 && providerSkillRows.length === 0" class="empty">
           {{ translate("连接中…") }}
         </div>
-        <div v-else-if="searched && visibleSkills.length === 0" class="empty">
+        <div v-else-if="searched && visibleSkills.length === 0 && providerSkillRows.length === 0" class="empty">
           {{ translate("无匹配技能") }}
         </div>
-        <div v-else class="masonry">
+        <div v-if="visibleSkills.length > 0" class="masonry">
           <article v-for="skill in visibleSkills" :key="skill.id" class="card">
             <header class="cardHead">
               <span class="cardTitle">{{ skill.title }}</span>
@@ -553,6 +875,12 @@ function sourceStatus(toolId: string): ToolStatus | null {
               <el-tag size="small" type="primary" effect="plain">{{ targetLabel(skill.target) }}</el-tag>
               <el-tag size="small" type="info" effect="plain">v{{ skill.version }}</el-tag>
               <el-tag v-if="skill.license" size="small" type="info" effect="plain">{{ skill.license }}</el-tag>
+              <el-tag v-if="feedPriceText('skills', skill.title)" size="small" type="warning" effect="plain">
+                {{ feedPriceText('skills', skill.title) }}
+              </el-tag>
+              <el-tag v-if="feedStateLabel('skills', skill.title)" size="small" :type="feedStateType('skills', skill.title)" effect="plain">
+                {{ feedStateLabel('skills', skill.title) }}
+              </el-tag>
             </div>
             <p class="cardProvider">{{ translate("来源") }}：{{ skill.provider }}</p>
             <footer class="cardActions">
@@ -607,6 +935,75 @@ function sourceStatus(toolId: string): ToolStatus | null {
                 :disabled="!canManage"
                 @click="confirmImport(skill)">
                 {{ translate("选择") }}
+              </el-button>
+            </footer>
+          </article>
+        </div>
+        <div v-if="providerSkillRows.length > 0" class="masonry">
+          <article v-for="row in providerSkillRows" :key="row.provider.id + ':' + row.card.id" class="card">
+            <header class="cardHead">
+              <span class="cardTitle">{{ row.card.name }}</span>
+              <el-tag size="small" :type="stateType(registry.cardState(row))" effect="plain">
+                {{ stateLabel(registry.cardState(row)) }}
+              </el-tag>
+            </header>
+            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <div class="chipRow">
+              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
+                {{ metaLabel(entry[0]) }} {{ entry[1] }}
+              </el-tag>
+            </div>
+            <p class="cardProvider">{{ translate("来源") }}：{{ row.provider.name }}</p>
+          </article>
+        </div>
+      </template>
+
+      <!-- ── 资产视图（Phase-9 §4：图像/视频/3DGS/网格 + 价格）── -->
+      <template v-else-if="activeCategory === 'assets'">
+        <div class="viewHeader">
+          <h3>{{ translate("资产") }}</h3>
+        </div>
+        <div class="filterRow">
+          <button
+            v-for="m in ASSET_MODALITIES" :key="m.id"
+            type="button" class="chipFilter" :class="{ on: assetModality === m.id }"
+            @click="assetModality = m.id">
+            {{ translate(m.label) }}
+          </button>
+          <el-input
+            v-model="assetQuery" class="searchInput" clearable
+            :placeholder="translate('搜索资产')">
+            <template #prefix><icon-search :size="15" aria-hidden="true" /></template>
+          </el-input>
+        </div>
+        <div v-if="visibleAssets.length === 0" class="empty">{{ translate("无匹配资产") }}</div>
+        <div v-else class="masonry">
+          <article v-for="row in visibleAssets" :key="row.provider.id + ':' + row.card.id" class="card">
+            <img v-if="row.card.thumb" class="assetThumb" :src="row.card.thumb" :alt="row.card.name" />
+            <header class="cardHead">
+              <span class="cardTitle">{{ row.card.name }}</span>
+              <el-tag size="small" :type="stateType(registry.cardState(row))" effect="plain">
+                {{ stateLabel(registry.cardState(row)) }}
+              </el-tag>
+            </header>
+            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <div class="chipRow">
+              <el-tag v-if="row.card.modality" size="small" type="primary" effect="plain">
+                {{ modalityLabel(row.card.modality) }}
+              </el-tag>
+              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
+                {{ metaLabel(entry[0]) }} {{ entry[1] }}
+              </el-tag>
+            </div>
+            <p class="cardProvider">{{ translate("来源") }}：{{ row.provider.name }}</p>
+            <footer class="cardActions">
+              <el-button size="small" text @click="openAsset(row)">{{ translate("预览") }}</el-button>
+              <span class="spacer" />
+              <el-button size="small" type="primary" plain @click="downloadAsset(row)">
+                <icon-download :size="14" aria-hidden="true" />
+                {{ translate("下载") }}
               </el-button>
             </footer>
           </article>
@@ -690,6 +1087,71 @@ function sourceStatus(toolId: string): ToolStatus | null {
         <el-button @click="consentVisible = false">{{ translate("拒绝") }}</el-button>
         <el-button type="warning" :loading="plugins.busy.value" @click="submitConsent">
           {{ translate("授权运行") }}
+        </el-button>
+      </template>
+    </el-dialog>
+    <!-- ACT: 模型详情抽屉（Phase-9 §4）：规格/价格/用量 + 真实测试生成。 -->
+    <el-drawer v-model="drawerVisible" :title="drawerRow?.card.name ?? ''" size="420px">
+      <div v-if="drawerRow" class="drawerBody">
+        <div class="chipRow">
+          <el-tag size="small" :type="stateType(registry.cardState(drawerRow))" effect="dark">
+            {{ stateLabel(registry.cardState(drawerRow)) }}
+          </el-tag>
+          <el-tag v-if="drawerRow.card.modality" size="small" type="primary" effect="plain">
+            {{ modalityLabel(drawerRow.card.modality) }}
+          </el-tag>
+          <el-tag size="small" type="warning" effect="plain">{{ priceText(drawerRow.card) }}</el-tag>
+        </div>
+        <p class="cardDesc">{{ translate(drawerRow.card.description) }}</p>
+        <p class="cardProvider">{{ translate("来源") }}：{{ drawerRow.provider.name }}</p>
+        <p v-if="drawerRow.provider.engine" class="cardProvider">
+          {{ drawerRow.provider.engine.gpu }} · {{ (drawerRow.provider.engine.vramMb / 1024).toFixed(1) }} GB {{ drawerMemLabel() }}
+        </p>
+        <table class="specTable">
+          <tbody>
+            <tr v-for="entry in metaEntries(drawerRow.card)" :key="entry[0]">
+              <td>{{ metaLabel(entry[0]) }}</td>
+              <td>{{ entry[1] }}</td>
+            </tr>
+            <tr>
+              <td>{{ translate("用量（本月）") }}</td>
+              <td>{{ usageOf(drawerRow) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="canTest(drawerRow)" class="testBox">
+          <el-button type="primary" size="small" :loading="testState === 'running'" @click="runModelTest">
+            <icon-player-play :size="14" aria-hidden="true" />
+            {{ translate("测试生成") }}
+          </el-button>
+          <p v-if="testState === 'running'" class="hintLine">{{ testHint() }}</p>
+          <p v-if="testState === 'error'" class="errorLine">{{ testError }}</p>
+          <img v-if="testImage" class="testImage" :src="testImage" alt="generated sample" />
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- ACT: 资产预览对话框：大图 + 规格 + 下载。 -->
+    <el-dialog v-model="assetPreviewVisible" :title="assetPreview?.card.name ?? ''" width="560px">
+      <div v-if="assetPreview" class="assetPreviewBody">
+        <img v-if="assetPreview.card.thumb" class="assetPreviewImage" :src="assetPreview.card.thumb" :alt="assetPreview.card.name" />
+        <p class="cardDesc">{{ translate(assetPreview.card.description) }}</p>
+        <div class="chipRow">
+          <el-tag v-if="assetPreview.card.modality" size="small" type="primary" effect="plain">
+            {{ modalityLabel(assetPreview.card.modality) }}
+          </el-tag>
+          <el-tag size="small" type="warning" effect="plain">{{ priceText(assetPreview.card) }}</el-tag>
+          <el-tag v-for="entry in metaEntries(assetPreview.card)" :key="entry[0]" size="small" type="info" effect="plain">
+            {{ metaLabel(entry[0]) }} {{ entry[1] }}
+          </el-tag>
+        </div>
+        <p class="cardProvider">{{ translate("来源") }}：{{ assetPreview.provider.name }}</p>
+      </div>
+      <template #footer>
+        <el-button @click="assetPreviewVisible = false">{{ translate("关闭") }}</el-button>
+        <el-button v-if="assetPreview" type="primary" @click="downloadAsset(assetPreview)">
+          <icon-download :size="14" aria-hidden="true" />
+          {{ translate("下载") }}
         </el-button>
       </template>
     </el-dialog>
@@ -964,6 +1426,102 @@ function sourceStatus(toolId: string): ToolStatus | null {
 }
 
 .pluginsNav .subButton { font-size: 12px; }
+
+// ACT: Phase-9 模型/资产视图：模态过滤 chips + 搜索行。
+.filterRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 16px;
+
+  .searchInput { flex: 1; min-width: 180px; }
+}
+
+.chipFilter {
+  padding: 4px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+
+  &:hover { background: var(--el-fill-color-light); }
+
+  &.on {
+    border-color: var(--el-color-primary);
+    background: var(--el-color-primary-light-9);
+    color: var(--el-color-primary);
+    font-weight: 600;
+  }
+}
+
+.assetThumb {
+  width: 100%;
+  aspect-ratio: 8 / 5;
+  object-fit: cover;
+  border-radius: calc(var(--ui-radius) * 1.5);
+  border: 1px solid var(--el-border-color-lighter);
+}
+
+.drawerBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.specTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+
+  td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+    color: var(--el-text-color-regular);
+
+    &:first-child { color: var(--el-text-color-secondary); width: 40%; }
+  }
+}
+
+.testBox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.testImage {
+  width: 100%;
+  border-radius: calc(var(--ui-radius) * 1.5);
+  border: 1px solid var(--el-border-color-lighter);
+}
+
+.errorLine {
+  margin: 0;
+  color: var(--el-color-danger);
+  font-size: 12px;
+}
+
+.hintLine {
+  margin: 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.assetPreviewBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.assetPreviewImage {
+  width: 100%;
+  border-radius: calc(var(--ui-radius) * 1.5);
+  border: 1px solid var(--el-border-color-lighter);
+}
 
 @media (max-width: 700px) {
   .pluginsGrid {

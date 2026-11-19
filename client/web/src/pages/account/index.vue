@@ -477,6 +477,16 @@ onBeforeUnmount(() => { /* nothing to tear down; avatar blob URLs are session-sc
   }
 }
 
+// ACT: 窄屏（手机）：左菜单收窄但保留文字可读。
+@media (max-width: 700px) {
+  .account {
+    grid-template-columns: 148px minmax(0, 1fr);
+
+    .sidebar .accountItem { padding: 8px 8px; font-size: 13px; }
+    .content { padding: 0 10px; }
+  }
+}
+
 // ACT: 锚点段落：scroll-margin 保证滚动到位后标题不被裁切；段落间留白分隔。
 .accountSection {
   scroll-margin-top: 12px;

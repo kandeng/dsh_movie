@@ -12,15 +12,25 @@ import iconAccount from "@/icons/user.svg";
 import iconSettings from "@/icons/settings.svg";
 // ACT: 插件市场左栏图标（Phase-7 M5）；同样以 CSS mask 取 alpha，颜色随 currentColor。
 import iconPlugins from "@/icons/page_plugin.svg";
+// ACT: Supply 左栏图标（Phase-10）：置于账户图标正下方；先按 130% 放大（28.6px），
+// 后按需求缩至其 90% → 28.6 × 0.9 = 25.74px。
+import iconSupply from "@/icons/page_supply.svg";
 // ACT: 顶栏品牌 logo 与标题作为一个整体居中；mask 只取 alpha，颜色随 currentColor。
 import iconLogo from "@/icons/logo_dsh_movie.svg";
 import languageSelect from "@/components/languageSelect.vue";
 import { useAuthStore } from "@/stores/auth";
+import { useProviders } from "@/composables/useProviders";
+import { watch } from "vue";
 
 const route = useRoute();
 const router = useRouter();
 // ACT: 顶栏账户入口走 auth store：未登录跳转账户页登录，已登录显示头像与下拉菜单。
 const auth = useAuthStore();
+
+// ACT: 供应注册表按用户隔离（Phase-10）：登录用户变化时加载其私有供应配置；
+// 未登录清空。Supply 入口在左栏账户图标之下，点击进入供应页。
+const registry = useProviders();
+watch(() => auth.myUserId, (id) => { registry.loadFor(id); }, { immediate: true });
 
 // ACT: 上组为内容页（广场/一键生成/分步生成），下组为账户/设置；左栏为图标导航（悬停显示文字）。
 const topNav: { path: string; label: string; icon: string; size?: number }[] = [
@@ -30,15 +40,19 @@ const topNav: { path: string; label: string; icon: string; size?: number }[] = [
   { path: "/chat", label: "一键生成", icon: iconOneShot, size: 28.4 },
   // ACT: 分步生成字形高度满幅：按需求放大 120% → 容器 26.4px。
   { path: "/studio", label: "分步生成", icon: iconStepByStep, size: 26.4 },
-  // ACT: 插件市场（Phase-7 M5）：工具/技能浏览与 pick-mode 导入入口，置于分步生成之后。
-  { path: "/plugins", label: "插件", icon: iconPlugins },
+  // ACT: 插件市场（Phase-7 M5）：工具/技能浏览与 pick-mode 导入入口，置于分步生成之后；
+  // 按需求放大 120% → 22 × 1.2 = 26.4px。
+  { path: "/plugins", label: "插件", icon: iconPlugins, size: 26.4 },
 ];
-const bottomNav = [
+const bottomNav: { path: string; label: string; icon: string; size?: number }[] = [
   { path: "/account", label: "账户", icon: iconAccount },
+  // ACT: Supply 入口在账户图标正下方；点击进入供应页（灰左菜单 Model/Tool/Skill/Asset）。
+  { path: "/supply", label: "供应", icon: iconSupply, size: 25.74 },
 ];
 
 function isActive(path: string) { return route.path === path; }
-function go(path: string) { if (route.path !== path) void router.push(path); }
+// ACT: 同路径但带查询（如 /supply?cat=assets）时点击图标仍要导航，以重置为全部视图。
+function go(path: string) { if (route.fullPath !== path) void router.push(path); }
 
 async function onAccountCommand(command: string) {
   if (command === "account") { go("/account"); return; }
@@ -83,7 +97,7 @@ async function onAccountCommand(command: string) {
             type="button" :aria-current="isActive(item.path) ? 'page' : undefined"
             :aria-label="translate(item.label)"
             @click="go(item.path)">
-            <span class="navIcon" :style="{ '--nav-icon': `url(&quot;${item.icon}&quot;)` }" aria-hidden="true" />
+            <span class="navIcon" :style="{ '--nav-icon': `url(&quot;${item.icon}&quot;)`, ...(item.size ? { width: item.size + 'px', height: item.size + 'px' } : {}) }" aria-hidden="true" />
           </button>
         </el-tooltip>
         <el-tooltip :content="translate('设置')" placement="right" :show-after="100">
