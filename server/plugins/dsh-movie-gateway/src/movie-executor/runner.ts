@@ -215,6 +215,8 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
             job.updateProgress(`${executed.length + 1}/${order.length} ${currentType}`)
 
             let output: Record<string, unknown>
+            /** Phase 8 P8-M3: true once real media bytes were posted into the room. */
+            let mediaPosted = false
             const handler: NodeHandler | undefined = handlerFor(currentType)
             if (handler !== undefined) {
               // D4 family dispatch: the registered adapter resolves upstream
@@ -227,21 +229,48 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
                 ...(deps.stepText === undefined ? {} : { text: deps.stepText }),
                 ...(deps.review === undefined ? {} : { review: deps.review }),
                 media: deps.mediaProvider,
+                // P8-M4: sampling progress rides the existing `progress` lifecycle
+                // message; cancellation aborts the provider's remote job.
+                progress: (percent: number): void => {
+                  deps.broadcast([{ type: 'progress', data: { prompt_id: promptId, node: id, value: percent, max: 100 } }])
+                },
+                signal: controller.signal,
               }
               const result = await handler.run(ctx)
               outputsByNode.set(id, result.outputs)
               const modality = modalityOf(currentType)
+              let artifact = result.artifact ?? ''
+              let contentRef: Record<string, unknown> | undefined
+              // P8-M3: real GPU output bytes → room media message + local artifact
+              // copy; the node's output reference becomes the posted media URI so
+              // downstream nodes and the Studio canvas resolve the real file.
+              if (result.bytes !== undefined && deps.notifier !== undefined && deps.roomId !== undefined && deps.roomId !== '') {
+                const posted = await deps.notifier.echoMediaFile(deps.roomId, currentType, id, result.bytes, result.filename ?? 'artifact.bin', result.mime ?? 'application/octet-stream')
+                if (posted !== undefined) {
+                  mediaPosted = true
+                  const uri = posted.uri ?? posted.path ?? artifact
+                  contentRef = {
+                    origin: 'generated',
+                    uri,
+                    ...(result.mime === undefined ? {} : { mime: result.mime }),
+                    ...(result.filename === undefined ? {} : { name: result.filename }),
+                  }
+                  artifact = uri
+                  outputsByNode.set(id, [uri, ...result.outputs.slice(1)])
+                }
+              }
               output = {
-                artifact: result.artifact ?? '',
+                artifact,
                 media: result.media ?? 'canned',
-                outputs: result.outputs,
+                outputs: outputsByNode.get(id) ?? result.outputs,
                 ...(modality === undefined ? {} : { modality }),
+                ...(contentRef === undefined ? {} : { contentRef }),
               }
             } else if (isTextStep(currentType, deps.stepText)) {
               const text = await deps.stepText?.(currentType, currentInputs)
               output = { artifact: text ?? '', media: false }
             } else {
-              const generation = await deps.mediaProvider.generate(currentType, currentInputs)
+              const generation = await deps.mediaProvider.generate(currentType, currentInputs, { signal: controller.signal })
               output = { artifact: generation.artifact ?? '', media: generation.media ?? 'canned' }
             }
 
@@ -251,7 +280,9 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
             // D8 artifact echo: post the executed representation into the room.
             // A no-op when the run carries no room/poster (the room-agnostic
             // ComfyUI `/prompt` path), so it never breaks offline verification.
-            if (deps.notifier !== undefined && deps.roomId !== undefined && deps.roomId !== '') {
+            // P8-M3: real media bytes were already posted by echoMediaFile — no
+            // duplicate text echo for those nodes.
+            if (!mediaPosted && deps.notifier !== undefined && deps.roomId !== undefined && deps.roomId !== '') {
               const echoModality = modalityOf(currentType)
               const kind: EchoKind = echoModality === 'text' || output['media'] === false || output['media'] === 'llm' ? 'text' : 'media'
               await deps.notifier.echoArtifact(deps.roomId, currentType, String(output['artifact'] ?? ''), kind)
@@ -263,6 +294,12 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
           ])
           return { status: 'completed', result: `${executed.length} node(s) executed in topo order` }
         } catch (error) {
+          if (controller.signal.aborted) {
+            // P8-M4: the run was interrupted mid-node (the provider aborted its
+            // remote job). Settle `killed` with the interrupted lifecycle message.
+            deps.broadcast([{ type: 'execution_interrupted', data: { prompt_id: promptId, node_id: currentId, node_type: currentType } }])
+            return { status: 'killed', detail: cancelReason ?? 'interrupted' }
+          }
           if (isModelUnavailable(error)) {
             // D15: an unbacked modality. `customer_service` posts the notice into
             // the room and the node fails honestly with reason `model-unavailable`

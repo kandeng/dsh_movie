@@ -155,6 +155,15 @@ export function apply(ctx: Context, config: Config): void {
         return false
       }
     },
+    async postMedia(roomId: MatrixRoomId, bytes: Uint8Array, filename: string, mime: string, options?: PostOptions): Promise<string | undefined> {
+      if (poster === null) return undefined
+      try {
+        return await poster.sendMedia(roomId, bytes, { filename, mimetype: mime }, options)
+      } catch (error) {
+        ctx.logger.warn('[matrix-chat] postMedia %s failed: %s', roomId, String(error))
+        return undefined
+      }
+    },
   }
 
   /** Broker (provisioning first if needed) the bot's client token. */

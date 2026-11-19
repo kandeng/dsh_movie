@@ -25,6 +25,7 @@ import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvas
 import { useMovieRun } from "@/composables/useMovieRun";
 import { buildDemoWorkflow, buildDemoPrompt, findMovieNode } from "@/utils/demoWorkflow";
 import { schemaFor, workflowToPrompt, type MovieNodeData, type NodeWidgetView, type ContentRef } from "@/canvas/graphMapper";
+import { fetchMediaBlobUrl } from "@/lib/matrixMedia";
 import { nodeSkin } from "@/canvas/nodeSkin";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
 import type { CanvasToolMode } from "@/canvas/toolContext";
@@ -149,6 +150,41 @@ const roomRole = useRoomRole(roomIdRef);
 const importStore = useImportStore();
 const plugins = usePlugins();
 const workspace = useWorkspaceGraph(roomIdRef, bridge, roomRole);
+
+// ── Phase 8 P8-M3: real GPU-generated media. The executor posts the output bytes
+//    into the room and attaches `contentRef {origin:'generated'}` to the executed
+//    payload. (a) Host-only: persist the provenance onto the canvas node via
+//    setNodeMeta (rides the normal draft/commit path). (b) Everyone: resolve an
+//    `mxc://` artifact to an authenticated blob URL so the editor's <img>/<video>
+//    can render it (Synapse media download requires the Bearer token).
+const generatedMediaById = ref<Map<number, string>>(new Map());
+const appliedGeneratedRefs = new Set<string>();
+watch(execStatus.outputById, (byId) => {
+  for (const [id, output] of byId) {
+    if (typeof output !== "object" || output === null) continue;
+    const refRaw = (output as Record<string, unknown>).contentRef;
+    if (typeof refRaw !== "object" || refRaw === null) continue;
+    const contentRef = refRaw as ContentRef;
+    if (contentRef.origin !== "generated" || typeof contentRef.uri !== "string" || contentRef.uri === "") continue;
+    const key = `${id}:${contentRef.uri}`;
+    if (roomRole.isHost.value && !appliedGeneratedRefs.has(key)) {
+      appliedGeneratedRefs.add(key);
+      bridge.setNodeMeta(id, { contentRef });
+    }
+    if (contentRef.uri.startsWith("mxc://") && !generatedMediaById.value.has(id)) {
+      void fetchMediaBlobUrl(contentRef.uri, auth.accessToken.value)
+        .then((blobUrl) => {
+          if (!blobUrl) return;
+          const next = new Map(generatedMediaById.value);
+          next.set(id, blobUrl);
+          generatedMediaById.value = next;
+        })
+        .catch(() => {
+          // Media fetch failure degrades to the text/glyph view (R8).
+        });
+    }
+  }
+});
 
 async function applyGraph(graph: WorkflowGraph): Promise<void> {
   currentGraph.value = graph;
@@ -434,7 +470,10 @@ const selectedOutput = computed<{ modality: string; artifact: string; media: str
   const raw = execStatus.outputOf(id);
   if (typeof raw !== "object" || raw === null) return undefined;
   const record = raw as Record<string, unknown>;
-  const artifact = typeof record.artifact === "string" ? record.artifact : "";
+  const rawArtifact = typeof record.artifact === "string" ? record.artifact : "";
+  // P8-M3: a generated `mxc://` artifact renders via its resolved blob URL.
+  const resolved = generatedMediaById.value.get(id);
+  const artifact = rawArtifact.startsWith("mxc://") && resolved !== undefined ? resolved : rawArtifact;
   const modality = typeof record.modality === "string"
     ? record.modality
     : (selectedSchema.value?.modality ?? "");

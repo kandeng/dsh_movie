@@ -22,6 +22,12 @@ export interface RoomPoster {
   sendText(roomId: string, body: string, options?: PostOptions): Promise<void>
   /** Upload bytes and send an `m.file` message. */
   sendFile(roomId: string, bytes: Uint8Array, file: PostFile, options?: PostOptions): Promise<void>
+  /**
+   * Phase 8 P8-M3: upload media bytes and send the MIME-appropriate message
+   * (`m.image` for image/*, `m.video` for video/*, else `m.file`).
+   * @returns the uploaded `mxc://` content URI.
+   */
+  sendMedia(roomId: string, bytes: Uint8Array, file: PostFile, options?: PostOptions): Promise<string>
 }
 
 /** Build the optional relation/mention fields shared by text and file posts. */
@@ -59,6 +65,23 @@ export function createRoomPoster(client: sdk.MatrixClient): RoomPoster {
         info: { mimetype: file.mimetype, size: bytes.byteLength },
         ...relate(options),
       })
+    },
+    async sendMedia(roomId, bytes, file, options) {
+      const uploaded = await client.uploadContent(bytes, { name: file.filename, type: file.mimetype })
+      const msgtype = file.mimetype.startsWith('image/')
+        ? sdk.MsgType.Image
+        : file.mimetype.startsWith('video/')
+          ? sdk.MsgType.Video
+          : sdk.MsgType.File
+      await sendRoomMessage(roomId, sdk.EventType.RoomMessage, {
+        msgtype,
+        body: file.filename,
+        filename: file.filename,
+        url: uploaded.content_uri,
+        info: { mimetype: file.mimetype, size: bytes.byteLength },
+        ...relate(options),
+      })
+      return uploaded.content_uri
     },
   }
 }

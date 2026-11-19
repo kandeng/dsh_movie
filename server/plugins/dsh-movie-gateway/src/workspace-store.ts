@@ -93,6 +93,15 @@ export interface WorkspaceStore {
    * importing a skill cannot wipe the host's uncommitted WIP.
    */
   recordSkillImport(roomId: string, author: MatrixUserId | null, skillId: string): CommitMeta
+
+  /* --- Phase 8 P8-M3: generated-media artifact files --- */
+
+  /**
+   * Write generated media bytes to a room-relative path (`artifacts/<file>`).
+   * Refuses (returns `false`) any path that escapes the room dir (zip-slip
+   * guard, same as {@link writeSkill}). Crash-tolerant temp-then-rename write.
+   */
+  writeArtifact(roomId: string, relPath: string, bytes: Uint8Array): boolean
 }
 
 /** Turn a room id into a stable, filesystem-safe directory name. */
@@ -369,6 +378,18 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
       // Ensure the skills dir exists even before the first body is written.
       skillDir(roomId)
       return appendSkillCommit(roomId, author, skillId)
+    },
+
+    writeArtifact(roomId: string, relPath: string, bytes: Uint8Array): boolean {
+      const target = safeSkillPath(roomId, relPath)
+      if (target === null) return false
+      const dir = dirname(target)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      // Crash-tolerant write: temp file then atomic rename (mirrors writeSkill).
+      const tmp = `${target}.tmp`
+      writeFileSync(tmp, bytes)
+      renameSync(tmp, target)
+      return true
     },
   }
 }

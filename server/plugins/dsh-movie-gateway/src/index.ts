@@ -29,7 +29,9 @@ import { MovieDirector } from './movie-team/director.ts'
 import { cannedMediaProvider, createRoutingMediaProvider } from './movie-executor/media-provider.ts'
 import { LlmTextAgent } from './movie-executor/llm-text.ts'
 import { createVideoProvider, videoConfigFromEnv } from './movie-executor/video-provider.ts'
-import { availabilityFromInventory } from './movie-executor/model-catalog.ts'
+import { comfyConfigFromEnv, createComfyProvider } from './movie-executor/comfy-provider.ts'
+import { loadComfyTemplates } from './movie-executor/comfy-templates.ts'
+import type { ModelAvailability } from './movie-executor/model-catalog.ts'
 import type { MovieGateway, MovieGatewayInfo } from './types.ts'
 // Pulls the optional `ctx.matrixChat` service-key merge used for the D15 room
 // notice + D8 artifact echo (type-only; the poster is fetched with `ctx.get`).
@@ -215,22 +217,40 @@ export function apply(ctx: Context, config: Config): void {
       })
     const videoConfig = videoConfigFromEnv({ ...process.env, BAILIAN_API_KEY: bailianKey })
     const videoProvider = videoConfig === undefined ? undefined : createVideoProvider(videoConfig, ctx.logger)
-    // Route functional `VideoGenerator` to the real Happyhorse seam when it is
-    // configured; everything else stays on the canned offline fallback so the
-    // legacy six-step pipeline + verify bridges are unchanged.
+    // Phase 8 (D2/D13): the local-first ComfyUI backend, config-gated on
+    // DSH_COMFY_BASE_URL (loopback by default). Without it, image stays unbacked
+    // and video keeps the Happyhorse-only behavior — a settings/env change, not
+    // a code change. Templates are server-held (D10); the DSH process stays
+    // model-code-free.
+    const comfyConfig = comfyConfigFromEnv()
+    const comfyProvider = comfyConfig === undefined
+      ? undefined
+      : createComfyProvider(comfyConfig, ctx.logger, loadComfyTemplates())
+    // Route functional generators (D15 + P8 D2): ImageGenerator → ComfyUI when
+    // configured; VideoGenerator → ComfyUI when configured else Happyhorse;
+    // everything else stays on the canned offline fallback so the legacy
+    // six-step pipeline + verify bridges are unchanged.
     const routingMediaProvider = createRoutingMediaProvider({
-      ...(videoProvider === undefined ? {} : { video: videoProvider }),
+      ...(comfyProvider === undefined ? {} : { image: comfyProvider }),
+      ...((comfyProvider ?? videoProvider) === undefined ? {} : { video: comfyProvider ?? videoProvider }),
       fallback: cannedMediaProvider,
     })
-    // The D15 availability snapshot: text is available only with a live LLM,
-    // video only with a configured Happyhorse endpoint; image/audio are never
-    // backed on the current Bailian-only inventory.
-    const availability = availabilityFromInventory({
-      text: llmText !== undefined,
-      video: videoProvider !== undefined,
-      image: false,
-      audio: false,
-    })
+    // The D15 availability gate, now dynamic for the GPU modalities (P8-M5):
+    // text needs a live LLM; image needs a configured ComfyUI whose last health
+    // probe passed (fail-closed before the first probe); video needs a ready
+    // ComfyUI OR a configured Happyhorse endpoint; audio is never backed.
+    const availability: ModelAvailability = {
+      for(modality) {
+        if (modality === undefined) return 'available'
+        if (modality === 'text') return llmText !== undefined ? 'available' : 'unavailable'
+        if (modality === 'image') return comfyProvider !== undefined && comfyProvider.readiness().image ? 'available' : 'unavailable'
+        if (modality === 'video') {
+          const comfyReady = comfyProvider !== undefined && comfyProvider.readiness().video
+          return comfyReady || videoProvider !== undefined ? 'available' : 'unavailable'
+        }
+        return 'unavailable'
+      },
+    }
     // Optional `customer_service` room poster (D15 notice + D8 echo). Absent in
     // the isolated verifier (matrix-chat disabled) -> the notifier degrades to
     // log-only.
@@ -240,6 +260,13 @@ export function apply(ctx: Context, config: Config): void {
     // `unimplemented` and runs proceed skill-less.
     const movieMarket = ctx.get('movieMarket')
     ctx.effect(() => {
+      // P8-M5: probe the ComfyUI backend once at activation so the availability
+      // gate reflects reality from the first run (fail-closed until it passes).
+      if (comfyProvider !== undefined) {
+        void comfyProvider.probe(true).then((readiness): void => {
+          ctx.logger.info('[movie-gateway] P8 comfy readiness at activation: image=%s video=%s', readiness.image, readiness.video)
+        })
+      }
       // The Leg B executor schedules prompts as `movie-exec` background jobs.
       // `ctx.jobs.start` refuses work unless an attached controller serves the
       // (here, unowned) job, so attach one for the gateway's lifetime and detach
@@ -260,6 +287,17 @@ export function apply(ctx: Context, config: Config): void {
         ...(llmText === undefined ? {} : { review: (classType: string, artifact: unknown, criteria: string): Promise<string> => llmText.review(classType, artifact, criteria) }),
         ...(matrixChat === undefined ? {} : { matrixChat }),
         ...(movieMarket === undefined ? {} : { movieMarket }),
+        // P8-M5: fail-closed pre-run health gate. When ComfyUI is configured but
+        // unreachable/lacking template nodes, /prompt answers 503 instead of
+        // queueing work onto an unready backend.
+        ...(comfyProvider === undefined ? {} : {
+          beforeRun: async (): Promise<void> => {
+            const readiness = await comfyProvider.probe(true)
+            if (!readiness.image && !readiness.video) {
+              throw new Error('ComfyUI backend is not ready (health probe failed closed)')
+            }
+          },
+        }),
         // P5-M4 D7: conversation → graph. The Bailian-backed text seam doubles as
         // the cheap intent router (`mineIntent`); without it (no subagents/key) D7
         // stays off and the chat relay is unaffected. `onRoomMessage` subscribes to

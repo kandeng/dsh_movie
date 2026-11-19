@@ -191,6 +191,13 @@ export interface GatewayServerDeps {
    * answers `unimplemented` and runs proceed skill-less.
    */
   movieMarket?: MarketBridge | undefined
+  /**
+   * Optional Phase-8 P8-M5 pre-run gate. When present, `POST /prompt` awaits it
+   * before scheduling the job; a throw (e.g. the ComfyUI health probe failing
+   * closed) rejects the submit with 503 so an unready backend never accepts
+   * work. Absent → runs are admitted as before.
+   */
+  beforeRun?: (() => Promise<void>) | undefined
 }
 
 /**
@@ -442,19 +449,21 @@ const MAX_REPLANS = 2
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage, movieMarket } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage, movieMarket, beforeRun } = deps
   const execClients = new Set<WebSocket>()
-  // D15/D8: the `customer_service` room notifier (posts the unavailable-model
-  // notice and echoes executed artifacts) and the model-availability gate. Both
-  // degrade safely: no matrixChat → log-only notices; no availability → a
+  // D15/D8: the model-availability gate. Degrades safely: no availability → a
   // conservative gate (text only when a text seam is wired).
-  const notifier = createRoomNotifier(matrixChat, logger)
   const executorAvailability: ModelAvailability = availability
     ?? availabilityFromInventory({ text: stepText !== undefined, video: false, image: false, audio: false })
   // P3-M5: the host-authoritative, file-backed per-room workspace replaces the
   // volatile in-memory store. When no root is injected (verifiers/tests), fall
   // back to a throwaway temp dir so the gateway still boots.
   const workflowStore = createWorkspaceStore(workspaceRoot ?? join(tmpdir(), 'dsh-movie-workspaces'))
+  // D15/D8: the `customer_service` room notifier (posts the unavailable-model
+  // notice and echoes executed artifacts). P8-M3: the workspace store doubles
+  // as the artifact writer so generated media bytes land in <roomDir>/artifacts/.
+  // Degrades safely: no matrixChat → log-only notices.
+  const notifier = createRoomNotifier(matrixChat, logger, workflowStore)
   /** Pending canvas script generations keyed by txnId (POST triggers, mux delivers). */
   const canvasPlans = new Map<string, Promise<CanvasGenerateResult>>()
   /** Last canvas execution result per room, retained for the P3-M4 re-plan loop. */
@@ -1636,6 +1645,19 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
 
     const promptId = randomUUID()
     const number = ++queueCounter
+
+    // P8-M5: pre-run health gate (fail-closed). A throwing probe rejects the
+    // submit with 503 rather than queueing work onto an unready GPU backend.
+    if (beforeRun !== undefined) {
+      try {
+        await beforeRun()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logger.warn('[movie-gateway] /prompt refused by pre-run gate: %s', message)
+        sendRaw(res, 503, { error: 'backend-unready', message })
+        return
+      }
+    }
 
     // Phase-7 D7 mode-2: arm the run-time skill remedy only when a marketplace
     // bridge is wired AND the run carries a room (the skill files live in the

@@ -28,6 +28,7 @@ import {
   type ObjectInfoEntry,
 } from '@dsh-movie/protocol'
 import { CANNED_OBJECT_INFO } from '../fixtures.ts'
+import type { MediaProvider } from './media-provider.ts'
 import type { ModelAvailability } from './model-catalog.ts'
 
 /** One `/object_info` entry, loosely typed for the merged canned + movie map. */
@@ -141,8 +142,12 @@ export interface NodeHandlerContext {
   text?: ((classType: string, inputs: Record<string, unknown>) => Promise<string>) | undefined
   /** Real reviewer seam: judges one artifact against criteria. */
   review?: ((classType: string, artifact: unknown, criteria: string) => Promise<string>) | undefined
-  /** Media-artifact seam for generator/reviewer modality adapters. */
-  media?: { generate(classType: string, inputs: Record<string, unknown>): Promise<{ artifact?: string | undefined; media?: string | undefined }> } | undefined
+  /** Media-artifact seam for generator/reviewer modality adapters (Phase 8: full provider contract). */
+  media?: MediaProvider | undefined
+  /** Phase 8 P8-M4: sampling progress (0..100) forwarded to the Leg B lifecycle. */
+  progress?: ((percent: number) => void) | undefined
+  /** Phase 8 P8-M4: aborts when the run is interrupted/cancelled. */
+  signal?: AbortSignal | undefined
 }
 
 /** One node execution result: the ordered output slot artifacts. */
@@ -153,6 +158,12 @@ export interface NodeHandlerOutput {
   artifact?: string | undefined
   /** The media kind/tag produced (`canned` for placeholder paths). */
   media?: string | undefined
+  /** Phase 8 P8-M3: raw output bytes from a real GPU backend. */
+  bytes?: Uint8Array | undefined
+  /** Phase 8 P8-M3: suggested file name for the produced bytes. */
+  filename?: string | undefined
+  /** Phase 8 P8-M3: MIME type of the produced bytes. */
+  mime?: string | undefined
 }
 
 /** Executes one node class (D4: one adapter per family/modality). */

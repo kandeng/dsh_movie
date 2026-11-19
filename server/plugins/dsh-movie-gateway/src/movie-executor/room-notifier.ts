@@ -33,6 +33,29 @@ export interface RoomPoster {
    * @returns true when the post succeeded.
    */
   postText(roomId: string, body: string): Promise<boolean>
+  /**
+   * Phase 8 P8-M3: upload media bytes and post them as an `m.image`/`m.video`/
+   * `m.file` message. Optional — posters without media support keep text-only.
+   * @param roomId - the target room.
+   * @param bytes - the raw media bytes.
+   * @param filename - the file name presented in the room.
+   * @param mime - the media MIME type (selects the message type).
+   * @returns the uploaded `mxc://` content URI, or `undefined` on failure.
+   */
+  postMedia?(roomId: string, bytes: Uint8Array, filename: string, mime: string): Promise<string | undefined>
+}
+
+/**
+ * Phase 8 P8-M3: persists generated media bytes under the room's workspace
+ * directory (`<roomDir>/artifacts/`). `workspaceStore.writeArtifact` satisfies
+ * this; absent in the isolated verifier (media then rides Matrix only).
+ */
+export interface ArtifactWriter {
+  /**
+   * Write bytes to a room-relative path (zip-slip guarded by the store).
+   * @returns true when the file was written.
+   */
+  writeArtifact(roomId: string, relPath: string, bytes: Uint8Array): boolean
 }
 
 /** Minimal diagnostics sink (matches `ctx.logger`). */
@@ -64,6 +87,20 @@ export interface RoomNotifier {
    */
   echoArtifact(roomId: string, classType: string, artifact: string, kind: EchoKind): Promise<void>
   /**
+   * Phase 8 P8-M3: echo real generated media bytes into the room — upload to
+   * Matrix (when the poster supports media) and persist a local copy under the
+   * room's `artifacts/` directory (when a writer is injected).
+   * @param roomId - the room to post into (empty → no-op).
+   * @param classType - the producing node class.
+   * @param nodeId - the producing node id (names the local artifact file).
+   * @param bytes - the raw media bytes.
+   * @param filename - the backend's file name.
+   * @param mime - the media MIME type.
+   * @returns the posted `mxc://` uri and/or room-relative path, or `undefined`
+   * when neither sink was available (the run still succeeds).
+   */
+  echoMediaFile(roomId: string, classType: string, nodeId: string, bytes: Uint8Array, filename: string, mime: string): Promise<{ uri?: string | undefined; path?: string | undefined } | undefined>
+  /**
    * Narrate one committed op-script transaction into the room (D9).
    *
    * Posts a SINGLE batched, collapsible system message summarizing every op the
@@ -82,9 +119,10 @@ export interface RoomNotifier {
  * @param poster - the room-posting seam (`ctx.matrixChat`), or `undefined` when
  * the chat transport is absent (e.g. the isolated verifier).
  * @param logger - diagnostics sink.
+ * @param artifactWriter - optional Phase-8 local artifact persistence seam.
  * @returns the notifier; every post degrades to a log line without a poster/room.
  */
-export function createRoomNotifier(poster: RoomPoster | undefined, logger: NotifierLogger): RoomNotifier {
+export function createRoomNotifier(poster: RoomPoster | undefined, logger: NotifierLogger, artifactWriter?: ArtifactWriter): RoomNotifier {
   /** Post one body into a room, degrading to a log line when there is nowhere to speak. */
   async function post(roomId: string, body: string, what: string): Promise<void> {
     if (poster === undefined || roomId === '') {
@@ -107,6 +145,36 @@ export function createRoomNotifier(poster: RoomPoster | undefined, logger: Notif
       if (artifact === '') return
       const body = kind === 'media' ? `[${classType}] ${artifact}` : artifact
       await post(roomId, body, 'artifact echo (D8)')
+    },
+    async echoMediaFile(roomId: string, classType: string, nodeId: string, bytes: Uint8Array, filename: string, mime: string): Promise<{ uri?: string | undefined; path?: string | undefined } | undefined> {
+      if (roomId === '') return undefined
+      const result: { uri?: string | undefined; path?: string | undefined } = {}
+      // Local copy under <roomDir>/artifacts/ (P8-M3): the file name is
+      // sanitized and the store guards the room-relative path (zip-slip).
+      if (artifactWriter !== undefined) {
+        const safeName = filename.replace(/[^A-Za-z0-9._-]/g, '_')
+        const relPath = `artifacts/${nodeId.replace(/[^A-Za-z0-9._-]/g, '_')}-${safeName}`
+        try {
+          if (artifactWriter.writeArtifact(roomId, relPath, bytes)) result.path = relPath
+        } catch (error) {
+          logger.warn('[movie-executor] artifact write failed for room %s: %s', roomId, error instanceof Error ? error.message : String(error))
+        }
+      }
+      // Matrix media message (m.image/m.video/m.file) when the poster supports it.
+      if (poster?.postMedia !== undefined) {
+        try {
+          const uri = await poster.postMedia(roomId, bytes, filename, mime)
+          if (uri !== undefined && uri !== '') result.uri = uri
+        } catch (error) {
+          logger.warn('[movie-executor] media post failed for room %s: %s', roomId, error instanceof Error ? error.message : String(error))
+        }
+      }
+      if (result.uri === undefined && result.path === undefined) {
+        logger.info('[movie-executor] media echo skipped (no media sinks) for %s in room %s', classType, roomId)
+        return undefined
+      }
+      logger.info('[movie-executor] media echo (P8-M3) %s in room %s: uri=%s path=%s', classType, roomId, result.uri ?? '-', result.path ?? '-')
+      return result
     },
     async narrateTxn(roomId: string, summary: string): Promise<void> {
       if (summary === '') return

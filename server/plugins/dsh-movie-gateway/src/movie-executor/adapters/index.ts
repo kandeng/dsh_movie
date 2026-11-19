@@ -109,9 +109,19 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
         const artifact = cannedText(schema.classType, `placeholder ${schema.modality ?? 'media'} artifact`)
         return { outputs: [artifact], artifact, media: 'canned' }
       }
-      const generation = await ctx.media.generate(schema.classType, inputs)
+      const generation = await ctx.media.generate(schema.classType, inputs, {
+        ...(ctx.progress === undefined ? {} : { onProgress: ctx.progress }),
+        ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+      })
       const artifact = generation.artifact ?? ''
-      return { outputs: [artifact], artifact, media: generation.media ?? 'canned' }
+      return {
+        outputs: [artifact],
+        artifact,
+        media: generation.media ?? 'canned',
+        ...(generation.bytes === undefined ? {} : { bytes: generation.bytes }),
+        ...(generation.filename === undefined ? {} : { filename: generation.filename }),
+        ...(generation.mime === undefined ? {} : { mime: generation.mime }),
+      }
     },
   }
 }

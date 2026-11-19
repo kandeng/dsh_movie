@@ -59,15 +59,17 @@ export interface NodeWidgetView {
 /**
  * One content-reference shape for every provenance (Phase-6 D5). Upload, market
  * and chat all yield `uri` (+ meta; chat also records `msgId`); inline text-input
- * nodes yield `text`. It is persisted ADDITIVELY in `properties.contentRef` for
- * provenance, while the canonical content the runs execute and the card stub
- * renders stays in the node's modality widget — one source of truth, no
- * wire-shape surgery. A `chat`/`upload` `uri` is a resolved media URL and may go
- * stale (R8); consumers fall back to the modality glyph.
+ * nodes yield `text`; Phase-8 `generated` records real GPU output posted by the
+ * executor (uri is an `mxc://` or room-artifact reference). It is persisted
+ * ADDITIVELY in `properties.contentRef` for provenance, while the canonical
+ * content the runs execute and the card stub renders stays in the node's
+ * modality widget — one source of truth, no wire-shape surgery. A
+ * `chat`/`upload`/`generated` `uri` is a resolved media URL and may go stale
+ * (R8); consumers fall back to the modality glyph.
  */
 export interface ContentRef {
   /** Where the content came from. */
-  origin: "upload" | "market" | "chat" | "inline";
+  origin: "upload" | "market" | "chat" | "inline" | "generated";
   /** Resolved media URL (upload/market/chat). */
   uri?: string;
   /** MIME type of the referenced media. */

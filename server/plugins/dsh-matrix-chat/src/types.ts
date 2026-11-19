@@ -87,6 +87,13 @@ export interface MatrixChat {
   postText(roomId: MatrixRoomId, body: string, options?: PostOptions): Promise<boolean>
   /** Upload bytes and post an `m.file` message into a room as the bot. */
   postFile(roomId: MatrixRoomId, bytes: Uint8Array, file: PostFile, options?: PostOptions): Promise<boolean>
+  /**
+   * Phase 8 P8-M3: upload media bytes and post them with the MIME-appropriate
+   * message type (`m.image` / `m.video` / `m.file`).
+   * @returns the uploaded `mxc://` content URI, or `undefined` when the
+   * transport is absent or the post failed.
+   */
+  postMedia(roomId: MatrixRoomId, bytes: Uint8Array, filename: string, mime: string, options?: PostOptions): Promise<string | undefined>
 }
 
 declare module '@deepseek-ai/cordis' {

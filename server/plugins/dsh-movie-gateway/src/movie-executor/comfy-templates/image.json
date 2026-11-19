@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "modality": "image",
+    "promptNode": "6",
+    "negativeNode": "7",
+    "latentNode": "5",
+    "samplerNode": "3",
+    "saveNode": "9",
+    "seedNode": "3",
+    "stepsNode": "3",
+    "ckptNode": "1"
+  },
+  "prompt": {
+    "1": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": {
+        "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
+      }
+    },
+    "3": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 20,
+        "cfg": 7,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1,
+        "model": ["1", 0],
+        "positive": ["6", 0],
+        "negative": ["7", 0],
+        "latent_image": ["5", 0]
+      }
+    },
+    "5": {
+      "class_type": "EmptyLatentImage",
+      "inputs": {
+        "width": 512,
+        "height": 512,
+        "batch_size": 1
+      }
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "",
+        "clip": ["1", 1]
+      }
+    },
+    "7": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "blurry, low quality, distorted, watermark",
+        "clip": ["1", 1]
+      }
+    },
+    "8": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": ["3", 0],
+        "vae": ["1", 2]
+      }
+    },
+    "9": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "dsh-movie",
+        "images": ["8", 0]
+      }
+    }
+  }
+}
