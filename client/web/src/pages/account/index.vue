@@ -173,9 +173,47 @@
           <p class="sectionEmpty">{{ translate("钱包功能即将上线，敬请期待。") }}</p>
         </section>
 
+        <!-- ACT: 账单段落：跨供应资源账单表（供应/资源/类型/单价/用量/小计 + 月度合计），
+             数据来自同一份每用户供应注册表（无新存储）；支持供应筛选，
+             供应卡片「账单明细」深链 /account?section=billing&provider=<id> 预选筛选并滚动到此。 -->
         <section :id="sectionId(sections[2].id)" class="accountSection" aria-labelledby="billingTitle">
           <h2 id="billingTitle">{{ translate("账单") }}</h2>
-          <p class="sectionEmpty">{{ translate("账单功能即将上线，敬请期待。") }}</p>
+          <div class="billingBar">
+            <span class="billingMonth">{{ translate("账单明细（本月）") }}</span>
+            <el-select v-model="billingFilter" size="small" class="billingSelect" :aria-label="translate('供应')">
+              <el-option value="all" :label="translate('全部')" />
+              <el-option v-for="p in billingProviders" :key="p.id" :value="p.id" :label="p.name" />
+            </el-select>
+          </div>
+          <table v-if="billingRows.length > 0" class="billingTable">
+            <thead>
+              <tr>
+                <th>{{ translate("供应") }}</th>
+                <th>{{ translate("资源") }}</th>
+                <th>{{ translate("类型") }}</th>
+                <th>{{ translate("单价") }}</th>
+                <th>{{ translate("用量") }}</th>
+                <th class="num">{{ translate("小计") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in billingRows" :key="row.key">
+                <td>{{ row.providerName }}</td>
+                <td class="name">{{ row.cardName }}</td>
+                <td>{{ row.kindLabel }}</td>
+                <td>{{ row.priceText }}</td>
+                <td>{{ row.usage }}</td>
+                <td class="num">{{ money(row.subtotal, row.currency) }}</td>
+              </tr>
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colspan="5">{{ translate("合计") }}</td>
+                <td class="num">{{ billingTotalText }}</td>
+              </tr>
+            </tfoot>
+          </table>
+          <p v-else class="sectionEmpty">{{ translate("无账单记录") }}</p>
         </section>
       </div>
     </section>
@@ -183,13 +221,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
 import iconAccount from "@/icons/user.svg";
 import { useAuthStore, localpartOf, AuthFieldError } from "@/stores/auth";
 import { clientConfig } from "@/config";
+import { useProviders, PRICE_UNIT_LABEL } from "@/composables/useProviders";
+import type { ResourceCard } from "@/lib/providerCatalog";
 
 // ACT: 账户页：设置页同款整页布局（左菜单栏 + 右扁平主面板），主面板内含「账户/钱包/账单」三个锚点段落。
 // 头像上传后在本地裁剪/缩放为 128x128 的 data URI，保存时经 auth.updateProfile 同步到 Matrix（显示名 + 头像）。
@@ -252,6 +292,76 @@ function goTo(id: string) {
 }
 
 function goSettings() { void router.push("/settings"); }
+
+// ── 账单段落：跨供应账单表（同一份每用户供应注册表，无新存储）──
+const registry = useProviders();
+const billingFilter = ref("all");
+// ACT: 演示行不入账（与供应页一致）。
+const billingProviders = computed(() => registry.providers.value.filter((row) => row.demo !== true));
+
+interface BillingRow {
+  key: string;
+  providerName: string;
+  cardName: string;
+  kindLabel: string;
+  priceText: string;
+  usage: number;
+  currency: "CNY" | "USD";
+  subtotal: number;
+}
+function money(amount: number, currency: "CNY" | "USD" = "CNY"): string {
+  return `${currency === "USD" ? "$" : "¥"}${amount.toFixed(2)}`;
+}
+function kindLabelOf(kind: string): string {
+  if (kind === "tools") return translate("工具");
+  if (kind === "skills") return translate("技能");
+  if (kind === "assets") return translate("资产");
+  return translate("模型");
+}
+function priceTextOf(card: ResourceCard): string {
+  if (card.price === null || card.price.amount === 0) return translate("免费");
+  return `${registry.priceLabel(card.price)} / ${translate(PRICE_UNIT_LABEL[card.price.unit])}`;
+}
+const billingRows = computed<BillingRow[]>(() => {
+  const rows: BillingRow[] = [];
+  for (const provider of billingProviders.value) {
+    if (billingFilter.value !== "all" && provider.id !== billingFilter.value) continue;
+    for (const card of provider.cards) {
+      const usage = provider.usage[card.id] ?? 0;
+      rows.push({
+        key: `${provider.id}:${card.id}`,
+        providerName: provider.name,
+        cardName: card.name,
+        kindLabel: kindLabelOf(card.kind),
+        priceText: priceTextOf(card),
+        usage,
+        currency: card.price?.currency ?? "CNY",
+        subtotal: card.price === null ? 0 : card.price.amount * usage,
+      });
+    }
+  }
+  return rows;
+});
+// ACT: 混合币种分开合计（人民币为主，美元仅在非零时追加）。
+const billingTotalText = computed(() => {
+  let cny = 0;
+  let usd = 0;
+  for (const row of billingRows.value) {
+    if (row.currency === "USD") usd += row.subtotal;
+    else cny += row.subtotal;
+  }
+  return usd > 0 ? `${money(cny)} + ${money(usd, "USD")}` : money(cny);
+});
+
+// ACT: 深链入口：/account?section=billing&provider=<id> → 预选供应筛选并滚动到账单段落。
+// 已停留在本页时再点卡片链接只改 query（组件复用），故 watch query 而非只靠 onMounted。
+function applyBillingQuery() {
+  if (route.query.section !== "billing") return;
+  const pid = typeof route.query.provider === "string" ? route.query.provider : "";
+  billingFilter.value = pid === "" ? "all" : pid;
+  goTo("billing");
+}
+watch(() => route.query.section, () => { void nextTick(applyBillingQuery); });
 
 // ACT: 滚动监听（scroll-spy）：以主面板顶部为基准，高亮当前视口内最靠上的段落对应菜单项。
 function onScroll() {
@@ -394,6 +504,7 @@ async function signOut() {
 // 会复用同一个组件实例，onMounted 不会再触发。改用 watch(immediate) 覆盖两种情况。
 onMounted(async () => {
   if (!auth.restored) await auth.restore();
+  applyBillingQuery();
 });
 watch(() => route.query.login, () => {
   if (auth.signedIn && route.query.login === "1") afterSignIn();
@@ -506,6 +617,62 @@ onBeforeUnmount(() => { /* nothing to tear down; avatar blob URLs are session-sc
     font-size: 13px;
     line-height: 1.7;
   }
+}
+
+// ACT: 账单段落：筛选行（左标题 + 右供应筛选）+ 跨供应账单表（供应页同款表格样式，多一列供应）。
+.billingBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+
+  .billingMonth {
+    color: var(--el-text-color-secondary);
+    font-size: 13px;
+  }
+
+  .billingSelect {
+    width: 200px;
+    margin-left: auto;
+  }
+}
+
+.billingTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+
+  th, td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+    text-align: left;
+    color: var(--el-text-color-regular);
+  }
+
+  th {
+    color: var(--el-text-color-secondary);
+    font-weight: 500;
+  }
+
+  td.name { color: var(--el-text-color-primary); font-weight: 500; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  tfoot td {
+    border-bottom: 0;
+    color: var(--el-text-color-primary);
+    font-weight: 600;
+  }
+}
+
+// ACT: 窄屏（手机）：筛选行堆叠，表格横向可滚。
+@media (max-width: 700px) {
+  .billingBar {
+    flex-wrap: wrap;
+
+    .billingSelect { width: 100%; margin-left: 0; }
+  }
+
+  .billingTable { display: block; overflow-x: auto; }
 }
 
 .accountProfile {

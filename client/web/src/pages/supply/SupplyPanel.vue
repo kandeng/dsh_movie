@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// ACT: 供应面板（Phase-10.2：Supply 页主面板）。只展示“接入与账单”级联
+// ACT: 供应面板（Phase-10.2：Supply 页主面板）。主面板由 Model/Tool/Skill/Asset
+// 四类别段落组成（段落首行为标题），段落内陈列“接入与账单”级联
 // （配置 → 连接/状态 → 折叠账单）：添加供应的“种类”级联出六类 AI 供应商
 // （Bailian → Volcano → Anthropic → OpenAI → Remote ComfyUI → Local ComfyUI），
 // 每类的输入文本框随类型切换（各平台预先需要知道的变量/参数不同）；连接握手
@@ -7,7 +8,7 @@
 // 演示目录源（demo 标记）不列为接入块。数据按用户隔离；删除可撤销。
 import { computed, onBeforeUnmount, ref } from "vue";
 import { translate } from "@dsh-movie/i18n/vue";
-import { IconPlus, IconSearch } from "@tabler/icons-vue";
+import { IconPlus } from "@tabler/icons-vue";
 import {
   useProviders,
   type ProviderSnapshot,
@@ -27,50 +28,50 @@ const props = defineProps<{ category: "all" | CardKind }>();
 
 const registry = useProviders();
 
-// ACT: 工具栏：搜索 / 排序（名称·本月费用·状态）。类别过滤来自账户页左菜单。
-const query = ref("");
-const sortBy = ref<"name" | "cost" | "status">("name");
+// ACT: 段落内按名称确定性排序（供应数量有限，不提供排序控件）。
 
-const STATUS_ORDER: Record<ProviderRecord["status"], number> = {
-  connected: 0,
-  connecting: 1,
-  error: 2,
-  disconnected: 3,
+// ACT: 段落分组（布局提案 §1）：主面板由 Model/Tool/Skill/Asset 四类别段落组成，
+// 段落首行为标题、其后为该类别的接入块。all 模式陈列全部非空段落；类别模式仅
+// 陈列该段落。接入块归属：有卡片者按卡片类别（可同属多段）；无卡片者按其自身
+// kind（保证新增接入可见、可连接）。演示目录源（demo）不在此陈列。
+const SECTION_KINDS: CardKind[] = ["models", "tools", "skills", "assets"];
+const SECTION_LABEL: Record<CardKind, string> = {
+  models: "供应模型",
+  tools: "供应工具",
+  skills: "供应技能",
+  assets: "供应资产",
+};
+const KIND_SECTION: Record<ProviderRecord["kind"], CardKind> = {
+  llm: "models",
+  comfy: "models",
+  mcp: "tools",
+  skills: "skills",
+  assets: "assets",
 };
 
-// ACT: 级联：供给当前类别的接入块（all = 全部），搜索匹配名称/地址；
-// 演示目录源（demo）不在此陈列（其卡片仅供给 Plugin 子页）。
-const visibleProviders = computed(() => {
-  const q = query.value.trim().toLowerCase();
-  const rows = registry.providers.value.filter((row) => {
-    if (row.demo === true) return false;
-    // ACT: 尚无任何卡片的新增接入在每个类别页都列出（否则添加后不可见、
-    // 无法连接）；已有卡片后仍按类别归属过滤。
-    if (props.category !== "all" && row.cards.length > 0 && !row.cards.some((card) => card.kind === props.category)) return false;
-    if (q === "") return true;
-    return row.name.toLowerCase().includes(q) || row.baseUrl.toLowerCase().includes(q);
-  });
-  return [...rows].sort((a, b) => {
-    if (sortBy.value === "cost") return registry.costOf(b) - registry.costOf(a);
-    if (sortBy.value === "status") return STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
-    return a.name.localeCompare(b.name, "zh-Hans-CN");
-  });
+function sectionOf(row: ProviderRecord): CardKind {
+  const spec = providerTypeSpec(row.providerType);
+  return KIND_SECTION[spec?.kind ?? row.kind];
+}
+
+const sortedRows = computed(() => {
+  const rows = registry.providers.value.filter((row) => row.demo !== true);
+  return [...rows].sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
 });
 
-// ACT: 顶部汇总仅统计自管接入（排除仅向 Plugin 页供给卡片的演示目录源）。
-const managed = computed(() => registry.providers.value.filter((row) => row.demo !== true));
-const connectedCount = computed(
-  () => managed.value.filter((row) => row.status === "connected").length,
-);
-const cardCount = computed(() => managed.value.reduce((sum, row) => sum + row.cards.length, 0));
-
-function money(amount: number, currency: "CNY" | "USD" = "CNY"): string {
-  const symbol = currency === "USD" ? "$" : "¥";
-  return `${symbol}${amount.toFixed(2)}`;
-}
-function totalCostText(): string {
-  return money(managed.value.reduce((sum, row) => sum + registry.costOf(row), 0));
-}
+const sections = computed(() => {
+  const kinds = props.category === "all" ? SECTION_KINDS : [props.category];
+  const list = kinds.map((kind) => ({
+    kind,
+    label: SECTION_LABEL[kind],
+    rows: sortedRows.value.filter((row) =>
+      row.cards.length > 0
+        ? row.cards.some((card) => card.kind === kind)
+        : sectionOf(row) === kind,
+    ),
+  }));
+  return props.category === "all" ? list.filter((section) => section.rows.length > 0) : list;
+});
 
 // ACT: 新增 / 编辑对话框（Phase-10.2 重实现）：种类下拉级联六类 AI 供应商，
 // 输入文本框随类型切换（schema 见 PROVIDER_TYPES）；编辑保留 id 与已记录用量。
@@ -89,11 +90,22 @@ const canSave = computed(() => {
   );
 });
 
-function openAdd(): void {
+// ACT: 各段落右侧的“添加供应”入口：预选该段落首个归属供应商类型作为 Category；
+// 当前六类均属 Model（llm/comfy），Tool/Skill/Asset 段落尚无专属类型
+// （其添加的接入仍按自身 kind 归属），待后续扩展级联。
+const ADD_DEFAULT_TYPE: Record<CardKind, ProviderType> = {
+  models: "bailian",
+  tools: "bailian",
+  skills: "bailian",
+  assets: "bailian",
+};
+
+function openAddFor(kind: CardKind): void {
   editId.value = null;
   editName.value = "";
-  editType.value = "bailian";
-  editFields.value = defaultFieldsOf(PROVIDER_TYPES[0]!);
+  const type = ADD_DEFAULT_TYPE[kind];
+  editType.value = type;
+  editFields.value = defaultFieldsOf(providerTypeSpec(type) ?? PROVIDER_TYPES[0]!);
   editVisible.value = true;
 }
 function openEdit(provider: ProviderRecord): void {
@@ -166,40 +178,30 @@ onBeforeUnmount(() => {
         <h2>{{ translate("供应") }}</h2>
         <p class="privacyHint">{{ translate("仅你可见：其他用户无法查看或修改你的供应配置。") }}</p>
       </div>
-      <div class="headSummary">
-        <span class="sumChip">{{ translate("已连接") }} <strong>{{ connectedCount }} / {{ registry.providers.value.length }}</strong></span>
-        <span class="sumChip">{{ translate("资源卡片") }} <strong>{{ cardCount }}</strong></span>
-        <span class="sumChip total">{{ translate("本月费用") }} <strong>{{ totalCostText() }}</strong></span>
-      </div>
     </header>
 
-    <div class="toolbar">
-      <el-input
-        v-model="query" class="searchInput" clearable
-        :placeholder="translate('搜索供应或地址')">
-        <template #prefix><icon-search :size="15" aria-hidden="true" /></template>
-      </el-input>
-      <el-select v-model="sortBy" class="sortSelect">
-        <el-option :label="translate('按名称')" value="name" />
-        <el-option :label="translate('按本月费用')" value="cost" />
-        <el-option :label="translate('按状态')" value="status" />
-      </el-select>
-      <el-button type="primary" @click="openAdd">
-        <icon-plus :size="15" aria-hidden="true" />
-        {{ translate("添加供应") }}
-      </el-button>
-    </div>
-
-    <!-- ACT: 接入与账单级联：配置 → 连接/状态 → 折叠账单（提案 §3 布局）；
-         资源卡片不在此陈列（归 Plugin 子页）。 -->
-    <h3 class="zoneTitle">{{ translate("接入与账单") }} <span class="zoneCount">{{ visibleProviders.length }}</span></h3>
-    <div v-if="visibleProviders.length === 0" class="empty">{{ translate("无匹配供应") }}</div>
-    <SupplyBlock
-      v-for="provider in visibleProviders"
-      :key="provider.id"
-      :provider="provider"
-      @edit="openEdit"
-      @delete="deleteProvider" />
+    <!-- ACT: 段落级联：每段首行为类别标题（Model/Tool/Skill/Asset）+ 该段落的
+         “添加供应”入口（右对齐），其后为该类别的接入块（配置 → 连接/状态 →
+         折叠账单）；资源卡片不在此陈列（归 Plugin 子页）。 -->
+    <template v-for="section in sections" :key="section.kind">
+      <h3 class="zoneTitle">
+        <span class="zoneLabel">
+          {{ translate(section.label) }} <span class="zoneCount">{{ section.rows.length }}</span>
+        </span>
+        <el-button class="zoneAdd" size="small" type="primary" @click="openAddFor(section.kind)">
+          <icon-plus :size="14" aria-hidden="true" />
+          {{ translate("添加供应") }}
+        </el-button>
+      </h3>
+      <div v-if="section.rows.length === 0" class="empty">{{ translate("无匹配供应") }}</div>
+      <SupplyBlock
+        v-for="provider in section.rows"
+        :key="provider.id"
+        :provider="provider"
+        @edit="openEdit"
+        @delete="deleteProvider" />
+    </template>
+    <div v-if="sections.length === 0" class="empty">{{ translate("无匹配供应") }}</div>
 
     <!-- ACT: 新增/编辑供应对话框（Phase-10.2）：种类级联六类 AI 供应商，
          输入文本框随类型切换；必填字段带 * 且未填时保存禁用。 -->
@@ -281,35 +283,6 @@ onBeforeUnmount(() => {
     font-size: 12px;
     line-height: 1.6;
   }
-
-  .headSummary {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .sumChip {
-    padding: 4px 10px;
-    border: 1px solid var(--el-border-color-lighter);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--el-bg-color-overlay) 80%, transparent);
-    color: var(--el-text-color-secondary);
-    font-size: 12px;
-
-    strong { color: var(--el-text-color-primary); font-weight: 600; }
-
-    &.total strong { color: var(--el-color-warning); }
-  }
-}
-
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-
-  .searchInput { flex: 1; min-width: 180px; }
-  .sortSelect { width: 150px; }
 }
 
 .zoneTitle {
@@ -319,6 +292,15 @@ onBeforeUnmount(() => {
   margin: 20px 0 12px;
   font-size: 15px;
   font-weight: 600;
+
+  .zoneLabel {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  // ACT: “添加供应”入口右对齐于段落标题行。
+  .zoneAdd { margin-left: auto; }
 
   .zoneCount {
     padding: 1px 8px;

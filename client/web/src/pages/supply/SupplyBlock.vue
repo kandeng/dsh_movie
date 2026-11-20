@@ -1,23 +1,29 @@
 <script setup lang="ts">
 // ACT: 供应级联块（Phase-9 提案 §3，Phase-10 移入账户页，Phase-10.2 类型化字段）：
-// 配置 → 连接按钮 + 状态标签 → 折叠账单明细。配置网格按供应商类型的 schema
-// 渲染各自的输入文本框（无类型旧行保留旧三字段网格）。块内直接读写注册表
-// 中的同一对象引用（乐观变更即时持久化）。编辑/删除上抛父页。
-import { computed, ref } from "vue";
+// 配置行（Key → Value 竖排，只读展示：卡片不可输入，改值走编辑弹窗）→ 操作行
+// （连接按钮 + 状态标签并排，右侧编辑/删除）→ 账单行（左侧本月费用，右侧账单
+// 明细深链 Account → Billing）。状态标签与连接按钮相邻（因果就近），连接中就
+// 地显示转圈。配置行按供应商类型的 schema 渲染各自的展示框（密钥字段行内眼睛
+// 切换）；无类型旧行保留旧三字段行。块内直接读写注册表中的同一对象引用
+// （乐观变更即时持久化）。编辑/删除上抛父页。
+import { computed } from "vue";
+import { useRouter } from "vue-router";
 import { translate } from "@dsh-movie/i18n/vue";
 import {
   IconPlug,
   IconRefresh,
   IconTrash,
   IconPencil,
-  IconCoin,
+  IconLoader2,
   IconCpu,
   IconCloud,
   IconTool,
   IconBook,
   IconBox,
+  IconCoin,
+  IconArrowRight,
 } from "@tabler/icons-vue";
-import { useProviders, PROVIDER_KIND_LABEL, PRICE_UNIT_LABEL } from "@/composables/useProviders";
+import { useProviders, PROVIDER_KIND_LABEL } from "@/composables/useProviders";
 import { providerTypeSpec } from "@/lib/providerCatalog";
 import type { ProviderKind, ProviderRecord } from "@/lib/providerCatalog";
 
@@ -27,10 +33,6 @@ const emit = defineEmits<{ edit: [provider: ProviderRecord]; delete: [provider: 
 // ACT: 供应商类型 schema：有类型 → 按字段组渲染配置网格；无 → 旧三字段网格。
 const spec = computed(() => providerTypeSpec(props.provider.providerType));
 const fieldValues = computed<Record<string, string>>(() => props.provider.fields ?? {});
-function setField(key: string, value: string): void {
-  if (props.provider.fields === undefined) props.provider.fields = {};
-  props.provider.fields[key] = value;
-}
 function badgeLabel(): string {
   return spec.value?.label ?? PROVIDER_KIND_LABEL[props.provider.kind];
 }
@@ -38,11 +40,15 @@ function badgeKind(): ProviderKind {
   return spec.value?.kind ?? props.provider.kind;
 }
 
-// ACT: 解构为本地函数绑定：模板（含折叠面板插槽）只调用本地包装函数，
+// ACT: 解构为本地函数绑定：模板只调用本地包装函数，
 // 避免 vue-tsc 对插槽/事件作用域内对象绑定的 ref 解包歧义。
-const { costOf, priceLabel, connect, disconnect } = useProviders();
-const openBilling = ref<string[]>([]);
-const revealed = ref(false);
+const { costOf, connect, disconnect } = useProviders();
+const router = useRouter();
+
+// ACT: 账单明细深链：Account → Billing 段落，并预选本供应为筛选对象。
+function goBilling(): void {
+  void router.push({ path: "/account", query: { section: "billing", provider: props.provider.id } });
+}
 
 function statusLabel(status: ProviderRecord["status"]): string {
   if (status === "connected") return translate("已连接");
@@ -88,11 +94,8 @@ function providerCurrency(provider: ProviderRecord): "CNY" | "USD" {
 function cardCountOf(provider: ProviderRecord, kind: string): number {
   return provider.cards.filter((card) => card.kind === kind).length;
 }
-function kindLabelOf(kind: string): string {
-  if (kind === "models") return translate("模型");
-  if (kind === "tools") return translate("工具");
-  if (kind === "skills") return translate("技能");
-  return translate("资产");
+function costText(provider: ProviderRecord): string {
+  return money(costOf(provider), providerCurrency(provider));
 }
 async function toggleConnect(): Promise<void> {
   if (props.provider.status === "connected") disconnect(props.provider.id);
@@ -100,14 +103,6 @@ async function toggleConnect(): Promise<void> {
 }
 function refresh(): void {
   void connect(props.provider.id);
-}
-function costText(provider: ProviderRecord): string {
-  return money(costOf(provider), providerCurrency(provider));
-}
-function priceText(card: ProviderRecord["cards"][number]): string {
-  const price = card.price;
-  if (price === null || price.amount === 0) return translate("免费");
-  return `${priceLabel(price)} / ${translate(PRICE_UNIT_LABEL[price.unit])}`;
 }
 function memLabel(provider: ProviderRecord): string {
   const gpu = provider.engine?.gpu ?? "";
@@ -123,68 +118,44 @@ function memLabel(provider: ProviderRecord): string {
         {{ badgeLabel() }}
       </span>
       <h3 class="blockTitle">{{ provider.name }}</h3>
-      <el-tag size="small" :type="statusType(provider.status)" effect="dark">
-        {{ statusLabel(provider.status) }}
-      </el-tag>
-      <span class="spacer" />
-      <span class="monthCost" :title="translate('本月费用')">
-        <icon-coin :size="14" aria-hidden="true" />
-        {{ costText(provider) }}
-      </span>
     </header>
 
-    <!-- ACT: 配置网格：类型化接入按 schema 渲染各自的输入文本框（密钥默认掩码，
-         显示/隐藏按钮统一切换）；无类型旧行保留旧三字段网格。 -->
-    <div v-if="spec !== undefined" class="configGrid">
-      <div
-        v-for="field in spec.fields" :key="field.key"
-        class="field" :class="{ fieldWide: field.textarea === true }">
+    <!-- ACT: 配置行：Key → Value 竖排（标签列定宽、展示列弹性，占位符不再截断）；
+         卡片只读展示（readonly，不可输入；改值走编辑弹窗），密钥字段保留行内眼睛切换。 -->
+    <div v-if="spec !== undefined" class="configRows">
+      <div v-for="field in spec.fields" :key="field.key" class="fieldRow">
         <span class="fieldLabel">
           {{ field.label }}<i v-if="field.required === true" class="req">*</i>
         </span>
         <el-input
           v-if="field.textarea === true"
-          type="textarea" :rows="2"
+          class="fieldControl"
+          type="textarea" :rows="2" readonly
           :model-value="fieldValues[field.key] ?? ''"
-          :placeholder="field.placeholder"
-          @update:model-value="(value: string | number) => setField(field.key, String(value))" />
+          :placeholder="field.placeholder" />
         <el-input
           v-else
-          :type="field.secret === true && !revealed ? 'password' : 'text'"
+          class="fieldControl"
+          :type="field.secret === true ? 'password' : 'text'"
+          :show-password="field.secret === true"
+          readonly
           :model-value="fieldValues[field.key] ?? ''"
-          :placeholder="field.placeholder"
-          @update:model-value="(value: string | number) => setField(field.key, String(value))" />
+          :placeholder="field.placeholder" />
       </div>
-      <el-tooltip :content="revealed ? translate('隐藏密钥') : translate('显示密钥')" placement="top">
-        <el-button class="revealButton" text @click="revealed = !revealed">
-          {{ revealed ? translate("隐藏") : translate("显示") }}
-        </el-button>
-      </el-tooltip>
     </div>
-    <div v-else class="configGrid">
-      <div class="field fieldBase">
+    <div v-else class="configRows">
+      <div class="fieldRow">
         <span class="fieldLabel">{{ translate("端点地址") }}</span>
-        <el-input v-model="provider.baseUrl" placeholder="http://127.0.0.1:8188" />
+        <el-input class="fieldControl" :model-value="provider.baseUrl" readonly placeholder="http://127.0.0.1:8188" />
       </div>
-      <div class="field">
+      <div class="fieldRow">
         <span class="fieldLabel">apiKey</span>
-        <el-input
-          v-model="provider.apiKey"
-          :type="revealed ? 'text' : 'password'"
-          placeholder="Bearer token" />
+        <el-input class="fieldControl" :model-value="provider.apiKey" type="password" show-password readonly placeholder="Bearer token" />
       </div>
-      <div class="field">
+      <div class="fieldRow">
         <span class="fieldLabel">{{ translate("密码") }}</span>
-        <el-input
-          v-model="provider.password"
-          :type="revealed ? 'text' : 'password'"
-          :placeholder="translate('可选')" />
+        <el-input class="fieldControl" :model-value="provider.password" type="password" show-password readonly :placeholder="translate('可选')" />
       </div>
-      <el-tooltip :content="revealed ? translate('隐藏密钥') : translate('显示密钥')" placement="top">
-        <el-button class="revealButton" text @click="revealed = !revealed">
-          {{ revealed ? translate("隐藏") : translate("显示") }}
-        </el-button>
-      </el-tooltip>
     </div>
 
     <p v-if="provider.engine" class="engineRow">
@@ -227,6 +198,11 @@ function memLabel(provider: ProviderRecord): string {
         <icon-refresh :size="14" aria-hidden="true" />
         {{ translate("刷新") }}
       </el-button>
+      <!-- ACT: 状态标签与连接按钮并排（因果就近）；连接中就地显示转圈。 -->
+      <el-tag class="statusChip" size="small" :type="statusType(provider.status)" effect="dark">
+        <icon-loader-2 v-if="provider.status === 'connecting'" :size="12" class="spin" aria-hidden="true" />
+        {{ statusLabel(provider.status) }}
+      </el-tag>
       <span class="spacer" />
       <el-button size="small" text @click="emit('edit', provider)">
         <icon-pencil :size="14" aria-hidden="true" />
@@ -238,48 +214,17 @@ function memLabel(provider: ProviderRecord): string {
       </el-button>
     </footer>
 
-    <!-- ACT: 折叠账单明细：单价 × 用量 = 小计，底部合计。 -->
-    <el-collapse v-model="openBilling" class="billing">
-      <el-collapse-item :name="provider.id">
-        <template #title>
-          <span class="billingTitle">
-            {{ translate("账单明细（本月）") }}
-            <span class="billingTotal">{{ costText(provider) }}</span>
-          </span>
-        </template>
-        <table class="billingTable">
-          <thead>
-            <tr>
-              <th>{{ translate("资源") }}</th>
-              <th>{{ translate("类型") }}</th>
-              <th>{{ translate("单价") }}</th>
-              <th>{{ translate("用量") }}</th>
-              <th class="num">{{ translate("小计") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="card in provider.cards" :key="card.id">
-              <td class="name">{{ card.name }}</td>
-              <td>{{ kindLabelOf(card.kind) }}</td>
-              <td>{{ priceText(card) }}</td>
-              <td>{{ provider.usage[card.id] ?? 0 }}</td>
-              <td class="num">
-                {{ card.price === null ? money(0) : money(card.price.amount * (provider.usage[card.id] ?? 0), card.price.currency) }}
-              </td>
-            </tr>
-            <tr v-if="provider.cards.length === 0">
-              <td colspan="5" class="none">{{ translate("连接后从 /info 获取资源目录") }}</td>
-            </tr>
-          </tbody>
-          <tfoot>
-            <tr>
-              <td colspan="4">{{ translate("合计") }}</td>
-              <td class="num">{{ costText(provider) }}</td>
-            </tr>
-          </tfoot>
-        </table>
-      </el-collapse-item>
-    </el-collapse>
+    <!-- ACT: 账单行：左侧本月费用，右侧账单明细深链（Account → Billing，预选本供应筛选）。 -->
+    <div class="billingRow">
+      <span class="costText">
+        <icon-coin :size="14" aria-hidden="true" />
+        {{ translate("本月费用") }} <b>{{ costText(provider) }}</b>
+      </span>
+      <el-button class="billingLink" size="small" text type="primary" @click="goBilling">
+        {{ translate("账单明细") }}
+        <icon-arrow-right :size="14" aria-hidden="true" />
+      </el-button>
+    </div>
   </article>
 </template>
 
@@ -311,18 +256,6 @@ function memLabel(provider: ProviderRecord): string {
     flex: 1 1 160px;
     min-width: 160px;
   }
-
-  .spacer { flex: 1; }
-
-  .monthCost {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--el-color-warning);
-    font-size: 13px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
 }
 
 .kindBadge {
@@ -341,26 +274,44 @@ function memLabel(provider: ProviderRecord): string {
   &.kind-assets { background: color-mix(in srgb, #ec4899 14%, var(--el-bg-color)); color: #db2777; }
 }
 
-.configGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 10px;
-  align-items: end;
+// ACT: 配置行：Key → Value 竖排（标签列定宽 130px、输入列弹性），不再截断占位符。
+.configRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 
-  .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-
-  // ACT: 多行字段（Workflow JSON）占满整行。
-  .fieldWide { grid-column: 1 / -1; }
+  .fieldRow {
+    display: grid;
+    grid-template-columns: 130px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+  }
 
   .fieldLabel {
     color: var(--el-text-color-secondary);
     font-size: 12px;
+    overflow-wrap: anywhere;
 
     .req { color: var(--el-color-danger); font-style: normal; margin-inline-start: 2px; }
   }
 
-  .revealButton { margin-bottom: 1px; justify-self: start; }
+  // ACT: 只读展示框：去掉可编辑观感（默认光标/悬停态），保留边框与掩码眼睛。
+  .fieldControl {
+    :deep(.el-input__inner),
+    :deep(.el-textarea__inner) {
+      cursor: default;
+    }
+  }
 }
+
+// ACT: 窄屏（手机）：标签在上、输入在下，自然堆叠。
+@media (max-width: 560px) {
+  .configRows .fieldRow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+
 .engineRow {
   display: flex;
   align-items: center;
@@ -391,53 +342,46 @@ function memLabel(provider: ProviderRecord): string {
   gap: 8px;
 
   .spacer { flex: 1; }
-}
 
-.billing {
-  border-top: 1px dashed var(--el-border-color);
-  --el-collapse-border-color: transparent;
-  --el-collapse-header-height: 40px;
-
-  .billingTitle {
+  // ACT: 状态标签与连接按钮并排；连接中转圈就地旋转。
+  .statusChip {
     display: inline-flex;
     align-items: center;
-    gap: 10px;
-    font-size: 13px;
-    color: var(--el-text-color-regular);
+    gap: 4px;
+  }
 
-    .billingTotal {
+  .spin { animation: blockSpin 0.9s linear infinite; }
+}
+
+@keyframes blockSpin {
+  to { transform: rotate(360deg); }
+}
+
+// ACT: 账单行：左侧本月费用（图标 + 金额），右侧账单明细链接（深链 Account → Billing）。
+.billingRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color);
+
+  .costText {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--el-text-color-secondary);
+
+    b {
       color: var(--el-color-warning);
-      font-weight: 600;
       font-variant-numeric: tabular-nums;
     }
   }
-}
 
-.billingTable {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
+  .billingLink {
+    margin-left: auto;
 
-  th, td {
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--el-border-color-lighter);
-    text-align: left;
-    color: var(--el-text-color-regular);
-  }
-
-  th {
-    color: var(--el-text-color-secondary);
-    font-weight: 500;
-  }
-
-  td.name { color: var(--el-text-color-primary); font-weight: 500; }
-  td.none { color: var(--el-text-color-secondary); text-align: center; padding: 16px; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-
-  tfoot td {
-    border-bottom: 0;
-    color: var(--el-text-color-primary);
-    font-weight: 600;
+    :deep(span) { display: inline-flex; align-items: center; gap: 2px; }
   }
 }
 </style>

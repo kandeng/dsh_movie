@@ -102,18 +102,26 @@ function load(key: string): ProviderRecord[] {
       const spec = providerTypeSpec(row.providerType);
       if (spec !== undefined) row.fields = adoptFields(spec, row);
     }
+    // ACT: 历史存档迁移可能产生同 id 行（如 ent-llm 改名 bailian 与已存种子行
+    // 相撞）：按 id 保留首现、丢弃后续同 id 行，消除 Vue key 冲突与同名双块。
+    const seenIds = new Set<string>();
+    const rows = parsed.filter((row) => {
+      if (seenIds.has(row.id)) return false;
+      seenIds.add(row.id);
+      return true;
+    });
     // Merge seeds for ids the stored copy lacks (catalog grew between phases);
     // ACT: 已存记录按种子同步 demo 标记（旧存档无该字段）。
     const seeds = seedProviders();
     for (const seed of seeds) {
-      const stored = parsed.find((row) => row.id === seed.id);
+      const stored = rows.find((row) => row.id === seed.id);
       if (stored === undefined) {
-        parsed.push(seed);
+        rows.push(seed);
         continue;
       }
       if (seed.demo === true) stored.demo = true;
     }
-    return parsed.map((row) => ({ ...row, status: row.status === "connecting" ? "disconnected" : row.status }));
+    return rows.map((row) => ({ ...row, status: row.status === "connecting" ? "disconnected" : row.status }));
   } catch {
     return seedProviders();
   }

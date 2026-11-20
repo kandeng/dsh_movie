@@ -3525,6 +3525,8 @@
   "端点地址": "Endpoint URL",
   "断开": "Disconnect",
   "账单明细（本月）": "Billing details (this month)",
+  "账单明细": "Billing details",
+  "无账单记录": "No billing records",
   "资源": "Resource",
   "类型": "Type",
   "单价": "Unit price",
