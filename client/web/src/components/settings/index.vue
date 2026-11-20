@@ -1,6 +1,6 @@
 <!-- ACT: 设置整页（对齐 Account / Supply 页布局）：左侧双倍加深菜单栏（外观 / 问题，
      无图标）+ 右侧扁平主面板。菜单栏仅两个条目：外观保留完整 ui 面板，
-     问题为占位段落（GitHub 式问题面板待讨论后实现）。 -->
+     问题为 GitHub 式 Issue 列表面板（公开仓库直连 + 不可达降级引导）。 -->
 <template>
   <div class="settings">
     <aside class="sidebar" aria-label="设置分类">
@@ -27,7 +27,7 @@
 
         <section v-else class="settingsSection" aria-labelledby="issuesTitle">
           <h2 id="issuesTitle">{{ translate("问题") }}</h2>
-          <p class="sectionEmpty">{{ translate("问题功能即将上线，敬请期待。") }}</p>
+          <issuesPanel />
         </section>
       </div>
     </section>
@@ -38,6 +38,7 @@
 import { ref } from "vue";
 import { translate } from "@dsh-movie/i18n/vue";
 import uiPanel from "./panels/ui.vue";
+import issuesPanel from "./panels/issues.vue";
 
 type SectionId = "appearance" | "issues";
 
@@ -145,13 +146,6 @@ const activeSection = ref<SectionId>("appearance");
     margin: 0 0 16px;
     font-size: 18px;
     font-weight: 600;
-  }
-
-  .sectionEmpty {
-    margin: 0;
-    color: var(--el-text-color-secondary);
-    font-size: 13px;
-    line-height: 1.7;
   }
 }
 </style>
