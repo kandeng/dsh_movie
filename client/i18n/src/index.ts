@@ -44,9 +44,14 @@ const formatters = new Map<string, IntlMessageFormat>();
 export function normalizeLocale(value: unknown): Locale | undefined {
   if (typeof value !== "string") return;
   let language: Intl.Locale;
-  try { language = new Intl.Locale(value.trim().replaceAll("_", "-")); }
+  let script: string | undefined;
+  // ACT: maximize() 对结构合法但 CLDR 未知的语言标签（如哨兵值 "system"）抛
+  // RangeError，必须与构造函数同处一个 try，否则存储的 "system" 会炸掉调用方 computed。
+  try {
+    language = new Intl.Locale(value.trim().replaceAll("_", "-"));
+    script = language.maximize().script;
+  }
   catch { return; }
-  const script = language.maximize().script;
   if (language.language === "zh") {
     if (script === "Hans") return "zh-CN";
     if (script === "Hant") return "zh-TW";

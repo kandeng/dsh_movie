@@ -879,6 +879,8 @@
   "解压文件超过允许大小": "Arşivden çıkarılan dosya izin verilen boyutu aşıyor",
   "解组": "Grubu çöz",
   "界面设置": "Görünüm",
+  "问题": "Sorunlar",
+  "问题功能即将上线，敬请期待。": "Sorunlar özelliği yakında geliyor. Takipte kalın.",
   "界面语言立即生效，默认跟随电脑语言。": "Arayüz dili hemen etkili olur ve varsayılan olarak bilgisayar dilini takip eder.",
   "界面圆角": "Arayüz yuvarlatılmış köşeler",
   "仅从当前 vidsay 服务的系统 PATH 查找 FFmpeg 与 ffprobe。": "FFmpeg ve ffprobe yalnızca mevcut vidsay hizmetinin sistem PATH değişkeninde aranır.",

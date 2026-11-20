@@ -879,6 +879,8 @@
   "解压文件超过允许大小": "File giải nén vượt quá kích thước cho phép",
   "解组": "Bỏ nhóm",
   "界面设置": "Giao diện",
+  "问题": "Vấn đề",
+  "问题功能即将上线，敬请期待。": "Tính năng Vấn đề sắp ra mắt, hãy chờ đón.",
   "界面语言立即生效，默认跟随电脑语言。": "Ngôn ngữ giao diện có hiệu lực ngay lập tức và mặc định theo ngôn ngữ máy tính.",
   "界面圆角": "Giao diện được bo tròn các góc",
   "仅从当前 vidsay 服务的系统 PATH 查找 FFmpeg 与 ffprobe。": "Chỉ tìm thấy FFmpeg và ffprobe từ PATH hệ thống của dịch vụ vidsay hiện tại.",

@@ -880,6 +880,8 @@
   "解压文件超过允许大小": "Ang na-decompress na file ay lumampas sa pinapayagang laki",
   "解组": "Alisin sa pangkat",
   "界面设置": "Hitsura",
+  "问题": "Mga Isyu",
+  "问题功能即将上线，敬请期待。": "Malapit nang dumating ang Mga Isyu. Abangan.",
   "界面语言立即生效，默认跟随电脑语言。": "Ang wika ng interface ay magkakabisa kaagad at sumusunod sa wika ng computer bilang default.",
   "界面圆角": "Interface bilugan na sulok",
   "仅从当前 vidsay 服务的系统 PATH 查找 FFmpeg 与 ffprobe。": "Hanapin ang FFmpeg at ffprobe sa system PATH lamang ng kapaligiran ng kasalukuyang serbisyong vidsay.",

@@ -9,8 +9,8 @@ import settingsCenter from "@/components/settings/index.vue";
 </template>
 
 <style scoped lang="scss">
+// ACT: 整页布局由设置组件自身接管（Account / Supply 同款网格），此处不再加内边距。
 .settingsPage {
   height: 100%;
-  padding: 16px;
 }
 </style>

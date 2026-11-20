@@ -866,6 +866,8 @@
   "解压文件超过允许大小": "The decompressed file exceeds the allowed size",
   "解组": "Ungroup",
   "界面设置": "Appearance",
+  "问题": "Issues",
+  "问题功能即将上线，敬请期待。": "The Issues panel is coming soon. Stay tuned.",
   "界面语言立即生效，默认跟随电脑语言。": "The interface language takes effect immediately and follows the computer language by default.",
   "界面圆角": "Interface rounded corners",
   "仅从当前 vidsay 服务的系统 PATH 查找 FFmpeg 与 ffprobe。": "Only finds FFmpeg and ffprobe from the system PATH of the current vidsay service.",

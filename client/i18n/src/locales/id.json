@@ -880,6 +880,8 @@
   "解压文件超过允许大小": "File yang didekompresi melebihi ukuran yang diizinkan",
   "解组": "Pisahkan grup",
   "界面设置": "Tampilan",
+  "问题": "Masalah",
+  "问题功能即将上线，敬请期待。": "Fitur Masalah segera hadir. Nantikan.",
   "界面语言立即生效，默认跟随电脑语言。": "Bahasa antarmuka segera berlaku dan mengikuti bahasa komputer secara default.",
   "界面圆角": "Sudut membulat antarmuka",
   "仅从当前 vidsay 服务的系统 PATH 查找 FFmpeg 与 ffprobe。": "Cari FFmpeg dan ffprobe hanya pada PATH sistem di lingkungan layanan vidsay saat ini.",
