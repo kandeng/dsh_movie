@@ -6,7 +6,7 @@
 // 地显示转圈。配置行按供应商类型的 schema 渲染各自的展示框（密钥字段行内眼睛
 // 切换）；无类型旧行保留旧三字段行。块内直接读写注册表中的同一对象引用
 // （乐观变更即时持久化）。编辑/删除上抛父页。
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { translate } from "@dsh-movie/i18n/vue";
 import {
@@ -50,6 +50,17 @@ function goBilling(): void {
   void router.push({ path: "/account", query: { section: "billing", provider: props.provider.id } });
 }
 
+// ACT: 已连接供应的可用模型名 chips（/supply-probe 真探回的 cards）：点击深链
+// Plugin 页模型卡（?category=models&model=<cardId>）；超过上限折叠，+N 展开。
+const MODEL_CHIP_LIMIT = 12;
+const expanded = ref(false);
+const modelCards = computed(() => props.provider.cards.filter((card) => card.kind === "models"));
+const shownModelCards = computed(() => (expanded.value ? modelCards.value : modelCards.value.slice(0, MODEL_CHIP_LIMIT)));
+const hiddenModelCount = computed(() => Math.max(0, modelCards.value.length - MODEL_CHIP_LIMIT));
+function goModel(cardId: string): void {
+  void router.push({ path: "/plugins", query: { category: "models", model: cardId } });
+}
+
 function statusLabel(status: ProviderRecord["status"]): string {
   if (status === "connected") return translate("已连接");
   if (status === "connecting") return translate("连接中");
@@ -90,9 +101,6 @@ function money(amount: number, currency: "CNY" | "USD" = "CNY"): string {
 }
 function providerCurrency(provider: ProviderRecord): "CNY" | "USD" {
   return provider.cards.find((card) => card.price !== null)?.price?.currency ?? "CNY";
-}
-function cardCountOf(provider: ProviderRecord, kind: string): number {
-  return provider.cards.filter((card) => card.kind === kind).length;
 }
 function costText(provider: ProviderRecord): string {
   return money(costOf(provider), providerCurrency(provider));
@@ -167,19 +175,24 @@ function memLabel(provider: ProviderRecord): string {
       {{ errorText(provider) }}
     </p>
 
-    <div class="chipRow">
-      <el-tag size="small" type="info" effect="plain">
-        {{ translate("模型") }} {{ cardCountOf(provider, "models") }}
-      </el-tag>
-      <el-tag size="small" type="info" effect="plain">
-        {{ translate("工具") }} {{ cardCountOf(provider, "tools") }}
-      </el-tag>
-      <el-tag size="small" type="info" effect="plain">
-        {{ translate("技能") }} {{ cardCountOf(provider, "skills") }}
-      </el-tag>
-      <el-tag size="small" type="info" effect="plain">
-        {{ translate("资产") }} {{ cardCountOf(provider, "assets") }}
-      </el-tag>
+    <!-- ACT: 可用模型名 chips：仅已连接且探回模型卡时展示；点击跳 Plugin 页对应模型卡。 -->
+    <div v-if="provider.status === 'connected' && modelCards.length > 0" class="modelNames">
+      <button
+        v-for="card in shownModelCards"
+        :key="card.id"
+        class="modelName"
+        type="button"
+        :title="card.name"
+        @click="goModel(card.id)">
+        {{ card.name }}
+      </button>
+      <button
+        v-if="hiddenModelCount > 0"
+        class="modelName more"
+        type="button"
+        @click="expanded = !expanded">
+        {{ expanded ? translate("收起") : `+${hiddenModelCount}` }}
+      </button>
     </div>
 
     <footer class="blockActions">
@@ -330,10 +343,34 @@ function memLabel(provider: ProviderRecord): string {
   font-size: 12px;
 }
 
-.chipRow {
+// ACT: 模型名 chips：圆角胶囊按钮，悬停主色提示可点击（跳 Plugin 页）。
+.modelNames {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+
+  .modelName {
+    max-width: 100%;
+    padding: 3px 10px;
+    border: 1px solid var(--el-border-color-light);
+    border-radius: 999px;
+    background: var(--el-fill-color-light);
+    color: var(--el-text-color-regular);
+    font: inherit;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+    transition: border-color 0.18s, color 0.18s, background-color 0.18s;
+
+    &:hover {
+      border-color: var(--el-color-primary);
+      background: var(--el-color-primary-light-9);
+      color: var(--el-color-primary);
+    }
+    &:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 1px; }
+
+    &.more { border-style: dashed; color: var(--el-text-color-secondary); }
+  }
 }
 
 .blockActions {

@@ -4,7 +4,7 @@
 // 启用开关/安装·卸载；技能卡：标题/描述/目标 chip/来源工具/版本/许可/警告徽章，
 // pick-mode 下出现「选择」按钮（D7 mode-1 触发）。顶部一次性社区内容警告横幅（D8）。
 // 访客只读：安装/卸载/启用/举报/确认均为主机动作（D6/D2），由 useRoomRole.isHost 网关。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { translate } from "@dsh-movie/i18n/vue";
 import {
@@ -120,6 +120,7 @@ onMounted(async () => {
   await bootstrap();
   await refresh();
   if (activeCategory.value === "skills" || pickMode.value) await runSearch();
+  focusModelFromQuery();
 });
 
 async function refresh(): Promise<void> {
@@ -392,6 +393,26 @@ const modelQuery = ref("");
 const modelModality = ref<"all" | Modality>("all");
 const assetQuery = ref("");
 const assetModality = ref<"all" | Modality>("all");
+
+// ACT: 供应卡模型名深链（/plugins?category=models&model=<cardId>）：重置筛选保证
+// 目标卡可见，滚动到视口中央并短暂高亮； Supply 页点击模型名 chip 跳入。
+function focusModelFromQuery(): void {
+  const id = typeof route.query.model === "string" ? route.query.model : "";
+  if (id === "") return;
+  activeCategory.value = "models";
+  modelQuery.value = "";
+  modelModality.value = "all";
+  void nextTick(() => {
+    const el = document.querySelector<HTMLElement>(`[data-model-id="${CSS.escape(id)}"]`);
+    if (el === null) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.add("deepLinked");
+    window.setTimeout(() => el.classList.remove("deepLinked"), 1800);
+  });
+}
+watch(() => route.query.model, (value) => {
+  if (typeof value === "string" && value !== "") focusModelFromQuery();
+});
 
 const MODEL_MODALITIES: ReadonlyArray<{ id: "all" | Modality; label: string }> = [
   { id: "all", label: "全部" },
@@ -714,7 +735,7 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
         </div>
         <div v-if="visibleModels.length === 0" class="empty">{{ translate("无匹配模型") }}</div>
         <div v-else class="masonry">
-          <article v-for="row in visibleModels" :key="row.provider.id + ':' + row.card.id" class="card">
+          <article v-for="row in visibleModels" :key="row.provider.id + ':' + row.card.id" class="card" :data-model-id="row.card.id">
             <header class="cardHead">
               <span class="cardTitle">{{ row.card.name }}</span>
               <el-tag size="small" :type="stateType(registry.cardState(row))" effect="plain">
@@ -1277,6 +1298,18 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
 .masonry {
   column-width: 320px;
   column-gap: 20px;
+}
+
+// ACT: 供应卡模型名深链高亮：主色描边 + 一次性背景淡出（1.8s 后移除类）。
+.card.deepLinked {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 3px;
+  animation: deepLinkFade 1.8s ease-out;
+}
+
+@keyframes deepLinkFade {
+  0% { background-color: var(--el-color-primary-light-9); }
+  100% { background-color: transparent; }
 }
 
 .card {
