@@ -19,6 +19,9 @@
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import {
   seedProviders,
+  adoptFields,
+  inferProviderType,
+  providerTypeSpec,
   type CardKind,
   type CardPrice,
   type InfoPayload,
@@ -89,6 +92,16 @@ function load(key: string): ProviderRecord[] {
         if (row.apiKey === "ent-proxy-key") row.apiKey = "";
       }
     }
+    // ACT: Phase-10.2 迁移：无类型旧行升级为六类供应商之一（种子 id / comfy / llm），
+    // 并按 schema 生成 fields（旧 baseUrl/apiKey 列回填，密钥与地址不丢失）；
+    // mcp/skills/assets 旧行保持无类型（旧三字段网格 + 旧握手）。
+    for (const row of parsed) {
+      if (row.demo === true || row.providerType !== undefined) continue;
+      if (row.id !== "bailian" && row.id !== "local-comfy" && row.kind !== "comfy" && row.kind !== "llm") continue;
+      row.providerType = inferProviderType(row);
+      const spec = providerTypeSpec(row.providerType);
+      if (spec !== undefined) row.fields = adoptFields(spec, row);
+    }
     // Merge seeds for ids the stored copy lacks (catalog grew between phases);
     // ACT: 已存记录按种子同步 demo 标记（旧存档无该字段）。
     const seeds = seedProviders();
@@ -108,8 +121,8 @@ function load(key: string): ProviderRecord[] {
 
 /**
  * ACT: env 驱动接入（百炼 / 本机 ComfyUI）的输入项以 server/.env 为真源：开发桥
- * /supply-env 返回 .env 中的密钥与端点，这里回填到对应接入的输入字段（仅在字段为
- * 空或仍为旧占位值时回填，尊重用户手工修改）。回填后的字段值即连接握手所用信息。
+ * /supply-env 返回 .env 中的密钥与真实上游地址，这里回填到对应接入的类型字段
+ * （仅在字段为空时回填，尊重用户手工修改）。回填后的字段值即连接握手所用信息。
  */
 async function applyEnvDefaults(): Promise<void> {
   if (storageKey === null) return;
@@ -122,23 +135,22 @@ async function applyEnvDefaults(): Promise<void> {
       comfyBaseUrl?: string;
     };
     for (const provider of providers.value) {
-      if (provider.id === "bailian") {
-        if (provider.apiKey.trim() === "" && typeof env.bailianApiKey === "string" && env.bailianApiKey !== "") {
-          provider.apiKey = env.bailianApiKey;
+      if (provider.fields === undefined) continue;
+      if (provider.providerType === "bailian") {
+        if (provider.fields["apiKey"] === "" && typeof env.bailianApiKey === "string" && env.bailianApiKey !== "") {
+          provider.fields["apiKey"] = env.bailianApiKey;
         }
-        if (
-          typeof env.bailianBaseUrl === "string" && env.bailianBaseUrl !== ""
-          && (provider.baseUrl.trim() === "" || provider.baseUrl === "/provider-demo/llm")
-        ) {
-          provider.baseUrl = env.bailianBaseUrl;
+        if (provider.fields["baseUrl"] === "" && typeof env.bailianBaseUrl === "string" && env.bailianBaseUrl !== "") {
+          provider.fields["baseUrl"] = env.bailianBaseUrl;
         }
+        provider.baseUrl = provider.fields["baseUrl"];
+        provider.apiKey = provider.fields["apiKey"];
       }
-      if (
-        provider.id === "local-comfy"
-        && typeof env.comfyBaseUrl === "string" && env.comfyBaseUrl !== ""
-        && provider.baseUrl.trim() === ""
-      ) {
-        provider.baseUrl = env.comfyBaseUrl;
+      if (provider.providerType === "local-comfy") {
+        if (provider.fields["baseUrl"] === "" && typeof env.comfyBaseUrl === "string" && env.comfyBaseUrl !== "") {
+          provider.fields["baseUrl"] = env.comfyBaseUrl;
+        }
+        provider.baseUrl = provider.fields["baseUrl"];
       }
     }
   } catch {
@@ -304,13 +316,31 @@ export function useProviders(): ProvidersHandle {
     if (provider === undefined || provider.status === "connecting") return;
     provider.status = "connecting";
     provider.error = null;
-    const base = provider.baseUrl.trim().replace(/\/+$/, "");
     try {
-      const headers: Record<string, string> = {};
-      if (provider.apiKey.trim() !== "") headers["Authorization"] = `Bearer ${provider.apiKey.trim()}`;
-      const res = await fetch(`${base}/info`, { headers, signal: AbortSignal.timeout(8000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const payload = readPayload(await res.json());
+      let payload: InfoPayload;
+      if (provider.providerType !== undefined) {
+        // ACT: 类型化接入：把字段所填信息交给同源桥 /supply-probe，由桥按供应商类型
+        // 真实访问对应平台（百炼/火山/Anthropic/OpenAI 模型列表，ComfyUI 引擎状态）；
+        // 上游错误原样透传，绝不伪造卡片。
+        const res = await fetch("/supply-probe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+          body: JSON.stringify({ type: provider.providerType, fields: provider.fields ?? {} }),
+          signal: AbortSignal.timeout(12000),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(typeof body?.error === "string" && body.error !== "" ? body.error : `HTTP ${res.status}`);
+        }
+        payload = readPayload(await res.json());
+      } else {
+        const base = provider.baseUrl.trim().replace(/\/+$/, "");
+        const headers: Record<string, string> = {};
+        if (provider.apiKey.trim() !== "") headers["Authorization"] = `Bearer ${provider.apiKey.trim()}`;
+        const res = await fetch(`${base}/info`, { headers, signal: AbortSignal.timeout(8000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        payload = readPayload(await res.json());
+      }
       provider.cards = payload.cards;
       // Keep recorded usage; seed counts for cards newly appeared in /info.
       const usage: Record<string, number> = { ...provider.usage };

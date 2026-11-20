@@ -3454,5 +3454,7 @@
   "供应模型": "Modelo",
   "供应工具": "Kasangkapan",
   "供应技能": "Kasanayan",
-  "供应资产": "Asset"
+  "供应资产": "Asset",
+  "缺少 API 密钥": "Kulang ang API key",
+  "缺少端点地址": "Kulang ang URL ng endpoint"
 }

@@ -1,29 +1,31 @@
 <script setup lang="ts">
-// ACT: 供应面板（Phase-10.1：Supply 页主面板）。只展示“接入与账单”级联
-// （配置 → 连接/状态 → 折叠账单）：Model 类别即百炼平台与本机 ComfyUI 两个 env 驱动
-// 真实接入（输入字段以 server/.env 为真源回填，连接握手用字段所填信息真实访问平台）；
-// 资源卡片仅供给 Plugin 子页，不再在此陈列。演示目录源（demo 标记）不列为接入块。
-// 数据按用户隔离（useProviders.loadFor）；删除可撤销（底部撤销条）。
+// ACT: 供应面板（Phase-10.2：Supply 页主面板）。只展示“接入与账单”级联
+// （配置 → 连接/状态 → 折叠账单）：添加供应的“种类”级联出六类 AI 供应商
+// （Bailian → Volcano → Anthropic → OpenAI → Remote ComfyUI → Local ComfyUI），
+// 每类的输入文本框随类型切换（各平台预先需要知道的变量/参数不同）；连接握手
+// 用字段所填信息经同源桥真实访问对应平台。资源卡片仅供给 Plugin 子页；
+// 演示目录源（demo 标记）不列为接入块。数据按用户隔离；删除可撤销。
 import { computed, onBeforeUnmount, ref } from "vue";
 import { translate } from "@dsh-movie/i18n/vue";
 import { IconPlus, IconSearch } from "@tabler/icons-vue";
 import {
   useProviders,
-  PROVIDER_KIND_LABEL,
   type ProviderSnapshot,
 } from "@/composables/useProviders";
-import type { CardKind, ProviderKind, ProviderRecord } from "@/lib/providerCatalog";
+import {
+  PROVIDER_TYPES,
+  adoptFields,
+  defaultFieldsOf,
+  inferProviderType,
+  providerTypeSpec,
+  type ProviderType,
+} from "@/lib/providerCatalog";
+import type { CardKind, ProviderRecord } from "@/lib/providerCatalog";
 import SupplyBlock from "./SupplyBlock.vue";
 
 const props = defineProps<{ category: "all" | CardKind }>();
 
 const registry = useProviders();
-
-// ACT: 种类选项数组（编辑对话框 v-for 用数组源）。
-const KIND_OPTIONS = (Object.keys(PROVIDER_KIND_LABEL) as ProviderKind[]).map((kind) => ({
-  kind,
-  label: PROVIDER_KIND_LABEL[kind],
-}));
 
 // ACT: 工具栏：搜索 / 排序（名称·本月费用·状态）。类别过滤来自账户页左菜单。
 const query = ref("");
@@ -42,7 +44,9 @@ const visibleProviders = computed(() => {
   const q = query.value.trim().toLowerCase();
   const rows = registry.providers.value.filter((row) => {
     if (row.demo === true) return false;
-    if (props.category !== "all" && !row.cards.some((card) => card.kind === props.category)) return false;
+    // ACT: 尚无任何卡片的新增接入在每个类别页都列出（否则添加后不可见、
+    // 无法连接）；已有卡片后仍按类别归属过滤。
+    if (props.category !== "all" && row.cards.length > 0 && !row.cards.some((card) => card.kind === props.category)) return false;
     if (q === "") return true;
     return row.name.toLowerCase().includes(q) || row.baseUrl.toLowerCase().includes(q);
   });
@@ -68,62 +72,68 @@ function totalCostText(): string {
   return money(managed.value.reduce((sum, row) => sum + registry.costOf(row), 0));
 }
 
-// ACT: 新增 / 编辑对话框。编辑保留 id 与已记录用量；新增从空目录开始。
+// ACT: 新增 / 编辑对话框（Phase-10.2 重实现）：种类下拉级联六类 AI 供应商，
+// 输入文本框随类型切换（schema 见 PROVIDER_TYPES）；编辑保留 id 与已记录用量。
 const editVisible = ref(false);
 const editId = ref<string | null>(null);
 const editName = ref("");
-const editKind = ref<ProviderKind>("comfy");
-const editBase = ref("");
-const editKey = ref("");
-const editPassword = ref("");
+const editType = ref<ProviderType>("bailian");
+const editFields = ref<Record<string, string>>({});
+
+const editSpec = computed(() => providerTypeSpec(editType.value) ?? PROVIDER_TYPES[0]!);
+// ACT: 保存门槛：名称 + 该类型的必填字段（如 API Key / Base URL / Endpoint ID）均非空。
+const canSave = computed(() => {
+  if (editName.value.trim() === "") return false;
+  return editSpec.value.fields.every(
+    (field) => field.required !== true || (editFields.value[field.key] ?? "").trim() !== "",
+  );
+});
 
 function openAdd(): void {
   editId.value = null;
   editName.value = "";
-  editKind.value = "comfy";
-  editBase.value = "";
-  editKey.value = "";
-  editPassword.value = "";
+  editType.value = "bailian";
+  editFields.value = defaultFieldsOf(PROVIDER_TYPES[0]!);
   editVisible.value = true;
 }
 function openEdit(provider: ProviderRecord): void {
   editId.value = provider.id;
   editName.value = provider.name;
-  editKind.value = provider.kind;
-  editBase.value = provider.baseUrl;
-  editKey.value = provider.apiKey;
-  editPassword.value = provider.password;
+  const type = provider.providerType ?? inferProviderType(provider);
+  editType.value = type;
+  const spec = providerTypeSpec(type) ?? PROVIDER_TYPES[0]!;
+  editFields.value = adoptFields(spec, provider);
   editVisible.value = true;
 }
+// ACT: 切换种类：输入框组整体换为该类型的 schema 默认值（名称保留）。
+function changeType(type: ProviderType): void {
+  editType.value = type;
+  const spec = providerTypeSpec(type) ?? PROVIDER_TYPES[0]!;
+  editFields.value = defaultFieldsOf(spec);
+}
 function submitEdit(): void {
-  const name = editName.value.trim();
-  const base = editBase.value.trim();
-  if (name === "" || base === "") return;
+  if (!canSave.value) return;
+  const spec = editSpec.value;
+  const fields: Record<string, string> = {};
+  for (const field of spec.fields) fields[field.key] = (editFields.value[field.key] ?? "").trim();
   const existing = editId.value === null ? undefined : registry.byId(editId.value);
-  const record: ProviderRecord = existing === undefined
-    ? {
-        id: `p-${Date.now().toString(36)}`,
-        name,
-        kind: editKind.value,
-        baseUrl: base,
-        apiKey: editKey.value.trim(),
-        password: editPassword.value,
-        status: "disconnected",
-        error: null,
-        connectedAt: null,
-        cards: [],
-        usage: {},
-      }
-    : {
-        ...existing,
-        name,
-        kind: editKind.value,
-        baseUrl: base,
-        apiKey: editKey.value.trim(),
-        password: editPassword.value,
-        status: "disconnected",
-        error: null,
-      };
+  const record: ProviderRecord = {
+    id: existing?.id ?? `p-${Date.now().toString(36)}`,
+    name: editName.value.trim(),
+    kind: spec.kind,
+    providerType: spec.type,
+    fields,
+    // ACT: 镜像列（搜索/旧握手兼容）：取字段中的地址与密钥。
+    baseUrl: fields["baseUrl"] ?? "",
+    apiKey: fields["apiKey"] ?? fields["token"] ?? "",
+    password: existing?.password ?? "",
+    status: "disconnected",
+    error: null,
+    connectedAt: null,
+    cards: existing?.cards ?? [],
+    usage: existing?.usage ?? {},
+    ...(existing?.engine === undefined ? {} : { engine: existing.engine }),
+  };
   registry.save(record);
   editVisible.value = false;
 }
@@ -191,38 +201,43 @@ onBeforeUnmount(() => {
       @edit="openEdit"
       @delete="deleteProvider" />
 
-    <!-- ACT: 新增/编辑供应对话框。 -->
+    <!-- ACT: 新增/编辑供应对话框（Phase-10.2）：种类级联六类 AI 供应商，
+         输入文本框随类型切换；必填字段带 * 且未填时保存禁用。 -->
     <el-dialog
       v-model="editVisible"
       :title="editId === null ? translate('添加供应') : translate('编辑')"
-      width="480px">
+      width="520px"
+      class="supplyDialog">
       <el-form label-position="top">
         <el-form-item :label="translate('名称')">
           <el-input v-model="editName" :placeholder="translate('名称')" />
         </el-form-item>
         <el-form-item :label="translate('种类')">
-          <el-select v-model="editKind" class="fullWidth">
+          <el-select :model-value="editType" class="fullWidth" @update:model-value="changeType">
             <el-option
-              v-for="option in KIND_OPTIONS" :key="option.kind"
-              :label="translate(option.label)" :value="option.kind" />
+              v-for="spec in PROVIDER_TYPES" :key="spec.type"
+              :label="spec.label" :value="spec.type" />
           </el-select>
         </el-form-item>
-        <el-form-item :label="translate('端点地址')">
-          <el-input v-model="editBase" placeholder="https://gpu.internal.example.com" />
-        </el-form-item>
-        <el-form-item label="apiKey">
-          <el-input v-model="editKey" type="password" show-password placeholder="Bearer token" />
-        </el-form-item>
-        <el-form-item :label="translate('密码')">
-          <el-input v-model="editPassword" type="password" show-password :placeholder="translate('可选')" />
+        <el-form-item
+          v-for="field in editSpec.fields" :key="field.key"
+          :label="field.label" :required="field.required === true">
+          <el-input
+            v-if="field.textarea === true"
+            v-model="editFields[field.key]"
+            type="textarea" :rows="3"
+            :placeholder="field.placeholder" />
+          <el-input
+            v-else
+            v-model="editFields[field.key]"
+            :type="field.secret === true ? 'password' : 'text'"
+            :show-password="field.secret === true"
+            :placeholder="field.placeholder" />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">{{ translate("取消") }}</el-button>
-        <el-button
-          type="primary"
-          :disabled="editName.trim() === '' || editBase.trim() === ''"
-          @click="submitEdit">
+        <el-button type="primary" :disabled="!canSave" @click="submitEdit">
           {{ translate("保存") }}
         </el-button>
       </template>
@@ -345,4 +360,10 @@ onBeforeUnmount(() => {
 .undoFade-leave-to { opacity: 0; transform: translateX(-50%) translateY(8px); }
 
 .fullWidth { width: 100%; }
+
+// ACT: 对话框在窄屏（手机）下不超出视口：Element Plus 的 width 属性为固定值，
+// 这里用媒体查询兼盖为视口宽度减边距。
+@media (max-width: 560px) {
+  :global(.supplyDialog) { width: calc(100vw - 32px) !important; }
+}
 </style>

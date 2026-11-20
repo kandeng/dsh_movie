@@ -78,6 +78,177 @@ export interface ProviderRecord {
    * （Supply 页只展示 env 驱动的真实接入与用户自添接入）。
    */
   demo?: boolean;
+  /**
+   * ACT: AI 供应商类型（Phase-10.2 添加供应级联）：种类下拉级联出六类供应商，
+   * 每类拥有各自的输入字段 schema（PROVIDER_TYPES）。undefined = 旧版接入行
+   * （保留旧三字段网格与 GET <base>/info 握手）。
+   */
+  providerType?: ProviderType;
+  /** ACT: 按类型的输入字段值（连接握手用字段所填信息真实访问对应平台）。 */
+  fields?: Record<string, string>;
+}
+
+/**
+ * ACT: 六类 AI 供应商（Phase-10.2）：添加供应的“种类”级联顺序即
+ * Bailian → Volcano → Anthropic → OpenAI → Remote ComfyUI → Local ComfyUI。
+ * 各平台预先需要知道的变量/参数不同，故每类携带自己的字段 schema：
+ * - Bailian：API Key、Base URL、Workspace ID、Region ID、App ID；
+ * - Volcano（火山方舟）：API Key、Base URL、Endpoint ID（ep-xxxx）、Region ID、Project ID；
+ * - Anthropic：API Key、Base URL、anthropic-version 头、Organization ID；
+ * - OpenAI：API Key、Base URL、Organization ID；
+ * - Remote ComfyUI：Base URL、API Token、Client ID、Workflow JSON；
+ * - Local ComfyUI：Base URL、API Token、Client ID。
+ * label / placeholder 全为 ASCII 技术词，无需 i18n 目录条目。
+ */
+export type ProviderType =
+  | "bailian"
+  | "volcano"
+  | "anthropic"
+  | "openai"
+  | "remote-comfy"
+  | "local-comfy";
+
+/** One input textbox of a provider-type form. */
+export interface ProviderFieldSpec {
+  /** Storage key inside ProviderRecord.fields. */
+  key: string;
+  /** Field label (ASCII technical term, rendered as-is). */
+  label: string;
+  /** Placeholder hint (ASCII, rendered as-is). */
+  placeholder: string;
+  /** Prefilled value when the type is picked in the Add dialog. */
+  default?: string;
+  /** Render as a password input with show/hide toggle. */
+  secret?: boolean;
+  /** Save is blocked while empty. */
+  required?: boolean;
+  /** Render as a multi-line textarea. */
+  textarea?: boolean;
+}
+
+/** A provider type: cascade label, underlying resource kind, field schema. */
+export interface ProviderTypeSpec {
+  type: ProviderType;
+  label: string;
+  kind: ProviderKind;
+  fields: ProviderFieldSpec[];
+}
+
+/** ACT: 种类级联源（顺序即需求顺序）与每类输入框 schema。 */
+export const PROVIDER_TYPES: ProviderTypeSpec[] = [
+  {
+    type: "bailian",
+    label: "Bailian",
+    kind: "llm",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "sk-xxx (DASHSCOPE_API_KEY)", secret: true, required: true },
+      { key: "baseUrl", label: "Base URL", placeholder: "https://dashscope.aliyuncs.com", default: "https://dashscope.aliyuncs.com", required: true },
+      { key: "workspaceId", label: "Workspace ID", placeholder: "workspace-scoped listing / private deployments" },
+      { key: "regionId", label: "Region ID", placeholder: "cn-beijing, ap-southeast-1 (optional)" },
+      { key: "appId", label: "App ID", placeholder: "optional, for pre-built Bailian agent apps" },
+    ],
+  },
+  {
+    type: "volcano",
+    label: "Volcano",
+    kind: "llm",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "ARK_API_KEY", secret: true, required: true },
+      { key: "baseUrl", label: "Base URL", placeholder: "https://ark.cn-beijing.volces.com/api/v3", default: "https://ark.cn-beijing.volces.com/api/v3", required: true },
+      { key: "endpointId", label: "Endpoint ID", placeholder: "ep-xxxx (Ark calls endpoints, not raw models)", required: true },
+      { key: "regionId", label: "Region ID", placeholder: "cn-beijing" },
+      { key: "projectId", label: "Project ID", placeholder: "optional, IAM permission control" },
+    ],
+  },
+  {
+    type: "anthropic",
+    label: "Anthropic",
+    kind: "llm",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "sk-ant-xxx (x-api-key header)", secret: true, required: true },
+      { key: "baseUrl", label: "Base URL", placeholder: "https://api.anthropic.com", default: "https://api.anthropic.com", required: true },
+      { key: "apiVersion", label: "anthropic-version", placeholder: "2023-06-01", default: "2023-06-01", required: true },
+      { key: "orgId", label: "Organization ID", placeholder: "optional" },
+    ],
+  },
+  {
+    type: "openai",
+    label: "OpenAI",
+    kind: "llm",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "sk-xxx (Bearer)", secret: true, required: true },
+      { key: "baseUrl", label: "Base URL", placeholder: "https://api.openai.com/v1", default: "https://api.openai.com/v1", required: true },
+      { key: "orgId", label: "Organization ID", placeholder: "optional, OpenAI-Organization header" },
+    ],
+  },
+  {
+    type: "remote-comfy",
+    label: "Remote ComfyUI",
+    kind: "comfy",
+    fields: [
+      { key: "baseUrl", label: "Base URL", placeholder: "http://10.0.0.10:8188 or HTTPS proxy", required: true },
+      { key: "token", label: "API Token", placeholder: "optional, --comfy-api-key protection", secret: true },
+      { key: "clientId", label: "Client ID", placeholder: "optional, WS status stream (auto if empty)" },
+      { key: "workflowJson", label: "Workflow JSON", placeholder: "optional, graph submitted to /api/prompt", textarea: true },
+    ],
+  },
+  {
+    type: "local-comfy",
+    label: "Local ComfyUI",
+    kind: "comfy",
+    fields: [
+      { key: "baseUrl", label: "Base URL", placeholder: "http://127.0.0.1:8188", default: "http://127.0.0.1:8188", required: true },
+      { key: "token", label: "API Token", placeholder: "optional, --comfy-api-key protection", secret: true },
+      { key: "clientId", label: "Client ID", placeholder: "optional, WS status stream (auto if empty)" },
+    ],
+  },
+];
+
+/** Look up one provider-type spec; undefined for legacy/unknown types. */
+export function providerTypeSpec(type: string | undefined): ProviderTypeSpec | undefined {
+  if (type === undefined) return undefined;
+  return PROVIDER_TYPES.find((spec) => spec.type === type);
+}
+
+/** Fresh field values of one type: schema defaults, rest empty. */
+export function defaultFieldsOf(spec: ProviderTypeSpec): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const field of spec.fields) out[field.key] = field.default ?? "";
+  return out;
+}
+
+/**
+ * ACT: 旧记录/旧列 → 类型字段迁移：保留已存 fields，空字段从旧 baseUrl/apiKey 列
+ * 回填（仅 http(s) 地址与非空密钥），保证升级后密钥与地址不丢失。
+ */
+export function adoptFields(
+  spec: ProviderTypeSpec,
+  row: { baseUrl: string; apiKey: string; fields?: Record<string, string> },
+): Record<string, string> {
+  const out = defaultFieldsOf(spec);
+  const stored = row.fields ?? {};
+  for (const field of spec.fields) {
+    const value = stored[field.key];
+    if (typeof value === "string") out[field.key] = value;
+  }
+  for (const field of spec.fields) {
+    if (out[field.key] !== "") continue;
+    if ((field.key === "apiKey" || field.key === "token") && row.apiKey.trim() !== "") out[field.key] = row.apiKey;
+    else if (field.key === "baseUrl" && /^https?:\/\//.test(row.baseUrl)) out[field.key] = row.baseUrl;
+  }
+  return out;
+}
+
+/**
+ * ACT: 为无类型旧行推断供应商类型：种子 id 优先；comfy → 远程 ComfyUI；
+ * llm → 百炼（本应用唯一已接线的大模型平台）；其余旧种类（mcp/skills/assets）
+ * 保持无类型（旧三字段网格 + 旧握手）不受影响。
+ */
+export function inferProviderType(row: { id: string; kind: ProviderKind }): ProviderType {
+  if (row.id === "bailian") return "bailian";
+  if (row.id === "local-comfy") return "local-comfy";
+  if (row.kind === "comfy") return "remote-comfy";
+  return "bailian";
 }
 
 /* ── thumbnails: crafted inline SVG, palette-consistent, node-safe ───────── */
@@ -410,14 +581,24 @@ export function seedProviders(): ProviderRecord[] {
   return [
     // ACT: 本机 ComfyUI：端点为同源桥 /local-comfy（桥上游地址取自 server/.env 的
     // COMFYUI_BASE_URL）；连接握手用字段所填信息真实访问本机引擎。
-    mk("local-comfy", "本机 ComfyUI GPU", "comfy", "/local-comfy", {
-      cards: LOCAL_COMFY_CARDS,
-      usage: { "sd15-fp16": 12, "ltxv-2b-local": 0 },
-    }),
+    {
+      ...mk("local-comfy", "本机 ComfyUI GPU", "comfy", "/local-comfy", {
+        cards: LOCAL_COMFY_CARDS,
+        usage: { "sd15-fp16": 12, "ltxv-2b-local": 0 },
+      }),
+      // ACT: 类型化字段：Base URL 留空待 /supply-env 以 .env 的 COMFYUI_BASE_URL 回填。
+      providerType: "local-comfy" as ProviderType,
+      fields: { baseUrl: "", token: "", clientId: "" },
+    },
     // ACT: 百炼平台接入（env 驱动）：端点为同源桥 /bailian，apiKey 由 server/.env 的
     // BAILIAN_API_KEY 运行时回填（useProviders.applyEnvDefaults）；连接时桥以字段所填
     // 密钥真实调用 DashScope 兼容模式模型列表。种子目录为最后一次已知清单。
-    mk("bailian", "百炼平台", "llm", "/bailian", DEMO_CATALOG.llm!),
+    {
+      ...mk("bailian", "百炼平台", "llm", "/bailian", DEMO_CATALOG.llm!),
+      // ACT: 类型化字段：apiKey 留空待 /supply-env 以 .env 的 BAILIAN_API_KEY 回填。
+      providerType: "bailian" as ProviderType,
+      fields: { apiKey: "", baseUrl: "", workspaceId: "", regionId: "", appId: "" },
+    },
     // ACT: 以下为演示目录源：卡片继续供给 Plugin 子页，但不在 Supply 页列为接入块。
     { ...mk("ent-gpu", "企业 GPU 服务器 · 实验楼 B", "comfy", "/provider-demo/gpu", DEMO_CATALOG.gpu!, "ent-lab-b-2026"), demo: true },
     { ...mk("ent-mcp", "内网 MCP 工具服务器", "mcp", "/provider-demo/mcp", DEMO_CATALOG.mcp!), demo: true },

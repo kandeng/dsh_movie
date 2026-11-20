@@ -3455,5 +3455,7 @@
   "供应模型": "Model",
   "供应工具": "Araç",
   "供应技能": "Beceri",
-  "供应资产": "Varlık"
+  "供应资产": "Varlık",
+  "缺少 API 密钥": "API anahtarı eksik",
+  "缺少端点地址": "Uç nokta URL'si eksik"
 }

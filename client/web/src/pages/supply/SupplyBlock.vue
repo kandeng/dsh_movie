@@ -1,8 +1,9 @@
 <script setup lang="ts">
-// ACT: 供应级联块（Phase-9 提案 §3，Phase-10 移入账户页）：配置 → 连接按钮 + 状态标签 → 折叠账单明细。
-// 独立组件承载单块渲染：父页 v-for 仅传 prop，块内直接读写注册表中的同一对象引用
-// （乐观变更即时持久化）。编辑/删除上抛父页（对话框与撤销条在父页）。
-import { ref } from "vue";
+// ACT: 供应级联块（Phase-9 提案 §3，Phase-10 移入账户页，Phase-10.2 类型化字段）：
+// 配置 → 连接按钮 + 状态标签 → 折叠账单明细。配置网格按供应商类型的 schema
+// 渲染各自的输入文本框（无类型旧行保留旧三字段网格）。块内直接读写注册表
+// 中的同一对象引用（乐观变更即时持久化）。编辑/删除上抛父页。
+import { computed, ref } from "vue";
 import { translate } from "@dsh-movie/i18n/vue";
 import {
   IconPlug,
@@ -17,10 +18,25 @@ import {
   IconBox,
 } from "@tabler/icons-vue";
 import { useProviders, PROVIDER_KIND_LABEL, PRICE_UNIT_LABEL } from "@/composables/useProviders";
+import { providerTypeSpec } from "@/lib/providerCatalog";
 import type { ProviderKind, ProviderRecord } from "@/lib/providerCatalog";
 
 const props = defineProps<{ provider: ProviderRecord }>();
 const emit = defineEmits<{ edit: [provider: ProviderRecord]; delete: [provider: ProviderRecord] }>();
+
+// ACT: 供应商类型 schema：有类型 → 按字段组渲染配置网格；无 → 旧三字段网格。
+const spec = computed(() => providerTypeSpec(props.provider.providerType));
+const fieldValues = computed<Record<string, string>>(() => props.provider.fields ?? {});
+function setField(key: string, value: string): void {
+  if (props.provider.fields === undefined) props.provider.fields = {};
+  props.provider.fields[key] = value;
+}
+function badgeLabel(): string {
+  return spec.value?.label ?? PROVIDER_KIND_LABEL[props.provider.kind];
+}
+function badgeKind(): ProviderKind {
+  return spec.value?.kind ?? props.provider.kind;
+}
 
 // ACT: 解构为本地函数绑定：模板（含折叠面板插槽）只调用本地包装函数，
 // 避免 vue-tsc 对插槽/事件作用域内对象绑定的 ref 解包歧义。
@@ -49,6 +65,12 @@ function kindIcon(kind: ProviderKind) {
 }
 function errorText(provider: ProviderRecord): string {
   const raw = provider.error ?? "";
+  // ACT: 类型化握手的桥错误码：缺密钥 / 缺地址 / 引擎离线 / 上游状态码透传。
+  if (raw === "no-api-key") return translate("缺少 API 密钥");
+  if (raw === "no-base-url") return translate("缺少端点地址");
+  if (raw === "engine-offline") return translate("生成引擎离线或未暴露 /info 接口");
+  const upstream = /upstream-(\d{3})/.exec(raw);
+  if (upstream !== null) return `HTTP ${upstream[1]}`;
   if (raw.includes("503")) return translate("生成引擎离线或未暴露 /info 接口");
   if (raw.includes("Failed to fetch") || raw.includes("NetworkError")) {
     return translate("无法访问该地址（网络或跨域限制）");
@@ -96,9 +118,9 @@ function memLabel(provider: ProviderRecord): string {
 <template>
   <article class="providerBlock">
     <header class="blockHead">
-      <span class="kindBadge" :class="`kind-${provider.kind}`">
-        <component :is="kindIcon(provider.kind)" :size="15" aria-hidden="true" />
-        {{ translate(PROVIDER_KIND_LABEL[provider.kind]) }}
+      <span class="kindBadge" :class="`kind-${badgeKind()}`">
+        <component :is="kindIcon(badgeKind())" :size="15" aria-hidden="true" />
+        {{ badgeLabel() }}
       </span>
       <h3 class="blockTitle">{{ provider.name }}</h3>
       <el-tag size="small" :type="statusType(provider.status)" effect="dark">
@@ -111,7 +133,35 @@ function memLabel(provider: ProviderRecord): string {
       </span>
     </header>
 
-    <div class="configGrid">
+    <!-- ACT: 配置网格：类型化接入按 schema 渲染各自的输入文本框（密钥默认掩码，
+         显示/隐藏按钮统一切换）；无类型旧行保留旧三字段网格。 -->
+    <div v-if="spec !== undefined" class="configGrid">
+      <div
+        v-for="field in spec.fields" :key="field.key"
+        class="field" :class="{ fieldWide: field.textarea === true }">
+        <span class="fieldLabel">
+          {{ field.label }}<i v-if="field.required === true" class="req">*</i>
+        </span>
+        <el-input
+          v-if="field.textarea === true"
+          type="textarea" :rows="2"
+          :model-value="fieldValues[field.key] ?? ''"
+          :placeholder="field.placeholder"
+          @update:model-value="(value: string | number) => setField(field.key, String(value))" />
+        <el-input
+          v-else
+          :type="field.secret === true && !revealed ? 'password' : 'text'"
+          :model-value="fieldValues[field.key] ?? ''"
+          :placeholder="field.placeholder"
+          @update:model-value="(value: string | number) => setField(field.key, String(value))" />
+      </div>
+      <el-tooltip :content="revealed ? translate('隐藏密钥') : translate('显示密钥')" placement="top">
+        <el-button class="revealButton" text @click="revealed = !revealed">
+          {{ revealed ? translate("隐藏") : translate("显示") }}
+        </el-button>
+      </el-tooltip>
+    </div>
+    <div v-else class="configGrid">
       <div class="field fieldBase">
         <span class="fieldLabel">{{ translate("端点地址") }}</span>
         <el-input v-model="provider.baseUrl" placeholder="http://127.0.0.1:8188" />
@@ -293,20 +343,24 @@ function memLabel(provider: ProviderRecord): string {
 
 .configGrid {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 10px;
   align-items: end;
 
   .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 
+  // ACT: 多行字段（Workflow JSON）占满整行。
+  .fieldWide { grid-column: 1 / -1; }
+
   .fieldLabel {
     color: var(--el-text-color-secondary);
     font-size: 12px;
+
+    .req { color: var(--el-color-danger); font-style: normal; margin-inline-start: 2px; }
   }
 
-  .revealButton { margin-bottom: 1px; }
+  .revealButton { margin-bottom: 1px; justify-self: start; }
 }
-
 .engineRow {
   display: flex;
   align-items: center;
@@ -385,13 +439,5 @@ function memLabel(provider: ProviderRecord): string {
     color: var(--el-text-color-primary);
     font-weight: 600;
   }
-}
-
-@media (max-width: 900px) {
-  .configGrid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-}
-
-@media (max-width: 700px) {
-  .configGrid { grid-template-columns: minmax(0, 1fr); }
 }
 </style>

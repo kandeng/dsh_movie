@@ -3591,5 +3591,7 @@
   "供应模型": "Model",
   "供应工具": "Tool",
   "供应技能": "Skill",
-  "供应资产": "Asset"
+  "供应资产": "Asset",
+  "缺少 API 密钥": "Missing API key",
+  "缺少端点地址": "Missing endpoint URL"
 }
