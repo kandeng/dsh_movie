@@ -307,6 +307,9 @@ export function useProviders(): ProvidersHandle {
   function cardsOf(kind: CardKind): CardFeedRow[] {
     const rows: CardFeedRow[] = [];
     for (const provider of providers.value) {
+      // ACT: 真实供应未连接时其模型/资产不可用，Plugin 子页不再列出（种子目录的
+      // 遗留卡片也不露出）；演示目录源（demo，无连接流程）照旧列出并挂离线徽标。
+      if (provider.demo !== true && provider.status !== "connected") continue;
       for (const card of provider.cards) {
         if (card.kind === kind) rows.push({ card, provider });
       }
