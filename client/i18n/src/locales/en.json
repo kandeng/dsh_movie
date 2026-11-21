@@ -3567,6 +3567,7 @@
   "每次调用": "per call",
   "每次下载": "per download",
   "每千 token": "per 1k tokens",
+  "每百万 token": "per million tokens",
   "企业内网 GPU 服务器上的 SDXL 基础模型，1024 分辨率出图。": "SDXL base model on the enterprise intranet GPU server, 1024-resolution output.",
   "四步快速出图模型，Apache-2.0 许可，适合分镜草图。": "Four-step fast image model, Apache-2.0 licensed, ideal for storyboard sketches.",
   "量化版文生视频模型，480p · 5 秒片段，内网计费按秒。": "Quantized text-to-video model, 480p · 5 s clips, intranet billing per second.",

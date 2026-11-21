@@ -3432,6 +3432,7 @@
   "每次调用": "çağrı başına",
   "每次下载": "indirme başına",
   "每千 token": "1 bin token başına",
+  "每百万 token": "milyon token başına",
   "企业内网 GPU 服务器上的 SDXL 基础模型，1024 分辨率出图。": "Kurum iç ağı GPU sunucusunda SDXL temel modeli, 1024 çözünürlük çıktısı.",
   "四步快速出图模型，Apache-2.0 许可，适合分镜草图。": "Dört adımlı hızlı görsel modeli, Apache-2.0 lisanslı, storyboard eskizleri için ideal.",
   "量化版文生视频模型，480p · 5 秒片段，内网计费按秒。": "Kuantize metinden-videoya modeli, 480p · 5 sn klipler, iç ağ saniye başına faturalama.",

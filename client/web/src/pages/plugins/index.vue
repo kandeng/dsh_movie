@@ -13,6 +13,7 @@ import {
   IconShieldLock,
   IconDownload,
   IconPlayerPlay,
+  IconExternalLink,
 } from "@tabler/icons-vue";
 import type {
   SkillArtifact,
@@ -481,6 +482,7 @@ function priceText(card: ResourceCard): string {
     call: "每次调用",
     download: "每次下载",
     ktoken: "每千 token",
+    mtoken: "每百万 token",
   };
   return `${symbol}${price.amount} / ${translate(units[price.unit] ?? "")}`;
 }
@@ -740,7 +742,17 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
         <div v-else class="masonry">
           <article v-for="row in visibleModels" :key="row.provider.id + ':' + row.card.id" class="card" :data-model-id="row.card.id">
             <header class="cardHead">
-              <span class="cardTitle">{{ row.card.name }}</span>
+              <a
+                v-if="row.card.url"
+                class="cardTitle cardLink"
+                :href="row.card.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="row.card.name"
+              >
+                {{ row.card.name }}<icon-external-link :size="12" aria-hidden="true" />
+              </a>
+              <span v-else class="cardTitle">{{ row.card.name }}</span>
               <el-tag size="small" :type="stateType(registry.cardState(row))" effect="plain">
                 {{ stateLabel(registry.cardState(row)) }}
               </el-tag>
@@ -757,7 +769,7 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
             </div>
             <p class="cardProvider">{{ translate("来源") }}：{{ row.provider.name }}</p>
             <footer class="cardActions">
-              <el-button size="small" text @click="openModel(row)">{{ translate("详情") }}</el-button>
+              <el-button v-if="!row.card.url" size="small" text @click="openModel(row)">{{ translate("详情") }}</el-button>
               <span class="spacer" />
               <el-button
                 v-if="canTest(row)"
@@ -1351,6 +1363,24 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
   font-size: 13px;
   line-height: 1.6;
   word-break: break-word;
+  /* ACT: 简介最多两行（用户要求“two lines of the introduction”）。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ACT: 模型名外链（跳转供应商模型卡页）：继承标题样式 + 外链小图标。 */
+.cardLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-decoration: none;
+}
+.cardLink:hover {
+  color: var(--el-color-primary);
+  text-decoration: underline;
 }
 
 .cardProvider {

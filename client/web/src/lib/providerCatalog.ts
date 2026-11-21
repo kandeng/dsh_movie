@@ -20,7 +20,7 @@ export type CardKind = "models" | "tools" | "skills" | "assets";
 /** Modality / asset flavor shown as a card chip. */
 export type Modality = "text" | "image" | "video" | "audio" | "3dgs" | "mesh";
 /** Billing unit keys; the UI translates them (per image / per second / …). */
-export type PriceUnit = "image" | "second" | "call" | "download" | "ktoken";
+export type PriceUnit = "image" | "second" | "call" | "download" | "ktoken" | "mtoken";
 
 /** Unit price of one card; `null` means free (local weights, community prose). */
 export interface CardPrice {
@@ -43,6 +43,8 @@ export interface ResourceCard {
   meta: Record<string, string>;
   /** Data-URI thumbnail (assets only). */
   thumb?: string;
+  /** Outbound link to the provider's official model-card webpage (models only). */
+  url?: string;
 }
 
 /** Live engine facts synthesized by the local ComfyUI bridge. */

@@ -3432,6 +3432,7 @@
   "每次调用": "mỗi lần gọi",
   "每次下载": "mỗi lượt tải",
   "每千 token": "mỗi 1k token",
+  "每百万 token": "mỗi triệu token",
   "企业内网 GPU 服务器上的 SDXL 基础模型，1024 分辨率出图。": "Mô hình nền SDXL trên máy chủ GPU mạng nội bộ doanh nghiệp, xuất ảnh 1024.",
   "四步快速出图模型，Apache-2.0 许可，适合分镜草图。": "Mô hình ảnh nhanh bốn bước, giấy phép Apache-2.0, phù hợp phác thảo storyboard.",
   "量化版文生视频模型，480p · 5 秒片段，内网计费按秒。": "Mô hình chữ-thành-video lượng tử hóa, clip 480p · 5 giây, tính phí nội bộ theo giây.",

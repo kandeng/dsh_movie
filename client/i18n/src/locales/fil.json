@@ -3431,6 +3431,7 @@
   "每次调用": "bawat tawag",
   "每次下载": "bawat download",
   "每千 token": "bawat 1k token",
+  "每百万 token": "bawat milyon token",
   "企业内网 GPU 服务器上的 SDXL 基础模型，1024 分辨率出图。": "SDXL base model sa GPU server ng enterprise intranet, 1024 resolution output.",
   "四步快速出图模型，Apache-2.0 许可，适合分镜草图。": "Apat-na-hakbang na mabilis na image model, Apache-2.0 license, mainam para sa storyboard sketches.",
   "量化版文生视频模型，480p · 5 秒片段，内网计费按秒。": "Quantized text-to-video model, 480p · 5 s clips, intranet billing per second.",

@@ -7,7 +7,10 @@ import { i18nPlugin } from "@dsh-movie/i18n/vite";
 import {
   DEMO_CATALOG,
   LOCAL_COMFY_CARDS,
+  type CardPrice,
   type InfoPayload,
+  type Modality,
+  type PriceUnit,
   type ResourceCard,
 } from "./src/lib/providerCatalog.ts";
 
@@ -38,6 +41,83 @@ const SERVER_ENV = readServerEnv();
 const COMFY_BASE = (SERVER_ENV["COMFYUI_BASE_URL"] ?? "").replace(/\/+$/, "") || "http://127.0.0.1:8188";
 /** 百炼 DashScope 兼容模式基址（.env 可改），/bailian 桥的上游。 */
 const BAILIAN_BASE = (SERVER_ENV["BAILIAN_BASE_URL"] ?? "").replace(/\/+$/, "") || "https://dashscope.aliyuncs.com";
+
+/** ACT: 原生目录描述语言（上游真源文本，不经 i18n 翻译）。 */
+const NATIVE_LANG = "en-US";
+
+/** ACT: 百炼控制台模型卡页（需阿里云登录）；按模型 id 深链。 */
+function bailianCardUrl(id: string): string {
+  return `https://bailian.console.aliyun.com/?tab=model#/model-market/detail/${encodeURIComponent(id)}`;
+}
+
+/** ACT: 由上游 inference_metadata.response_modality / capabilities 推导真实模态（非猜测）。 */
+function nativeModality(m: Record<string, unknown>): Modality | undefined {
+  const meta = (m["inference_metadata"] ?? {}) as Record<string, unknown>;
+  const resp = meta["response_modality"];
+  if (Array.isArray(resp)) {
+    const first = String(resp[0] ?? "").toLowerCase();
+    if (first === "text" || first === "image" || first === "video" || first === "audio") return first as Modality;
+  }
+  const caps = Array.isArray(m["capabilities"]) ? (m["capabilities"] as unknown[]).map(String) : [];
+  if (caps.includes("IG")) return "image";
+  if (caps.includes("VG")) return "video";
+  if (caps.some((c) => c.includes("ASR") || c.includes("TTS"))) return "audio";
+  if (caps.includes("TG") || caps.includes("Reasoning") || caps.includes("VU")) return "text";
+  return undefined;
+}
+
+/** ACT: 由上游 prices（默认档 input_token）推导真实单价；无价格返回 null。 */
+function nativePrice(m: Record<string, unknown>): CardPrice | null {
+  const tiers = Array.isArray(m["prices"]) ? (m["prices"] as unknown[]) : [];
+  if (tiers.length === 0) return null;
+  const tierOf = (t: unknown): Record<string, unknown> => (t ?? {}) as Record<string, unknown>;
+  const tier = tierOf(tiers.find((t) => tierOf(t)["range_name"] === "Default") ?? tiers[0]);
+  const items = Array.isArray(tier["prices"]) ? (tier["prices"] as unknown[]) : [];
+  if (items.length === 0) return null;
+  const itemOf = (p: unknown): Record<string, unknown> => (p ?? {}) as Record<string, unknown>;
+  const item = itemOf(items.find((p) => itemOf(p)["type"] === "input_token") ?? items[0]);
+  const amount = Number.parseFloat(String(item["price"] ?? ""));
+  if (!Number.isFinite(amount)) return null;
+  const unitText = String(item["price_unit"] ?? "");
+  let unit: PriceUnit = "call";
+  if (unitText.includes("token")) unit = "mtoken";
+  else if (unitText.includes("图") || unitText.toLowerCase().includes("image")) unit = "image";
+  else if (unitText.includes("秒") || unitText.toLowerCase().includes("second")) unit = "second";
+  return { amount, currency: "CNY", unit };
+}
+
+/**
+ * ACT: 百炼原生模型目录 GET https://{ws}.{region}.maas.aliyuncs.com/api/v1/models：
+ * 上游真源返回 description / capabilities / prices / 上下文，据此填充真实简介、
+ * 模态与单价并附模型卡页深链；不可达时调用方回退兼容模式（仅 id）。
+ */
+async function nativeBailianModels(
+  workspace: string,
+  region: string,
+  headers: Record<string, string>,
+): Promise<{ code: number; body: unknown }> {
+  const url = `https://${workspace}.${region}.maas.aliyuncs.com/api/v1/models?page_no=1&page_size=100&language=${NATIVE_LANG}`;
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+  if (!res.ok) return { code: res.status, body: { error: `upstream-${res.status}` } };
+  const body = (await res.json()) as { output?: { models?: unknown } };
+  const list = Array.isArray(body.output?.models) ? (body.output.models as unknown[]) : [];
+  const cards: ResourceCard[] = list.map((entry, index) => {
+    const m = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+    const id = typeof m["model"] === "string" && m["model"] !== "" ? m["model"] : `model-${index}`;
+    return {
+      id,
+      kind: "models",
+      name: typeof m["name"] === "string" && m["name"] !== "" ? m["name"] : id,
+      description: typeof m["description"] === "string" ? m["description"] : "",
+      modality: nativeModality(m),
+      status: "ready",
+      price: nativePrice(m),
+      meta: {},
+      url: bailianCardUrl(id),
+    };
+  });
+  return { code: 200, body: { cards } };
+}
 
 /**
  * Phase-9 provider bridge (dev + preview): the proposal's `GET <base>/info`
@@ -122,9 +202,13 @@ function providerInfoBridge(): Plugin {
     const fromField = typeof header === "string" && header.startsWith("Bearer ") ? header.slice(7).trim() : "";
     const key = fromField !== "" ? fromField : (SERVER_ENV["BAILIAN_API_KEY"] ?? "");
     if (key === "") return { code: 503, body: { error: "no-api-key" } };
-    return listModels(`${BAILIAN_BASE}/compatible-mode/v1/models`, {
+    const result = await listModels(`${BAILIAN_BASE}/compatible-mode/v1/models`, {
       Authorization: `Bearer ${key}`,
     });
+    if (result.code === 200) {
+      for (const card of (result.body as { cards: ResourceCard[] }).cards) card.url = bailianCardUrl(card.id);
+    }
+    return result;
   }
 
   /**
@@ -150,7 +234,9 @@ function providerInfoBridge(): Plugin {
         description: "",
         status: "ready",
         price: null,
-        meta: { format: "HTTPS API" },
+        // ACT: 不再合成 meta.format（“Format HTTPS API” 标签信息量低，已按用户要求移除）；
+        // 上游 /models 仅发布 id，卡片不携带任何合成字段。
+        meta: {},
       };
     });
     return { code: 200, body: { cards } };
@@ -173,10 +259,22 @@ function providerInfoBridge(): Plugin {
         const key = field("apiKey") || (SERVER_ENV["BAILIAN_API_KEY"] ?? "");
         if (key === "") return { code: 503, body: { error: "no-api-key" } };
         const headers: Record<string, string> = { ...bearer(key) };
-        const workspace = field("workspaceId");
-        if (workspace !== "") headers["X-DashScope-WorkSpace"] = workspace;
+        const workspace = field("workspaceId") || (SERVER_ENV["BAILIAN_WORKSPACE_ID"] ?? "");
+        const region = field("regionId") || (SERVER_ENV["BAILIAN_REGION"] ?? "") || "cn-beijing";
+        // ACT: 有 workspace 时优先原生目录（真实简介/模态/价格）；不可达（如 sk-sp- 端面
+        // 不符）则落回兼容模式，保证卡片仍可用。
+        if (workspace !== "") {
+          const native = await nativeBailianModels(workspace, region, headers);
+          if (native.code === 200) return native;
+          // ACT: 原生目录不可达时落回兼容模式，且不再附加 workspace 头（非法 workspace
+          // 会使兼容模式 400）；合法 workspace 本就会让原生目录成功。
+        }
         const path = base.endsWith("/compatible-mode/v1") ? "/models" : "/compatible-mode/v1/models";
-        return listModels(`${base}${path}`, headers);
+        const result = await listModels(`${base}${path}`, headers);
+        if (result.code === 200) {
+          for (const card of (result.body as { cards: ResourceCard[] }).cards) card.url = bailianCardUrl(card.id);
+        }
+        return result;
       }
       case "volcano": {
         const base = httpBase(field("baseUrl")) || "https://ark.cn-beijing.volces.com/api/v3";

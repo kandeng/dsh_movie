@@ -455,4 +455,5 @@ export const PRICE_UNIT_LABEL: Record<CardPrice["unit"], string> = {
   call: "每次调用",
   download: "每次下载",
   ktoken: "每千 token",
+  mtoken: "每百万 token",
 };
