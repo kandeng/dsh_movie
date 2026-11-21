@@ -7,7 +7,6 @@ import { i18nPlugin } from "@dsh-movie/i18n/vite";
 import {
   DEMO_CATALOG,
   LOCAL_COMFY_CARDS,
-  type CardPrice,
   type InfoPayload,
   type ResourceCard,
 } from "./src/lib/providerCatalog.ts";
@@ -60,12 +59,6 @@ const BAILIAN_BASE = (SERVER_ENV["BAILIAN_BASE_URL"] ?? "").replace(/\/+$/, "") 
  * In production a reverse proxy / the gateway plays this role (D13).
  */
 function providerInfoBridge(): Plugin {
-  /** ACT: 已知百炼模型单价（其余模型免费待定价）。 */
-  const KNOWN_PRICE: Record<string, CardPrice> = {
-    "qwen3-max": { amount: 0.02, currency: "CNY", unit: "ktoken" },
-    "qwen-vl-max": { amount: 0.03, currency: "CNY", unit: "ktoken" },
-  };
-
   async function fetchJson(url: string, headers: Record<string, string> = {}): Promise<Record<string, unknown>> {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(4000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -129,20 +122,19 @@ function providerInfoBridge(): Plugin {
     const fromField = typeof header === "string" && header.startsWith("Bearer ") ? header.slice(7).trim() : "";
     const key = fromField !== "" ? fromField : (SERVER_ENV["BAILIAN_API_KEY"] ?? "");
     if (key === "") return { code: 503, body: { error: "no-api-key" } };
-    return listModels(
-      `${BAILIAN_BASE}/compatible-mode/v1/models`,
-      { Authorization: `Bearer ${key}` },
-      "百炼平台可用模型，经兼容模式 HTTPS API 接入。",
-      KNOWN_PRICE,
-    );
+    return listModels(`${BAILIAN_BASE}/compatible-mode/v1/models`, {
+      Authorization: `Bearer ${key}`,
+    });
   }
 
-  /** ACT: OpenAI 兼容模型列表 → 模型卡片（百炼/火山/Anthropic/OpenAI 共用）。 */
+  /**
+   * ACT: OpenAI 兼容模型列表 → 模型卡片（百炼/火山/Anthropic/OpenAI 共用）。
+   * 上游 /models 仅发布 id（无模态/描述/价格字段），卡片只携带上游真源信息：
+   * id/名称 + 就绪状态 + 接入格式；不合成描述、价格与模态，宁缺毋假。
+   */
   async function listModels(
     url: string,
     headers: Record<string, string>,
-    describe: string,
-    knownPrice: Record<string, CardPrice> = {},
   ): Promise<{ code: number; body: unknown }> {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
     if (!res.ok) return { code: res.status, body: { error: `upstream-${res.status}` } };
@@ -155,10 +147,9 @@ function providerInfoBridge(): Plugin {
         id,
         kind: "models",
         name: id,
-        description: describe,
-        modality: "text",
+        description: "",
         status: "ready",
-        price: knownPrice[id] ?? null,
+        price: null,
         meta: { format: "HTTPS API" },
       };
     });
@@ -185,13 +176,13 @@ function providerInfoBridge(): Plugin {
         const workspace = field("workspaceId");
         if (workspace !== "") headers["X-DashScope-WorkSpace"] = workspace;
         const path = base.endsWith("/compatible-mode/v1") ? "/models" : "/compatible-mode/v1/models";
-        return listModels(`${base}${path}`, headers, "百炼平台可用模型，经兼容模式 HTTPS API 接入。", KNOWN_PRICE);
+        return listModels(`${base}${path}`, headers);
       }
       case "volcano": {
         const base = httpBase(field("baseUrl")) || "https://ark.cn-beijing.volces.com/api/v3";
         const key = field("apiKey");
         if (key === "") return { code: 503, body: { error: "no-api-key" } };
-        const result = await listModels(`${base}/models`, bearer(key), "火山方舟可用模型/端点，经 OpenAI 兼容 API 接入。");
+        const result = await listModels(`${base}/models`, bearer(key));
         const endpoint = field("endpointId");
         if (result.code === 200 && endpoint !== "") {
           for (const card of (result.body as { cards: ResourceCard[] }).cards) card.meta["endpoint"] = endpoint;
@@ -207,7 +198,7 @@ function providerInfoBridge(): Plugin {
           "anthropic-version": field("apiVersion") || "2023-06-01",
         };
         const path = base.endsWith("/v1") ? "/models" : "/v1/models";
-        return listModels(`${base}${path}`, headers, "Anthropic Claude 模型，经原生 Messages API 接入。");
+        return listModels(`${base}${path}`, headers);
       }
       case "openai": {
         const base = httpBase(field("baseUrl")) || "https://api.openai.com/v1";
@@ -217,7 +208,7 @@ function providerInfoBridge(): Plugin {
         const org = field("orgId");
         if (org !== "") headers["OpenAI-Organization"] = org;
         const path = base.endsWith("/v1") ? "/models" : "/v1/models";
-        return listModels(`${base}${path}`, headers, "OpenAI 模型，经 OpenAI 兼容 API 接入。");
+        return listModels(`${base}${path}`, headers);
       }
       case "remote-comfy": {
         const base = httpBase(field("baseUrl"));

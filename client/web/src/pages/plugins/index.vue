@@ -470,7 +470,10 @@ function stateType(state: "ready" | "not-installed" | "offline" | null): "succes
 }
 function priceText(card: ResourceCard): string {
   const price = card.price;
-  if (price === null || price.amount === 0) return translate("免费");
+  // ACT: price 为 null = 上游未发布价格（如百炼 /models 仅有 id），不再谎报“免费”；
+  // 空串使模板的 v-if 直接隐藏价格标签。
+  if (price === null) return "";
+  if (price.amount === 0) return translate("免费");
   const symbol = price.currency === "USD" ? "$" : "¥";
   const units: Record<string, string> = {
     image: "每张图",
@@ -742,12 +745,12 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
                 {{ stateLabel(registry.cardState(row)) }}
               </el-tag>
             </header>
-            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <p v-if="row.card.description" class="cardDesc">{{ translate(row.card.description) }}</p>
             <div class="chipRow">
               <el-tag v-if="row.card.modality" size="small" type="primary" effect="plain">
                 {{ modalityLabel(row.card.modality) }}
               </el-tag>
-              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-if="priceText(row.card)" size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
               <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
                 {{ metaLabel(entry[0]) }} {{ entry[1] }}
               </el-tag>
@@ -843,9 +846,9 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
                 {{ stateLabel(registry.cardState(row)) }}
               </el-tag>
             </header>
-            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <p v-if="row.card.description" class="cardDesc">{{ translate(row.card.description) }}</p>
             <div class="chipRow">
-              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-if="priceText(row.card)" size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
               <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
                 {{ metaLabel(entry[0]) }} {{ entry[1] }}
               </el-tag>
@@ -968,9 +971,9 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
                 {{ stateLabel(registry.cardState(row)) }}
               </el-tag>
             </header>
-            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <p v-if="row.card.description" class="cardDesc">{{ translate(row.card.description) }}</p>
             <div class="chipRow">
-              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-if="priceText(row.card)" size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
               <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
                 {{ metaLabel(entry[0]) }} {{ entry[1] }}
               </el-tag>
@@ -1008,12 +1011,12 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
                 {{ stateLabel(registry.cardState(row)) }}
               </el-tag>
             </header>
-            <p class="cardDesc">{{ translate(row.card.description) }}</p>
+            <p v-if="row.card.description" class="cardDesc">{{ translate(row.card.description) }}</p>
             <div class="chipRow">
               <el-tag v-if="row.card.modality" size="small" type="primary" effect="plain">
                 {{ modalityLabel(row.card.modality) }}
               </el-tag>
-              <el-tag size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
+              <el-tag v-if="priceText(row.card)" size="small" type="warning" effect="plain">{{ priceText(row.card) }}</el-tag>
               <el-tag v-for="entry in metaEntries(row.card)" :key="entry[0]" size="small" type="info" effect="plain">
                 {{ metaLabel(entry[0]) }} {{ entry[1] }}
               </el-tag>
@@ -1121,9 +1124,9 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
           <el-tag v-if="drawerRow.card.modality" size="small" type="primary" effect="plain">
             {{ modalityLabel(drawerRow.card.modality) }}
           </el-tag>
-          <el-tag size="small" type="warning" effect="plain">{{ priceText(drawerRow.card) }}</el-tag>
+          <el-tag v-if="priceText(drawerRow.card)" size="small" type="warning" effect="plain">{{ priceText(drawerRow.card) }}</el-tag>
         </div>
-        <p class="cardDesc">{{ translate(drawerRow.card.description) }}</p>
+        <p v-if="drawerRow.card.description" class="cardDesc">{{ translate(drawerRow.card.description) }}</p>
         <p class="cardProvider">{{ translate("来源") }}：{{ drawerRow.provider.name }}</p>
         <p v-if="drawerRow.provider.engine" class="cardProvider">
           {{ drawerRow.provider.engine.gpu }} · {{ (drawerRow.provider.engine.vramMb / 1024).toFixed(1) }} GB {{ drawerMemLabel() }}
@@ -1156,12 +1159,12 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
     <el-dialog v-model="assetPreviewVisible" :title="assetPreview?.card.name ?? ''" width="560px">
       <div v-if="assetPreview" class="assetPreviewBody">
         <img v-if="assetPreview.card.thumb" class="assetPreviewImage" :src="assetPreview.card.thumb" :alt="assetPreview.card.name" />
-        <p class="cardDesc">{{ translate(assetPreview.card.description) }}</p>
+        <p v-if="assetPreview.card.description" class="cardDesc">{{ translate(assetPreview.card.description) }}</p>
         <div class="chipRow">
           <el-tag v-if="assetPreview.card.modality" size="small" type="primary" effect="plain">
             {{ modalityLabel(assetPreview.card.modality) }}
           </el-tag>
-          <el-tag size="small" type="warning" effect="plain">{{ priceText(assetPreview.card) }}</el-tag>
+          <el-tag v-if="priceText(assetPreview.card)" size="small" type="warning" effect="plain">{{ priceText(assetPreview.card) }}</el-tag>
           <el-tag v-for="entry in metaEntries(assetPreview.card)" :key="entry[0]" size="small" type="info" effect="plain">
             {{ metaLabel(entry[0]) }} {{ entry[1] }}
           </el-tag>

@@ -342,49 +342,6 @@ export function thumbMesh(): string {
 
 /* ── enterprise demo payloads (served by the vite bridge at /provider-demo) ─ */
 
-const GPU_CARDS: ResourceCard[] = [
-  {
-    id: "sdxl-base",
-    kind: "models",
-    name: "SDXL 1.0 Base",
-    description: "企业内网 GPU 服务器上的 SDXL 基础模型，1024 分辨率出图。",
-    modality: "image",
-    status: "ready",
-    price: { amount: 0.08, currency: "CNY", unit: "image" },
-    meta: { license: "OpenRAIL++-M", vram: "6.5 GB", size: "6.9 GB", version: "1.0" },
-  },
-  {
-    id: "flux-schnell",
-    kind: "models",
-    name: "Flux.1 schnell",
-    description: "四步快速出图模型，Apache-2.0 许可，适合分镜草图。",
-    modality: "image",
-    status: "ready",
-    price: { amount: 0.04, currency: "CNY", unit: "image" },
-    meta: { license: "Apache-2.0", vram: "5.8 GB", size: "11.5 GB", version: "schnell" },
-  },
-  {
-    id: "wan21-fp8",
-    kind: "models",
-    name: "Wan 2.1 14B (fp8)",
-    description: "量化版文生视频模型，480p · 5 秒片段，内网计费按秒。",
-    modality: "video",
-    status: "ready",
-    price: { amount: 0.6, currency: "CNY", unit: "second" },
-    meta: { license: "Apache-2.0", vram: "11.2 GB", size: "14.8 GB", version: "2.1" },
-  },
-  {
-    id: "ltxv-2b",
-    kind: "models",
-    name: "LTX-Video 2B",
-    description: "实时级文生视频模型，512×320 · 49 帧。",
-    modality: "video",
-    status: "ready",
-    price: { amount: 0.35, currency: "CNY", unit: "second" },
-    meta: { license: "LTXV-License", vram: "5.1 GB", size: "6.0 GB", version: "0.9.5" },
-  },
-];
-
 const LLM_CARDS: ResourceCard[] = [
   {
     id: "qwen3-max",
@@ -520,11 +477,6 @@ const ASSET_CARDS: ResourceCard[] = [
 
 /** Demo enterprise resources keyed by bridge path segment. */
 export const DEMO_CATALOG: Record<string, InfoPayload> = {
-  gpu: {
-    cards: GPU_CARDS,
-    usage: { "sdxl-base": 148, "flux-schnell": 262, "wan21-fp8": 74, "ltxv-2b": 31 },
-    engine: { gpu: "NVIDIA RTX 6000 Ada", vramMb: 49152, version: "0.45.0" },
-  },
   llm: { cards: LLM_CARDS, usage: { "qwen3-max": 1860, "qwen-vl-max": 420 } },
   mcp: { cards: MCP_CARDS, usage: { "ffmpeg-bench": 96, "blender-node": 18, "whisper-asr": 640 } },
   skills: { cards: SKILL_CARDS, usage: { "noir-shot-plan": 7, "character-consistency": 12, "montage-rhythm": 4 } },
@@ -600,7 +552,7 @@ export function seedProviders(): ProviderRecord[] {
       fields: { apiKey: "", baseUrl: "", workspaceId: "", regionId: "", appId: "" },
     },
     // ACT: 以下为演示目录源：卡片继续供给 Plugin 子页，但不在 Supply 页列为接入块。
-    { ...mk("ent-gpu", "企业 GPU 服务器 · 实验楼 B", "comfy", "/provider-demo/gpu", DEMO_CATALOG.gpu!, "ent-lab-b-2026"), demo: true },
+    // （“企业 GPU 服务器 · 实验楼 B”演示源已下线：虚构模型卡不再展示。）
     { ...mk("ent-mcp", "内网 MCP 工具服务器", "mcp", "/provider-demo/mcp", DEMO_CATALOG.mcp!), demo: true },
     { ...mk("community-skills", "社区技能注册表", "skills", "/provider-demo/skills", DEMO_CATALOG.skills!), demo: true },
     { ...mk("asset-store", "素材资产库", "assets", "/provider-demo/assets", DEMO_CATALOG.assets!), demo: true },

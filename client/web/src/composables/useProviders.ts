@@ -103,9 +103,11 @@ function load(key: string): ProviderRecord[] {
       if (spec !== undefined) row.fields = adoptFields(spec, row);
     }
     // ACT: 历史存档迁移可能产生同 id 行（如 ent-llm 改名 bailian 与已存种子行
-    // 相撞）：按 id 保留首现、丢弃后续同 id 行，消除 Vue key 冲突与同名双块。
+    // 相撞）：按 id 保留首现、丢弃后续同 id 行，消除 Vue key 冲突与同名双块；
+    // 已下线的演示源（ent-gpu，企业 GPU 服务器 · 实验楼 B）残留行一并清除。
     const seenIds = new Set<string>();
     const rows = parsed.filter((row) => {
+      if (row.id === "ent-gpu") return false;
       if (seenIds.has(row.id)) return false;
       seenIds.add(row.id);
       return true;
