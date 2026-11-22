@@ -2,8 +2,10 @@
 
 Operator/agent bridge from this workstation (and any MCP host) to the
 ComfyUI media factory on the remote H20 GPU server (`yw01`,
-`100.116.109.7` on the tailnet), reached over **Tailscale** — the H20 sits
-behind an enterprise firewall with no inbound access.
+`10.188.8.105` ZeroTier managed IP), reached over the **ZeroTier** overlay —
+the H20 sits behind an enterprise firewall with no inbound access.
+(Tailscale remains installed as a legacy alternative; see
+`comfy_README.md` §Remote access.)
 
 | File | What it is |
 | --- | --- |
@@ -11,22 +13,23 @@ behind an enterprise firewall with no inbound access.
 | `comfy_INSTALL.md` | H20-side install provenance (24 models, ~107 GB, deviations, acceptance runs) — copied from the H20 |
 | `src/server.ts` | The MCP server (stdio) |
 | `src/smoke.ts` | Upstream smoke check (no MCP layer needed) |
-| `../tailscale/ts_install.sh` | Local-side Tailscale install/join script (prerequisite) |
+| `../zerotier/zt_install.sh` | Local-side ZeroTier install/join script (prerequisite) |
 
 > Naming: this is **not** the Phase-2 canvas `comfy-bridge`
 > (`server/plugins/dsh-movie-gateway/src/comfy-bridge/`) and **not** the
 > Phase-8 media seam (`movie-executor/comfy-provider.ts`). Those stay
 > authoritative for the movie pipeline; per「模型调用一律经 DSH」, application
-> model calls go through the DSH gateway, which reaches the same H20 by
-> setting `DSH_COMFY_BASE_URL=http://yw01:8188` (env-only switch, already
+> model calls go through the DSH gateway, which reaches the same H20 over the
+> ZeroTier overlay (`DSH_COMFY_ZEROTIER` dynamic managed-IP resolution, or a
+> static `DSH_COMFY_BASE_URL=http://10.188.8.105:8188` — env-only switches
 > supported by `comfy-provider.ts`).
 
 ## Prerequisites
 
-1. **Tailnet up on both ends** (H20 side already done — `yw01` online):
+1. **ZeroTier overlay up on both ends** (H20 side already joined — `yw01` authorized):
    ```bash
-   bash extension/tailscale/ts_install.sh   # local side, one-time
-   tailscale status                          # yw01 must be listed
+   bash extension/zerotier/zt_install.sh   # local side, one-time join
+   zerotier-cli listnetworks               # managed IP 10.188.8.x must show OK
    ```
 2. **Dependencies** (Node >= 24.9 runs the `.ts` sources directly):
    ```bash
@@ -37,7 +40,7 @@ behind an enterprise firewall with no inbound access.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `COMFY_REMOTE_BASE_URL` | `http://yw01:8188` | Upstream ComfyUI (tailnet MagicDNS or `http://100.116.109.7:8188`) |
+| `COMFY_REMOTE_BASE_URL` | `http://10.188.8.105:8188` | Upstream ComfyUI (H20 ZeroTier managed IP) |
 | `COMFY_REMOTE_TOKEN` | *(empty)* | Optional bearer token if ComfyUI runs with `--api-key`; never logged |
 | `COMFY_REMOTE_TIMEOUT_MS` | `900000` | Cap for blocking job waits |
 
@@ -49,7 +52,7 @@ node src/smoke.ts                        # health + model catalog (read-only)
 COMFY_SMOKE_PROMPT=1 node src/smoke.ts   # + model-free upload→LoadImage→SaveImage→/view E2E
 ```
 
-Exit code 0 = all pass; unreachable upstream fails closed with a tailnet hint.
+Exit code 0 = all pass; unreachable upstream fails closed with a ZeroTier overlay hint.
 
 ## MCP tools
 
@@ -74,7 +77,7 @@ Register in an MCP client (stdio):
     "comfy-remote": {
       "command": "node",
       "args": ["/home/robot/dsh_movie/extension/comfy/src/server.ts"],
-      "env": { "COMFY_REMOTE_BASE_URL": "http://yw01:8188" }
+      "env": { "COMFY_REMOTE_BASE_URL": "http://10.188.8.105:8188" }
     }
   }
 }
@@ -83,10 +86,10 @@ Register in an MCP client (stdio):
 ## Known boundaries
 
 - The ComfyUI API has **no authentication**; exposure is limited by the
-  tailnet. Do **not** enable Tailscale Funnel. See `comfy_README.md`
-  §Remote access for the H20-side lockdown options.
+  ZeroTier private network (members must be authorized in ZeroTier Central).
+  See `comfy_README.md` §Remote access for the H20-side lockdown options.
 - The CosyVoice2 TTS service listens on a **unix socket**
-  (`/root/comfy/log/tts.sock`) on the H20 — not reachable over TCP/tailnet;
+  (`/root/comfy/log/tts.sock`) on the H20 — not reachable over TCP/overlay;
   only via `ssh -L` socket forwarding. Not exposed as an MCP tool yet.
 - Wan 2.2 generations are slow by design (~240 s smoke at 480p/49f);
   use `comfy_submit_prompt` fire-and-forget + `comfy_wait_for_job` rather

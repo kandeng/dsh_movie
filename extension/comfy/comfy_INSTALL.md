@@ -315,3 +315,14 @@ All downloaded files were size-verified against the source listing (exact match)
   - `/root/comfy/log/cosy_tts_server.log` — CosyVoice2 FastAPI service.
 - Rotation: `/etc/logrotate.d/comfy` (`weekly`, `rotate 4`, `compress`, `delaycompress`, `copytruncate`, `su root root`). Applied automatically by the system logrotate timer/cron. `copytruncate` lets rotation happen without restarting the services.
 - ComfyUI itself has no per-model log files; model/library warnings go to the process stream, so `comfyui.log` is the single sink.
+
+## Remote-access overlay: ZeroTier (2026-08)
+- Purpose: expose the ComfyUI API (TCP 8188) to an outside operator machine despite the enterprise firewall (no inbound forwarding). Both ends dial OUT to ZeroTier root servers (TCP/UDP 9993); no firewall or port-forward changes were made.
+- Install: `zerotier-one` **1.16.2** via the official `install.zerotier.com` script; `zerotier-one.service` enabled; node address **`3e8f2d44bc`**, state **ONLINE**.
+- Memberships (`zerotier-cli listnetworks`):
+  - `2873fd00f2cc42ff` (org `kdeng`, PRIVATE) → managed IP **`10.188.8.105/24`** — the current operator network.
+  - `0cccb752f755d4ab` (`clever_tattam`, PRIVATE) → `192.168.196.105/24` — earlier network, retained.
+- Verification (on-host): `curl -s http://10.188.8.105:8188/system_stats` → `200`; `ip -brief addr` shows the managed IP on the `zt*` interface. ComfyUI already binds `0.0.0.0:8188`, so it is overlay-reachable with no config change.
+- Access control: the networks are PRIVATE, so only nodes authorized in ZeroTier Central (Members → Auth) can route to the managed IP. The CosyVoice2 TTS Unix socket remains local-only and is NOT exposed.
+- Why not Tailscale: its Google-hosted control plane (`controlplane.tailscale.com`) is throttled from GFW-restricted networks — the `machine/register` POST repeatedly times out at its 30 s deadline — while ZeroTier's roots and API were reachable. Tailscale remains installed but unused.
+- Operator-side join script and the DSH gateway's dynamic managed-IP resolution (`DSH_COMFY_ZEROTIER` / `DSH_ZEROTIER_API_TOKEN`) are documented in `comfy_README.md` §0 and the repository root `README.md` §3.5.

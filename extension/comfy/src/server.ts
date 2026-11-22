@@ -1,7 +1,7 @@
 /**
  * comfy-remote: MCP server bridging dsh_movie to the remote H20 ComfyUI
- * service (host `yw01`, reached over the Tailscale tailnet — see
- * ../../tailscale/ts_install.sh and ../comfy_README.md "Remote access").
+ * service (host `yw01`, reached over the ZeroTier overlay — see
+ * ../../zerotier/zt_install.sh and ../comfy_README.md "Remote access").
  *
  * This is NOT the Phase-2 canvas `comfy-bridge` inside dsh-movie-gateway, and
  * NOT the Phase-8 media seam (`comfy-provider.ts`). It is an operator/agent
@@ -11,13 +11,14 @@
  * can inspect and drive the remote GPU box.
  *
  * Governance note: application-level model calls must still go through the
- * DSH gateway (「模型调用一律经 DSH」). For the movie pipeline itself, point
- * `DSH_COMFY_BASE_URL` at the tailnet address (http://100.116.109.7:8188 or
- * http://yw01:8188) — comfy-provider.ts already supports a remote host as an
- * env-only switch. This server is for catalog/health/ops introspection.
+ * DSH gateway (「模型调用一律经 DSH」). For the movie pipeline itself, the gateway
+ * reaches the H20 over the ZeroTier overlay — `DSH_COMFY_ZEROTIER` dynamic
+ * managed-IP resolution, or a static `DSH_COMFY_BASE_URL=http://10.188.8.105:8188`
+ * — comfy-provider.ts supports both as env-only switches. This server is for
+ * catalog/health/ops introspection.
  *
  * Env:
- *   COMFY_REMOTE_BASE_URL   default http://yw01:8188
+ *   COMFY_REMOTE_BASE_URL   default http://10.188.8.105:8188 (ZeroTier managed IP)
  *   COMFY_REMOTE_TOKEN      optional bearer token (never logged)
  *   COMFY_REMOTE_TIMEOUT_MS default 900000 (per-job wait cap)
  *
@@ -32,7 +33,7 @@ import { z } from 'zod'
 // Config
 // ---------------------------------------------------------------------------
 
-const BASE_URL = (process.env['COMFY_REMOTE_BASE_URL'] ?? 'http://yw01:8188').replace(/\/+$/, '')
+const BASE_URL = (process.env['COMFY_REMOTE_BASE_URL'] ?? 'http://10.188.8.105:8188').replace(/\/+$/, '')
 const TOKEN = (process.env['COMFY_REMOTE_TOKEN'] ?? '').trim()
 const TIMEOUT_MS = Number(process.env['COMFY_REMOTE_TIMEOUT_MS'] ?? '900000')
 
@@ -163,7 +164,7 @@ server.registerTool('comfy_health', {
     return {
       ok: false, baseUrl: BASE_URL, error: message,
       hint: message.includes('fetch failed') || message.includes('timeout')
-        ? 'Is the tailnet up? Run: tailscale status (local) — see extension/tailscale/ts_install.sh'
+        ? 'Is the ZeroTier overlay up? Run: zerotier-cli listnetworks (local) — see extension/zerotier/zt_install.sh'
         : undefined,
     }
   }

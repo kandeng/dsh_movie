@@ -4,14 +4,14 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "MCP server bridging dsh_movie to the remote H20 ComfyUI service (yw01, over Tailscale)",
+  "description": "MCP server bridging dsh_movie to the remote H20 ComfyUI service (yw01, over the ZeroTier overlay; Tailscale legacy)",
   "engines": {
     "node": ">=24.9.0"
   },
   "scripts": {
     "start": "node src/server.ts",
     "smoke": "node src/smoke.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p ../tsconfig.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

@@ -19,11 +19,9 @@ sleep 2
 echo "tailscaled: $(systemctl is-active tailscaled)"
 
 echo "== [2/4] joining tailnet (tailscale up) =="
-if sudo tailscale up 2>&1 | tee /tmp/ts_up.out | grep -q "https://login.tailscale.com"; then
-  echo "!! Browser auth required — open the URL above, log in with kandeng@,"
-  echo "!! then re-run: sudo tailscale up   (it will complete silently)"
-  exit 1
-fi
+# Run directly (no pipe) so the auth URL is visible: an expired node key makes
+# 'tailscale up' block until browser login completes.
+sudo tailscale up
 
 echo "== [3/4] tailnet status =="
 tailscale status | head -10

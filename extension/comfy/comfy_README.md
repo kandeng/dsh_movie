@@ -383,20 +383,49 @@ Plus the external `CosyVoice2-0.5B` narration model (`/root/comfy/CosyVoice/pret
 ~5.2 GB; ~4.6 GB VRAM while loaded; lazy + idle-unload over the Unix socket).
 Per-model ~100-word descriptions and exact bytes come from `GET /model_catalog`.
 
-## Remote access (Tailscale)
+## Remote access (ZeroTier primary, Tailscale legacy)
 
 Facts about this host: it sits behind the enterprise firewall on a **static private LAN address
 `172.16.80.31/24`** (`bridge0`, NetworkManager `ipv4.method manual`); outbound traffic is NAT'd
 (no usable static public IP), and there is no evidence of inbound port-forwarding. ComfyUI
 listens on `0.0.0.0:8188`; the TTS service is a **local Unix socket only** and is never remotely
-reachable. A ZeroTier client is also installed and online (`192.168.196.105/24`) as an
-alternative overlay.
+reachable.
 
-Tailscale (1.98.8) is installed and `tailscaled` is enabled, but the daemon may be stopped and
-a previous enrollment (state from 2025) may have expired. First-time setup prints a browser
-login URL, so run it interactively.
+The **working remote-access overlay is ZeroTier** (§0): node `3e8f2d44bc` (zerotier-one 1.16.2,
+ONLINE) is a member of the private network `2873fd00f2cc42ff` (org `kdeng`) with managed IP
+**`10.188.8.105/24`**, and of the older network `0cccb752f755d4ab` (`clever_tattam`,
+`192.168.196.105/24`). ZeroTier was chosen because its root servers (TCP/UDP 9993) and
+Cloudflare-fronted API are reachable from inside the GFW, whereas Tailscale's Google-hosted
+control plane is throttled there.
 
-### 1) Start Tailscale on the H20 server
+Tailscale (1.98.8) remains installed as a **legacy alternative** (§1–§3) but is NOT the active
+path from GFW-restricted networks: its `machine/register` POST repeatedly dies at a 30 s context
+deadline. First-time setup prints a browser login URL, so run it interactively.
+
+### 0) ZeroTier (working overlay)
+
+On the H20 (already provisioned; re-verify with these):
+
+```bash
+sudo zerotier-cli info                          # 200 info 3e8f2d44bc 1.16.2 ONLINE
+sudo zerotier-cli listnetworks                  # 2873fd00f2cc42ff ... OK ... 10.188.8.105/24
+ip -brief addr | grep -i zt                     # the zt* iface carries the managed IP
+curl -s http://10.188.8.105:8188/system_stats   # 200 ⇒ API reachable over the overlay
+```
+
+To (re)join a network: `sudo zerotier-cli join <16-hex-nwid>`. Because the network is
+**private**, a network admin must authorize the node in ZeroTier Central
+(`my.zerotier.com` → network → Members → tick *Auth*) before it receives a managed IP
+(status moves `REQUESTING_CONFIGURATION` → `OK`).
+
+On the outside computer: install (`curl -s https://install.zerotier.com | sudo bash`),
+`sudo zerotier-cli join <nwid>`, authorize BOTH nodes in Central, then reach the API at
+`http://<h20-managed-ip>:8188`. A member's managed IP is stable for the life of the
+(network, member) pair — it does not change per reconnect. The DSH gateway can also resolve
+the current managed IP dynamically at every health probe (`DSH_COMFY_ZEROTIER=<nwid>/<node>`
+plus `DSH_ZEROTIER_API_TOKEN` in `server/comfy.env`), so no static IP needs to be stored.
+
+### 1) Start Tailscale on the H20 server (legacy)
 
 ```bash
 sudo systemctl enable --now tailscaled
@@ -449,6 +478,11 @@ sudo ufw deny 8188/tcp
 sudo ufw enable
 ```
 
+For the ZeroTier overlay the same shape applies with the `zt*` interface (e.g.
+`sudo ufw allow in on ztly56fbs4 to any port 8188 proto tcp`). In practice the private
+network's member authorization is the real access control: only authorized nodes can route
+to the managed IP at all.
+
 (UFW is currently inactive on this host.) Optionally expose only a tailnet-only HTTPS proxy
 with identity attached:
 
@@ -464,8 +498,9 @@ SSH forward, e.g. `ssh -L /tmp/tts.sock:/root/comfy/log/tts.sock user@host`.
 
 - **SSH tunnel** (`sshd` listens on `0.0.0.0:22`): `ssh -L 8188:127.0.0.1:8188 <user>@<host>`,
   then use `http://127.0.0.1:8188` locally — nothing new is exposed.
-- **ZeroTier** (already online): if the outside computer is authorized on the same ZeroTier
-  network, reach the API directly at `http://192.168.196.105:8188` without Tailscale.
+- **ZeroTier** (the active overlay, §0): if the outside computer is authorized on network
+  `2873fd00f2cc42ff`, reach the API directly at `http://10.188.8.105:8188` (or
+  `http://192.168.196.105:8188` on the older `0cccb752f755d4ab`) without Tailscale.
 
 ### Remote-access troubleshooting
 
@@ -474,10 +509,15 @@ tailscale status                 # peers + connection state
 tailscale netcheck               # NAT type, DERP latency, UDP reachability
 tailscale ping <peer-name>       # path: direct vs relay ("via DERP")
 systemctl status tailscaled      # daemon state
+sudo zerotier-cli info           # node address + ONLINE/OFFLINE
+sudo zerotier-cli listnetworks   # membership: OK vs REQUESTING_CONFIGURATION
+sudo zerotier-cli peers          # path to roots/peers (direct vs relay)
+systemctl status zerotier-one    # daemon state
 ```
 
-If `tailscale ping` works but `curl` fails, check `ufw status` (rule above) and confirm ComfyUI
-is listening: `ss -ltn | grep 8188`.
+If `zerotier-cli listnetworks` shows `REQUESTING_CONFIGURATION`/`ACCESS_DENIED`, the member is
+not authorized yet in Central. If it shows `OK` but `curl` fails, check `ufw status` (rule above)
+and confirm ComfyUI is listening: `ss -ltn | grep 8188`.
 
 ## Troubleshooting
 

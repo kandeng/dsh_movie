@@ -32,6 +32,7 @@ import {
   type ComfyTemplates,
   type TemplateParams,
 } from './comfy-templates.ts'
+import { resolveZerotierBaseUrl, zerotierRefFromEnv } from './comfy-zerotier.ts'
 
 /** Minimal diagnostics sink (matches `ctx.logger`). */
 export interface ComfyProviderLogger {
@@ -45,6 +46,13 @@ export interface ComfyProviderLogger {
 export interface ComfyConfig {
   /** ComfyUI endpoints (primary first, then pool), no trailing slashes. */
   endpoints: string[]
+  /**
+   * Optional dynamic endpoint resolver (ZeroTier overlay). When present the
+   * provider re-resolves the live endpoint list on each health probe, so a
+   * remote member whose managed IP changed is picked up without editing any
+   * static config; resolution failures keep the last known list.
+   */
+  resolveEndpoints?: (() => Promise<string[]>) | undefined
   /** Optional bearer token (ComfyUI `--api-key`); never logged. */
   token?: string | undefined
   /** History poll interval while awaiting completion, in milliseconds. */
@@ -83,18 +91,29 @@ const PROBE_TIMEOUT_MS = 5_000
  */
 export function comfyConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ComfyConfig | undefined {
   const base = (env['DSH_COMFY_BASE_URL'] ?? '').trim().replace(/\/+$/, '')
-  if (base === '') return undefined
+  const ztRef = zerotierRefFromEnv(env)
+  if (base === '' && ztRef === undefined) return undefined
   const pool = (env['DSH_COMFY_POOL'] ?? '')
     .split(',')
     .map((entry): string => entry.trim().replace(/\/+$/, ''))
     .filter((entry): boolean => entry !== '')
-  const endpoints = [...new Set([base, ...pool])]
+  const staticEndpoints = [...new Set([...(base === '' ? [] : [base]), ...pool])]
   const token = (env['DSH_COMFY_TOKEN'] ?? '').trim()
+  const ztToken = (env['DSH_ZEROTIER_API_TOKEN'] ?? '').trim()
   const pollIntervalMs = Number(env['DSH_COMFY_POLL_MS'] ?? '1500')
   const timeoutMs = Number(env['DSH_COMFY_TIMEOUT_MS'] ?? '900000')
   const inflightMax = Number(env['DSH_COMFY_INFLIGHT_MAX'] ?? '1')
+  // Dynamic remote endpoint: resolve the ZeroTier member's current managed IP
+  // at probe time and prepend it to the static endpoints (fail-closed on error).
+  const resolveEndpoints = ztRef === undefined ? undefined : async (): Promise<string[]> => {
+    const resolved = ztToken === ''
+      ? undefined
+      : await resolveZerotierBaseUrl(ztRef, ztToken).catch((): undefined => undefined)
+    return [...new Set([...(resolved === undefined ? [] : [resolved]), ...staticEndpoints])]
+  }
   return {
-    endpoints,
+    endpoints: staticEndpoints,
+    ...(resolveEndpoints === undefined ? {} : { resolveEndpoints }),
     token: token === '' ? undefined : token,
     pollIntervalMs: Number.isFinite(pollIntervalMs) && pollIntervalMs > 0 ? pollIntervalMs : 1_500,
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 900_000,
@@ -196,6 +215,19 @@ export function createComfyProvider(
   const authHeaders = (): Record<string, string> =>
     config.token === undefined ? {} : { 'Authorization': `Bearer ${config.token}` }
 
+  // --- dynamic endpoint resolution (ZeroTier overlay) ----------------------
+  let currentEndpoints: string[] = config.endpoints
+  async function refreshEndpoints(): Promise<void> {
+    if (config.resolveEndpoints === undefined) return
+    try {
+      const resolved = await config.resolveEndpoints()
+      if (resolved.length > 0) currentEndpoints = resolved
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.warn('[movie-executor] comfy endpoint resolution failed: %s', message)
+    }
+  }
+
   // --- in-flight cap (P8-M4): a slot-transferring semaphore -----------------
   let inflight = 0
   const waiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
@@ -257,7 +289,12 @@ export function createComfyProvider(
     if (!force && lastProbe !== undefined && Date.now() - lastProbe.at < PROBE_TTL_MS) {
       return lastProbe.result
     }
-    const results = await Promise.all(config.endpoints.map((endpoint): Promise<ComfyReadiness> => probeEndpoint(endpoint)))
+    await refreshEndpoints()
+    if (currentEndpoints.length === 0) {
+      lastProbe = { at: Date.now(), result: NOT_READY }
+      return NOT_READY
+    }
+    const results = await Promise.all(currentEndpoints.map((endpoint): Promise<ComfyReadiness> => probeEndpoint(endpoint)))
     const result: ComfyReadiness = {
       image: results.some((entry): boolean => entry.image),
       video: results.some((entry): boolean => entry.video),
@@ -269,9 +306,10 @@ export function createComfyProvider(
   // --- endpoint pooling: round-robin with submit failover -------------------
   let rrIndex = 0
   function endpointOrder(): string[] {
-    const start = rrIndex % config.endpoints.length
+    if (currentEndpoints.length === 0) return []
+    const start = rrIndex % currentEndpoints.length
     rrIndex += 1
-    return [...config.endpoints.slice(start), ...config.endpoints.slice(0, start)]
+    return [...currentEndpoints.slice(start), ...currentEndpoints.slice(0, start)]
   }
 
   function interrupt(endpoint: string): void {

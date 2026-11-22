@@ -2,8 +2,9 @@
  * Offline/live smoke check for the comfy-remote MCP server's upstream API.
  *
  * Runs WITHOUT the MCP layer: it exercises the same HTTP surface the tools
- * use, against COMFY_REMOTE_BASE_URL (default http://yw01:8188). Fail-closed:
- * a down/unreachable upstream exits non-zero with a tailnet hint.
+ * use, against COMFY_REMOTE_BASE_URL (default http://10.188.8.105:8188, the H20's
+ * ZeroTier managed IP). Fail-closed: a down/unreachable upstream exits non-zero
+ * with a ZeroTier overlay hint.
  *
  * Usage:
  *   node src/smoke.ts                       # health + catalog only (read-only)
@@ -14,7 +15,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-const BASE_URL = (process.env['COMFY_REMOTE_BASE_URL'] ?? 'http://yw01:8188').replace(/\/+$/, '')
+const BASE_URL = (process.env['COMFY_REMOTE_BASE_URL'] ?? 'http://10.188.8.105:8188').replace(/\/+$/, '')
 const TOKEN = (process.env['COMFY_REMOTE_TOKEN'] ?? '').trim()
 
 let failures = 0
@@ -48,9 +49,9 @@ async function main(): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     check('GET /system_stats 200', false, message)
-    process.stdout.write(`\nHint: is the tailnet up on BOTH ends?\n` +
-      `  local:  tailscale status   (if 'Logged out' → bash extension/tailscale/ts_install.sh)\n` +
-      `  H20:    tailscale status   (expect yw01 / 100.116.109.7 online)\n`)
+    process.stdout.write(`\nHint: is the ZeroTier overlay up on BOTH ends?\n` +
+      `  local:  zerotier-cli listnetworks   (managed IP must show OK; join via extension/zerotier/zt_install.sh)\n` +
+      `  H20:    zerotier-cli listnetworks   (expect yw01 / 10.188.8.105 authorized)\n`)
     process.exit(1)
   }
   if (!healthy) process.exit(1)

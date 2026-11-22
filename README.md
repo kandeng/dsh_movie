@@ -74,7 +74,7 @@ the phase plans under [`doc/design/`](doc/design/).
 - *(Optional)* An **Alibaba Bailian / DashScope** API key to enable text (and,
   when a video model id is set, video) generation. Without it the app still runs;
   generator nodes report `model-unavailable`.
-- *(Optional)* **Tailscale** + a remote **ComfyUI GPU host** (e.g. the H20 server
+- *(Optional)* **ZeroTier** + a remote **ComfyUI GPU host** (e.g. the H20 server
   `yw01` behind the enterprise firewall) for local image/video/audio generation —
   set up in §3.5.
 
@@ -257,46 +257,66 @@ journalctl --user --vacuum-time=7d
 journalctl --user --vacuum-size=100M
 ```
 
-### 3.5 Remote H20 ComfyUI over Tailscale (optional)
+### 3.5 Remote H20 ComfyUI over ZeroTier (optional)
 
 The GPU media backend (ComfyUI with Wan 2.2 T2V, SDXL + InstantID, Qwen-Image,
 CosyVoice2 TTS, Stable Audio Open, …) runs on the **H20 server `yw01`**, which
 sits behind an enterprise firewall with **no inbound access**. Connectivity is
-provided by a **Tailscale** overlay (outbound-only from both ends, so no
-firewall changes are needed); the H20 side is already enrolled as
-`yw01` / `100.116.109.7` on the `kandeng@` tailnet.
+provided by a **ZeroTier** overlay: both ends dial *out* to ZeroTier's public
+root servers (TCP/UDP 9993), so no firewall or port-forwarding changes are
+needed. Tailscale was evaluated first, but its Google-hosted control plane is
+throttled by the GFW from this network (registration POSTs time out), whereas
+ZeroTier's roots and Cloudflare-fronted API are reachable — so **ZeroTier is
+the working overlay** and Tailscale is not used.
 
-**1. Join the tailnet from this machine** (one-time; installs the `tailscaled`
-systemd service from the bundled tarball, starts it, and verifies the H20):
+Current overlay facts: private network `2873fd00f2cc42ff` (org `kdeng`); H20
+node `3e8f2d44bc` → managed IP `10.188.8.105`; this box node `9c7fc34643`.
+
+**1. Join the network from this machine** (one-time; installs `zerotier-one`,
+joins the network, and prints both node addresses):
 
 ```bash
-bash extension/tailscale/ts_install.sh
-tailscale status        # yw01 must be listed and active
+bash extension/zerotier/zt_install.sh
 ```
 
-If the script prints a `https://login.tailscale.com/...` URL, the saved node key
-expired — open it in a browser, sign in with the `kandeng@` account, then re-run
-the script.
+The network is **private**, so authorize BOTH members once in ZeroTier Central
+(`my.zerotier.com` → network → Members → tick *Auth*). A member's managed IP is
+stable for the life of the (network, member) pair — it does not change per
+reconnect — so the address below only changes if the network is recreated.
 
 **2. Verify the remote ComfyUI** (read-only health + model-catalog check):
 
 ```bash
 cd extension/comfy && npm install   # one-time
-node src/smoke.ts                   # PASS lines + ALL PASS ⇒ the link is good
-curl -s http://yw01:8188/model_catalog/categories   # raw catalog API
+COMFY_REMOTE_BASE_URL=http://10.188.8.105:8188 node src/smoke.ts   # ALL PASS ⇒ link good
+curl -s http://10.188.8.105:8188/model_catalog/categories           # raw catalog API
 ```
 
 **3. Point the DSH gateway at the H20** — the Phase-8 media provider treats a
-remote GPU host as an env-only switch: set `DSH_COMFY_BASE_URL=http://yw01:8188`
-in `server/.env` and restart the server. Image/video generators then execute on
-the H20 instead of reporting `model-unavailable`.
+remote GPU host as an env-only switch. Note `DSH_*` are *launch-control* vars
+that `dsh-app-boot` rejects inside `server/.env`; they live in the gitignored
+`server/comfy.env`, which `start.sh` exports:
+
+```bash
+# server/comfy.env — static managed IP (works today)
+export DSH_COMFY_BASE_URL=http://10.188.8.105:8188
+# …or fully dynamic: resolve the H20's CURRENT managed IP from the ZeroTier
+# Central API at every health probe, then DSH_COMFY_BASE_URL can stay blank:
+export DSH_COMFY_ZEROTIER=2873fd00f2cc42ff/3e8f2d44bc
+export DSH_ZEROTIER_API_TOKEN=<Central → Account API token>
+```
+
+Then `./stop.sh && ./start.sh`. Image/video generators execute on the H20
+instead of reporting `model-unavailable`. A second (local) ComfyUI can join the
+pool via `DSH_COMFY_POOL` for round-robin + submit-failover.
 
 For agent/operator access (model catalog introspection, job submission,
 output fetch) an MCP bridge lives in [`extension/comfy/`](extension/comfy/README.md);
 the H20-side operator and provenance docs are `extension/comfy/comfy_README.md`
 and `comfy_INSTALL.md`. Security notes: the ComfyUI API has **no
-authentication** — exposure is limited to the tailnet (never enable Tailscale
-Funnel), and the CosyVoice2 TTS socket is not network-reachable.
+authentication** — exposure is limited to the ZeroTier private network
+(authorize only your own nodes; never publish the network), and the CosyVoice2
+TTS socket is not network-reachable.
 
 ## 4. Run
 
@@ -340,4 +360,4 @@ pnpm dump:config    # print the resolved DSH server config
 | `client/i18n/`    | `@dsh-movie/i18n`     | Locale catalogs + Vite CJK-extraction plugin     |
 | `server/`         | `dsh-movie-server`    | DSH host, profiles, and scripts                  |
 | `server/plugins/` | —                     | Matrix identity, Matrix chat, movie gateway, and the plugins marketplace (SPR supervisor) |
-| `extension/`      | —                     | Remote H20 ops assets: `tailscale/` (tailnet join script) and `comfy/` (H20 docs + `comfy-remote` MCP bridge) |
+| `extension/`      | —                     | Remote H20 ops assets: `zerotier/` (overlay join script), `tailscale/` (legacy tailnet join script), and `comfy/` (H20 docs + `comfy-remote` MCP bridge) |
