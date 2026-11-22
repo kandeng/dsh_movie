@@ -534,11 +534,12 @@ export function seedProviders(): ProviderRecord[] {
   });
   return [
     // ACT: 本机 ComfyUI：端点为同源桥 /local-comfy（桥上游地址取自 server/.env 的
-    // COMFYUI_BASE_URL）；连接握手用字段所填信息真实访问本机引擎。
+    // COMFYUI_BASE_URL）；连接握手经 /supply-probe 真实访问本机引擎的 /model_catalog
+    // （纯 API 目录，同远程 H20）——呈现服务提供的模型，不硬编码任何种子卡。
     {
-      ...mk("local-comfy", "本机 ComfyUI GPU", "comfy", "/local-comfy", {
-        cards: LOCAL_COMFY_CARDS,
-        usage: { "sd15-fp16": 12, "ltxv-2b-local": 0 },
+      ...mk("local-comfy", "本机 ComfyUI", "comfy", "/local-comfy", {
+        cards: [],
+        usage: {},
       }),
       // ACT: 类型化字段：Base URL 留空待 /supply-env 以 .env 的 COMFYUI_BASE_URL 回填。
       providerType: "local-comfy" as ProviderType,

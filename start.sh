@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # DSH Movie stack startup (idempotent — anything already running is left alone):
-#   1. systemd user services: dsh-postgre (5432) then dsh-synapse (8008), plus a
-#      kick of the supervised local ComfyUI engine unit comfyui-local (8188)
+#   1. systemd user services: dsh-postgre (5432) then dsh-synapse (8008)
 #   2. DSH server: identity listener 8787 + movie gateway 8788 (pnpm start:web)
 #   3. web client: vite dev server 5173 (pnpm dev:web)
+# The local ComfyUI engine (:8188) is deliberately NOT started here — its
+# lifecycle is owned by server/comfy_start.sh / comfy_stop.sh and by the Supply
+# page Connect/Disconnect buttons. Companion: stop.sh.
 # The two app processes are daemonized (setsid + nohup); their output lands in
 # logs/gateway.log and logs/vite.log. Companion: stop.sh.
 set -uo pipefail
@@ -31,24 +33,11 @@ wait_port() { # $1 port, $2 label, $3 timeout seconds
   echo "  FAIL $2 did not open :$1 within ${3}s — check $LOG_DIR"; FAIL=1; return 1
 }
 
-echo "── 1/3 systemd user services (postgres → synapse → local ComfyUI engine)"
+echo "── 1/3 systemd user services (postgres → synapse)"
 if ! systemctl --user start dsh-postgre.service; then echo "  FAIL dsh-postgre did not start"; FAIL=1; fi
 if ! systemctl --user start dsh-synapse.service; then echo "  FAIL dsh-synapse did not start"; FAIL=1; fi
 wait_port 5432 postgres 15
 wait_port 8008 synapse 30
-# ACT: 本机 ComfyUI 引擎由独立 systemd 用户单元监管（Restart=on-failure，enabled +
-# linger → 开机自启、崩溃自愈）；此处 start 为幂等补踢。引擎慢启/崩溃不应拖垮整个
-# 栈，故等待为非致命 WARN（stop.sh 亦不停它：监管单元独立于应用栈生命周期）。
-if systemctl --user start comfyui-local.service 2>/dev/null; then
-  for _ in $(seq 1 60); do port_up 8188 && break; sleep 1; done
-  if port_up 8188; then
-    echo "  ok   local ComfyUI listening on :8188"
-  else
-    echo "  WARN local ComfyUI not up yet — systemd keeps retrying (journalctl --user -u comfyui-local)"
-  fi
-else
-  echo "  WARN comfyui-local.service did not start (unit missing?) — local Supply block stays offline"
-fi
 
 echo "── 2/3 DSH server (identity :8787 + gateway :8788)"
 if port_up 8788; then

@@ -60,7 +60,7 @@ export interface ProvidersHandle {
   cardState(row: CardFeedRow): "ready" | "not-installed" | "offline";
   byId(id: string): ProviderRecord | undefined;
   connect(id: string): Promise<void>;
-  disconnect(id: string): void;
+  disconnect(id: string): Promise<void>;
   /** Create or update one provider access (optimistic + persisted). */
   save(record: ProviderRecord): void;
   /** Remove one provider; returns the snapshot for undo. */
@@ -107,11 +107,13 @@ function load(key: string): ProviderRecord[] {
     // 探针复用——已存行同步为当前种子措辞（status 不动：那是探针的实时判定）。
     const seedCards = new Map(LOCAL_COMFY_CARDS.map((card) => [card.id, card]));
     for (const row of parsed) {
-      // ACT: 远程 ComfyUI 行现为纯 API 目录（/model_catalog）：清除历史存档里由旧探针
-      // 注入的硬编码种子卡（sd15-fp16 / ltxv-2b-local），杜绝文档来源信息残留。
-      if (row.providerType === "remote-comfy") {
+      // ACT: 本机 + 远程 ComfyUI 行均为纯 API 目录（/model_catalog）：清除历史存档里
+      // 由旧探针注入的硬编码种子卡（sd15-fp16 / ltxv-2b-local），杜绝文档来源信息残留。
+      if (row.providerType === "remote-comfy" || row.providerType === "local-comfy" || row.id === "local-comfy") {
         row.cards = row.cards.filter((card) => !seedCards.has(card.id));
       }
+      // ACT: 本机 ComfyUI 更名（去掉 “GPU” 立场：呈现服务提供的模型，而非 GPU/CUDA 硬件）。
+      if (row.id === "local-comfy" && row.name === "本机 ComfyUI GPU") row.name = "本机 ComfyUI";
       for (const card of row.cards) {
         const seed = seedCards.get(card.id);
         if (seed !== undefined) {
@@ -370,6 +372,19 @@ export function useProviders(): ProvidersHandle {
     provider.status = "connecting";
     provider.error = null;
     try {
+      // ACT: 本机 ComfyUI 生命周期（Connect 语义）：引擎未启动则先经桥
+      // /local-comfy/ensure（server/comfy_start.sh → comfyui-local 用户单元）拉起
+      // 再连接；已在运行则原样复用，绝不重启。
+      if (provider.providerType === "local-comfy") {
+        const ensured = await fetch("/local-comfy/ensure", {
+          method: "POST",
+          signal: AbortSignal.timeout(150_000),
+        });
+        if (!ensured.ok) {
+          const body = (await ensured.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(typeof body?.error === "string" && body.error !== "" ? body.error : `HTTP ${ensured.status}`);
+        }
+      }
       let payload: InfoPayload;
       if (provider.providerType !== undefined) {
         // ACT: 类型化接入：把字段所填信息交给同源桥 /supply-probe，由桥按供应商类型
@@ -410,11 +425,27 @@ export function useProviders(): ProvidersHandle {
     }
   }
 
-  function disconnect(id: string): void {
+  async function disconnect(id: string): Promise<void> {
     const provider = byId(id);
     if (provider === undefined) return;
+    // ACT: 本机 ComfyUI 生命周期（Disconnect 语义）：先断开 DSH 与引擎的连接，
+    // 再经桥 /local-comfy/halt（server/comfy_stop.sh）关停本机 ComfyUI 服务。
     provider.status = "disconnected";
     provider.error = null;
+    if (provider.providerType === "local-comfy") {
+      try {
+        const halted = await fetch("/local-comfy/halt", {
+          method: "POST",
+          signal: AbortSignal.timeout(90_000),
+        });
+        if (!halted.ok) {
+          const body = (await halted.json().catch(() => null)) as { error?: string } | null;
+          provider.error = typeof body?.error === "string" && body.error !== "" ? body.error : `HTTP ${halted.status}`;
+        }
+      } catch (caught) {
+        provider.error = describeError(caught);
+      }
+    }
   }
 
   function save(record: ProviderRecord): void {

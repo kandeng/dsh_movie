@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { promisify } from "node:util";
 import { defineConfig, type Plugin } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { i18nPlugin } from "@dsh-movie/i18n/vite";
@@ -38,6 +40,8 @@ function readServerEnv(): Record<string, string> {
 const SERVER_ENV = readServerEnv();
 /** 本机 ComfyUI 引擎地址（.env 可改），/local-comfy 桥的上游。 */
 const COMFY_BASE = (SERVER_ENV["COMFYUI_BASE_URL"] ?? "").replace(/\/+$/, "") || "http://127.0.0.1:8188";
+/** 本机 ComfyUI 生命周期脚本目录（server/comfy_start.sh / comfy_stop.sh）。 */
+const COMFY_SCRIPTS = fileURLToPath(new URL("../../server", import.meta.url));
 /** 百炼 DashScope 兼容模式基址（.env 可改），/bailian 桥的上游。 */
 const BAILIAN_BASE = (SERVER_ENV["BAILIAN_BASE_URL"] ?? "").replace(/\/+$/, "") || "https://dashscope.aliyuncs.com";
 
@@ -138,6 +142,27 @@ async function nativeBailianModels(
  * In production a reverse proxy / the gateway plays this role (D13).
  */
 function providerInfoBridge(): Plugin {
+  /**
+   * ACT: 本机 ComfyUI 生命周期（Supply 页 Connect/Disconnect 驱动）：POST
+   * /local-comfy/ensure → server/comfy_start.sh（未启动则经 comfyui-local 用户
+   * 单元拉起并等待 :8188；已在运行则原样复用，绝不重启）；POST /local-comfy/halt
+   * → server/comfy_stop.sh（停止单元并确认端口释放）。脚本输出原样回传，失败透传 500。
+   */
+  const execFileAsync = promisify(execFile);
+  async function runComfyScript(
+    name: "comfy_start.sh" | "comfy_stop.sh",
+    timeoutMs: number,
+  ): Promise<{ code: number; body: unknown }> {
+    try {
+      const { stdout } = await execFileAsync("bash", [`${COMFY_SCRIPTS}/${name}`], { timeout: timeoutMs });
+      return { code: 200, body: { script: name, output: stdout.trim() } };
+    } catch (err) {
+      const e = err as { code?: number; stdout?: string; stderr?: string; message?: string };
+      const detail = [e.stdout ?? "", e.stderr ?? "", e.message ?? ""].filter((s) => s !== "").join(" | ").slice(0, 500);
+      return { code: 500, body: { script: name, error: detail } };
+    }
+  }
+
   async function fetchJson(url: string, headers: Record<string, string> = {}): Promise<Record<string, unknown>> {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(4000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -403,6 +428,19 @@ function providerInfoBridge(): Plugin {
       comfyInfo(COMFY_BASE)
         .then((payload) => json(200, payload))
         .catch(() => json(503, { error: "engine-offline" }));
+      return;
+    }
+    // ACT: 本机 ComfyUI 生命周期端点：Connect 前确保引擎运行（ensure），Disconnect 时关停（halt）。
+    if (url === "/local-comfy/ensure" && req.method === "POST") {
+      runComfyScript("comfy_start.sh", 150_000)
+        .then(({ code, body }) => json(code, body))
+        .catch(() => json(500, { error: "script-failed" }));
+      return;
+    }
+    if (url === "/local-comfy/halt" && req.method === "POST") {
+      runComfyScript("comfy_stop.sh", 90_000)
+        .then(({ code, body }) => json(code, body))
+        .catch(() => json(500, { error: "script-failed" }));
       return;
     }
     // ACT: .env 真源下发：客户端据此回填百炼 / 本机 ComfyUI / 远程 ComfyUI 接入的类型字段（真实上游地址）。

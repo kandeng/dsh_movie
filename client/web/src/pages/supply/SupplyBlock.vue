@@ -106,7 +106,7 @@ function costText(provider: ProviderRecord): string {
   return money(costOf(provider), providerCurrency(provider));
 }
 async function toggleConnect(): Promise<void> {
-  if (props.provider.status === "connected") disconnect(props.provider.id);
+  if (props.provider.status === "connected") await disconnect(props.provider.id);
   else await connect(props.provider.id);
 }
 function refresh(): void {
@@ -168,8 +168,14 @@ function memLabel(provider: ProviderRecord): string {
 
     <p v-if="provider.engine" class="engineRow">
       <icon-cpu :size="14" aria-hidden="true" />
-      {{ provider.engine.gpu }} · {{ (provider.engine.vramMb / 1024).toFixed(1) }} GB {{ memLabel(provider) }} ·
-      ComfyUI {{ provider.engine.version }}
+      <!-- ACT: 本机 ComfyUI：呈现“服务”身份（版本），不强调 GPU/显存等 CUDA 硬件（下方 chips 列出服务提供的模型）。 -->
+      <template v-if="provider.providerType === 'local-comfy'">
+        {{ translate("本机 ComfyUI 服务") }} · ComfyUI {{ provider.engine.version }}
+      </template>
+      <template v-else>
+        {{ provider.engine.gpu }} · {{ (provider.engine.vramMb / 1024).toFixed(1) }} GB {{ memLabel(provider) }} ·
+        ComfyUI {{ provider.engine.version }}
+      </template>
     </p>
     <p v-if="provider.status === 'error' && provider.error" class="errorRow">
       {{ errorText(provider) }}

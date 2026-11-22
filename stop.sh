@@ -2,10 +2,9 @@
 # DSH Movie stack shutdown (idempotent):
 #   1. web client (vite :5173) and DSH server (:8787/:8788) process trees
 #   2. systemd user services: dsh-synapse then dsh-postgre
-# NOTE: the local ComfyUI engine (:8188) is deliberately NOT stopped here — it is
-# supervised by its own systemd user unit (comfyui-local, Restart=on-failure) and
-# outlives app-stack restarts. Stop it explicitly with:
-#   systemctl --user stop comfyui-local.service
+# NOTE: the local ComfyUI engine (:8188) is deliberately NOT stopped here — its
+# lifecycle is owned by server/comfy_stop.sh (and the Supply page Disconnect
+# button). Stop it explicitly with: ./server/comfy_stop.sh
 # Listeners are killed by port (works no matter which terminal started them);
 # pnpm/sh wrappers are swept by command pattern afterwards. Companion: start.sh.
 set -uo pipefail
