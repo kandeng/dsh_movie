@@ -46,7 +46,7 @@ application functions as plugins on top of the DSH + Synapse + Canvas foundation
   SGLang).
 
 **Roadmap.** A first slice of this vision has **shipped**: a **plugins marketplace**
-(Phase 7) reaching external services through **MCP (Model Context Protocol) tool
+(Phase 7) reaching external ry ·services through **MCP (Model Context Protocol) tool
 plugins** (DSH already ships MCP client/resources packages), complementing the
 off-host model access described above. Every external source — a built-in adapter
 or a third-party/user MCP server — runs as a **sandboxed OS child process** under
@@ -74,6 +74,9 @@ the phase plans under [`doc/design/`](doc/design/).
 - *(Optional)* An **Alibaba Bailian / DashScope** API key to enable text (and,
   when a video model id is set, video) generation. Without it the app still runs;
   generator nodes report `model-unavailable`.
+- *(Optional)* **Tailscale** + a remote **ComfyUI GPU host** (e.g. the H20 server
+  `yw01` behind the enterprise firewall) for local image/video/audio generation —
+  set up in §3.5.
 
 ## 3. Installation
 
@@ -254,6 +257,47 @@ journalctl --user --vacuum-time=7d
 journalctl --user --vacuum-size=100M
 ```
 
+### 3.5 Remote H20 ComfyUI over Tailscale (optional)
+
+The GPU media backend (ComfyUI with Wan 2.2 T2V, SDXL + InstantID, Qwen-Image,
+CosyVoice2 TTS, Stable Audio Open, …) runs on the **H20 server `yw01`**, which
+sits behind an enterprise firewall with **no inbound access**. Connectivity is
+provided by a **Tailscale** overlay (outbound-only from both ends, so no
+firewall changes are needed); the H20 side is already enrolled as
+`yw01` / `100.116.109.7` on the `kandeng@` tailnet.
+
+**1. Join the tailnet from this machine** (one-time; installs the `tailscaled`
+systemd service from the bundled tarball, starts it, and verifies the H20):
+
+```bash
+bash extension/tailscale/ts_install.sh
+tailscale status        # yw01 must be listed and active
+```
+
+If the script prints a `https://login.tailscale.com/...` URL, the saved node key
+expired — open it in a browser, sign in with the `kandeng@` account, then re-run
+the script.
+
+**2. Verify the remote ComfyUI** (read-only health + model-catalog check):
+
+```bash
+cd extension/comfy && npm install   # one-time
+node src/smoke.ts                   # PASS lines + ALL PASS ⇒ the link is good
+curl -s http://yw01:8188/model_catalog/categories   # raw catalog API
+```
+
+**3. Point the DSH gateway at the H20** — the Phase-8 media provider treats a
+remote GPU host as an env-only switch: set `DSH_COMFY_BASE_URL=http://yw01:8188`
+in `server/.env` and restart the server. Image/video generators then execute on
+the H20 instead of reporting `model-unavailable`.
+
+For agent/operator access (model catalog introspection, job submission,
+output fetch) an MCP bridge lives in [`extension/comfy/`](extension/comfy/README.md);
+the H20-side operator and provenance docs are `extension/comfy/comfy_README.md`
+and `comfy_INSTALL.md`. Security notes: the ComfyUI API has **no
+authentication** — exposure is limited to the tailnet (never enable Tailscale
+Funnel), and the CosyVoice2 TTS socket is not network-reachable.
+
 ## 4. Run
 
 You run two processes: the DSH server (identity + chat + gateway) and the web
@@ -296,3 +340,4 @@ pnpm dump:config    # print the resolved DSH server config
 | `client/i18n/`    | `@dsh-movie/i18n`     | Locale catalogs + Vite CJK-extraction plugin     |
 | `server/`         | `dsh-movie-server`    | DSH host, profiles, and scripts                  |
 | `server/plugins/` | —                     | Matrix identity, Matrix chat, movie gateway, and the plugins marketplace (SPR supervisor) |
+| `extension/`      | —                     | Remote H20 ops assets: `tailscale/` (tailnet join script) and `comfy/` (H20 docs + `comfy-remote` MCP bridge) |
