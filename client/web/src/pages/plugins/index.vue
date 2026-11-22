@@ -4,7 +4,7 @@
 // 启用开关/安装·卸载；技能卡：标题/描述/目标 chip/来源工具/版本/许可/警告徽章，
 // pick-mode 下出现「选择」按钮（D7 mode-1 触发）。顶部一次性社区内容警告横幅（D8）。
 // 访客只读：安装/卸载/启用/举报/确认均为主机动作（D6/D2），由 useRoomRole.isHost 网关。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { translate } from "@dsh-movie/i18n/vue";
 import {
@@ -27,7 +27,6 @@ import type {
 } from "@dsh-movie/protocol";
 import { usePlugins } from "@/composables/usePlugins";
 import { useProviders, type CardFeedRow } from "@/composables/useProviders";
-import { useExecStatus } from "@/composables/useExecStatus";
 import type { CardKind, Modality, ResourceCard } from "@/lib/providerCatalog";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useRoomRole } from "@/composables/useRoomRole";
@@ -388,10 +387,11 @@ function sourceStatus(toolId: string): ToolStatus | null {
 
 // ── Phase-9 §4：模型/资产子页 + 提供商卡片_feed（状态 + 价格）─────────────
 const registry = useProviders();
-const exec = useExecStatus();
 
 const modelQuery = ref("");
 const modelModality = ref<"all" | Modality>("all");
+// ACT: 供应排序器（模型视图）：取值 "all" 或供应商 id；选项实时对齐 Supply 页已连接供应（见 supplyOptions）。
+const modelSupply = ref<string>("all");
 const assetQuery = ref("");
 const assetModality = ref<"all" | Modality>("all");
 
@@ -403,6 +403,7 @@ function focusModelFromQuery(): void {
   activeCategory.value = "models";
   modelQuery.value = "";
   modelModality.value = "all";
+  modelSupply.value = "all";
   void nextTick(() => {
     const el = document.querySelector<HTMLElement>(`[data-model-id="${CSS.escape(id)}"]`);
     if (el === null) return;
@@ -435,9 +436,23 @@ function matchesQuery(row: CardFeedRow, q: string): boolean {
   if (needle === "") return true;
   return row.card.name.toLowerCase().includes(needle) || row.card.description.toLowerCase().includes(needle);
 }
+// ACT: 排序器选项：Supply 页当前已连接的供应（实时）+ 额外“全部”项（默认选中）。
+const supplyOptions = computed(() => [
+  { value: "all", label: translate("全部") },
+  ...registry.providers.value
+    .filter((provider) => provider.status === "connected")
+    .map((provider) => ({ value: provider.id, label: provider.name })),
+]);
+// ACT: 所选供应断开连接后选项消失：回退默认“全部”，避免选择悬空。
+watch(supplyOptions, (options) => {
+  if (!options.some((option) => option.value === modelSupply.value)) modelSupply.value = "all";
+});
+
 const visibleModels = computed(() =>
   registry.cardsOf("models").filter((row) =>
-    (modelModality.value === "all" || row.card.modality === modelModality.value) && matchesQuery(row, modelQuery.value)),
+    (modelModality.value === "all" || row.card.modality === modelModality.value) &&
+    (modelSupply.value === "all" || row.provider.id === modelSupply.value) &&
+    matchesQuery(row, modelQuery.value)),
 );
 const visibleAssets = computed(() =>
   registry.cardsOf("assets").filter((row) =>
@@ -519,93 +534,18 @@ function feedStateType(kind: CardKind, name: string): "success" | "warning" | "i
   return row === undefined ? "info" : stateType(registry.cardState(row));
 }
 
-// ACT: 模型详情抽屉 + 真实测试生成（仅本机 ComfyUI 已连接时就绪的图像模型）。
-// POST /comfy/api/prompt 走真实 P8 管线；Leg B /ws 回灌 executed 产物后展示并计一次用量。
+// ACT: 模型详情抽屉（规格/价格/用量）。
 const drawerVisible = ref(false);
 const drawerRow = ref<CardFeedRow | null>(null);
-const testState = ref<"idle" | "running" | "done" | "error">("idle");
-const testImage = ref("");
-const testError = ref("");
-let testStop: (() => void) | null = null;
-let testTimer: ReturnType<typeof setTimeout> | null = null;
 
 function openModel(row: CardFeedRow): void {
   drawerRow.value = row;
   drawerVisible.value = true;
 }
-function canTest(row: CardFeedRow): boolean {
-  return row.provider.id === "local-comfy"
-    && row.provider.status === "connected"
-    && row.card.modality === "image"
-    && row.card.status === "ready";
-}
-function stopTestWatch(): void {
-  if (testStop !== null) { testStop(); testStop = null; }
-  if (testTimer !== null) { clearTimeout(testTimer); testTimer = null; }
-}
-async function runModelTest(): Promise<void> {
-  const row = drawerRow.value;
-  if (row === null || !canTest(row)) return;
-  stopTestWatch();
-  exec.reset();
-  testState.value = "running";
-  testImage.value = "";
-  testError.value = "";
-  try {
-    const resp = await fetch("/comfy/api/prompt", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: {
-          "1": { class_type: "TextInput", inputs: { text: "a cinematic teal ocean at sunset, concept art" } },
-          "2": { class_type: "ImageGenerator", inputs: { prompt: ["1", 0], image: "" } },
-        },
-      }),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  } catch {
-    testState.value = "error";
-    testError.value = translate("运行失败");
-    return;
-  }
-  const stopOutput = watch(() => exec.outputById.value.get(2), (output) => {
-    if (typeof output !== "object" || output === null) return;
-    const artifact = (output as Record<string, unknown>)["artifact"];
-    if (typeof artifact !== "string" || artifact === "") return;
-    testImage.value = artifact;
-    testState.value = "done";
-    registry.recordUsage(row.provider.id, row.card.id, 1);
-    stopTestWatch();
-  });
-  const stopStatus = watch(() => exec.statusById.value.get(2), (status) => {
-    if (status !== "error") return;
-    testState.value = "error";
-    testError.value = translate("运行失败");
-    stopTestWatch();
-  });
-  testStop = () => { stopOutput(); stopStatus(); };
-  testTimer = setTimeout(() => {
-    if (testState.value !== "running") return;
-    testState.value = "error";
-    testError.value = translate("连接超时");
-    stopTestWatch();
-  }, 300000);
-}
-function testHint(): string {
-  const gpu = drawerRow.value?.provider.engine?.gpu ?? "";
-  return gpu.toLowerCase().includes("cpu")
-    ? translate("CPU 引擎模式：生成约需 2–3 分钟，请耐心等待。")
-    : translate("正在调用真实生成管线，请稍候…");
-}
 function drawerMemLabel(): string {
   const gpu = drawerRow.value?.provider.engine?.gpu ?? "";
   return gpu.toLowerCase().includes("cpu") ? translate("内存") : translate("显存");
 }
-function testFromCard(row: CardFeedRow): void {
-  openModel(row);
-  void runModelTest();
-}
-onBeforeUnmount(stopTestWatch);
 
 // ACT: 资产预览与下载（下载计一次账单用量）。
 const assetPreviewVisible = ref(false);
@@ -737,6 +677,10 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
             :placeholder="translate('搜索模型')">
             <template #prefix><icon-search :size="15" aria-hidden="true" /></template>
           </el-input>
+          <!-- ACT: 供应排序器：选项 = Supply 页已连接供应 + “全部”（默认）；搜索框 flex:1 将其推至行右端。 -->
+          <el-select v-model="modelSupply" class="supplySelect" :aria-label="translate('来源')">
+            <el-option v-for="option in supplyOptions" :key="option.value" :value="option.value" :label="option.label" />
+          </el-select>
         </div>
         <div v-if="visibleModels.length === 0" class="empty">{{ translate("无匹配模型") }}</div>
         <div v-else class="masonry">
@@ -770,14 +714,6 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
             <p class="cardProvider">{{ translate("来源") }}：{{ row.provider.name }}</p>
             <footer class="cardActions">
               <el-button v-if="!row.card.url" size="small" text @click="openModel(row)">{{ translate("详情") }}</el-button>
-              <span class="spacer" />
-              <el-button
-                v-if="canTest(row)"
-                size="small" type="primary" plain
-                @click="testFromCard(row)">
-                <icon-player-play :size="14" aria-hidden="true" />
-                {{ translate("测试生成") }}
-              </el-button>
             </footer>
           </article>
         </div>
@@ -1140,7 +1076,11 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
         </div>
         <p v-if="drawerRow.card.description" class="cardDesc">{{ translate(drawerRow.card.description) }}</p>
         <p class="cardProvider">{{ translate("来源") }}：{{ drawerRow.provider.name }}</p>
-        <p v-if="drawerRow.provider.engine" class="cardProvider">
+        <!-- ACT: 本机 ComfyUI：呈现“服务”身份（版本），不强调 GPU/显存等 CUDA 硬件。 -->
+        <p v-if="drawerRow.provider.engine && drawerRow.provider.providerType === 'local-comfy'" class="cardProvider">
+          {{ translate("本机 ComfyUI 服务") }} · ComfyUI {{ drawerRow.provider.engine.version }}
+        </p>
+        <p v-else-if="drawerRow.provider.engine" class="cardProvider">
           {{ drawerRow.provider.engine.gpu }} · {{ (drawerRow.provider.engine.vramMb / 1024).toFixed(1) }} GB {{ drawerMemLabel() }}
         </p>
         <table class="specTable">
@@ -1155,15 +1095,6 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
             </tr>
           </tbody>
         </table>
-        <div v-if="canTest(drawerRow)" class="testBox">
-          <el-button type="primary" size="small" :loading="testState === 'running'" @click="runModelTest">
-            <icon-player-play :size="14" aria-hidden="true" />
-            {{ translate("测试生成") }}
-          </el-button>
-          <p v-if="testState === 'running'" class="hintLine">{{ testHint() }}</p>
-          <p v-if="testState === 'error'" class="errorLine">{{ testError }}</p>
-          <img v-if="testImage" class="testImage" :src="testImage" alt="generated sample" />
-        </div>
       </div>
     </el-drawer>
 
@@ -1196,11 +1127,14 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
 
 <style lang="scss" scoped>
 .pluginsGrid {
+  // ACT: 页面四周留白单一真源：.pluginsMain 的右留白复用该变量，保证“卡片→滚动条”
+  // 间距恒等于“滚动条→页面右边框”间距。
+  --page-gutter: 16px;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 20px;
   height: 100%;
-  padding: 16px;
+  padding: var(--page-gutter);
 }
 
 .pluginsSidebar {
@@ -1249,6 +1183,8 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
 .pluginsMain {
   min-width: 0;
   overflow-y: auto;
+  // ACT: 卡片右缘与垂直滚动条之间留出与“滚动条→页面右边框”等宽的留白（需求 1）。
+  padding-right: var(--page-gutter);
 }
 
 .pickBar {
@@ -1502,6 +1438,7 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
   margin-bottom: 16px;
 
   .searchInput { flex: 1; min-width: 180px; }
+  .supplySelect { flex: none; width: 190px; }
 }
 
 .chipFilter {
@@ -1550,31 +1487,6 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
 
     &:first-child { color: var(--el-text-color-secondary); width: 40%; }
   }
-}
-
-.testBox {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.testImage {
-  width: 100%;
-  border-radius: calc(var(--ui-radius) * 1.5);
-  border: 1px solid var(--el-border-color-lighter);
-}
-
-.errorLine {
-  margin: 0;
-  color: var(--el-color-danger);
-  font-size: 12px;
-}
-
-.hintLine {
-  margin: 0;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
 }
 
 .assetPreviewBody {
