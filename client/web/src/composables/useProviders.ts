@@ -22,6 +22,7 @@ import {
   adoptFields,
   inferProviderType,
   providerTypeSpec,
+  LOCAL_COMFY_CARDS,
   type CardKind,
   type CardPrice,
   type InfoPayload,
@@ -102,6 +103,25 @@ function load(key: string): ProviderRecord[] {
       const spec = providerTypeSpec(row.providerType);
       if (spec !== undefined) row.fields = adoptFields(spec, row);
     }
+    // ACT: 措辞迁移：旧种子卡名/描述带“本机”立场（本机 ComfyUI 时代），而同一批卡被远程
+    // 探针复用——已存行同步为当前种子措辞（status 不动：那是探针的实时判定）。
+    const seedCards = new Map(LOCAL_COMFY_CARDS.map((card) => [card.id, card]));
+    for (const row of parsed) {
+      // ACT: 远程 ComfyUI 行现为纯 API 目录（/model_catalog）：清除历史存档里由旧探针
+      // 注入的硬编码种子卡（sd15-fp16 / ltxv-2b-local），杜绝文档来源信息残留。
+      if (row.providerType === "remote-comfy") {
+        row.cards = row.cards.filter((card) => !seedCards.has(card.id));
+      }
+      for (const card of row.cards) {
+        const seed = seedCards.get(card.id);
+        if (seed !== undefined) {
+          card.name = seed.name;
+          card.description = seed.description;
+        } else if (card.description === "本机 ComfyUI 检查点列表中的模型。") {
+          card.description = "所连引擎检查点列表中的模型。";
+        }
+      }
+    }
     // ACT: 历史存档迁移可能产生同 id 行（如 ent-llm 改名 bailian 与已存种子行
     // 相撞）：按 id 保留首现、丢弃后续同 id 行，消除 Vue key 冲突与同名双块；
     // 已下线的演示源（ent-gpu，企业 GPU 服务器 · 实验楼 B）残留行一并清除。
@@ -143,6 +163,10 @@ async function applyEnvDefaults(): Promise<void> {
       bailianApiKey?: string;
       bailianBaseUrl?: string;
       comfyBaseUrl?: string;
+      remoteComfyBaseUrl?: string;
+      remoteComfyToken?: string;
+      remoteComfyClientId?: string;
+      remoteComfyWorkflowJson?: string;
     };
     for (const provider of providers.value) {
       if (provider.fields === undefined) continue;
@@ -159,6 +183,22 @@ async function applyEnvDefaults(): Promise<void> {
       if (provider.providerType === "local-comfy") {
         if (provider.fields["baseUrl"] === "" && typeof env.comfyBaseUrl === "string" && env.comfyBaseUrl !== "") {
           provider.fields["baseUrl"] = env.comfyBaseUrl;
+        }
+        provider.baseUrl = provider.fields["baseUrl"];
+      }
+      if (provider.providerType === "remote-comfy") {
+        // ACT: 远程 ComfyUI（H20）四字段以 .env 的 REMOTE_COMFYUI_* 回填（仅空字段）。
+        if (provider.fields["baseUrl"] === "" && typeof env.remoteComfyBaseUrl === "string" && env.remoteComfyBaseUrl !== "") {
+          provider.fields["baseUrl"] = env.remoteComfyBaseUrl;
+        }
+        if (provider.fields["token"] === "" && typeof env.remoteComfyToken === "string" && env.remoteComfyToken !== "") {
+          provider.fields["token"] = env.remoteComfyToken;
+        }
+        if (provider.fields["clientId"] === "" && typeof env.remoteComfyClientId === "string" && env.remoteComfyClientId !== "") {
+          provider.fields["clientId"] = env.remoteComfyClientId;
+        }
+        if (provider.fields["workflowJson"] === "" && typeof env.remoteComfyWorkflowJson === "string" && env.remoteComfyWorkflowJson !== "") {
+          provider.fields["workflowJson"] = env.remoteComfyWorkflowJson;
         }
         provider.baseUrl = provider.fields["baseUrl"];
       }

@@ -6,7 +6,6 @@ import vue from "@vitejs/plugin-vue";
 import { i18nPlugin } from "@dsh-movie/i18n/vite";
 import {
   DEMO_CATALOG,
-  LOCAL_COMFY_CARDS,
   type CardPrice,
   type InfoPayload,
   type Modality,
@@ -146,39 +145,24 @@ function providerInfoBridge(): Plugin {
   }
 
   async function comfyInfo(base: string, headers: Record<string, string> = {}): Promise<InfoPayload> {
-    const [stats, ck] = await Promise.all([
-      fetchJson(`${base}/system_stats`, headers),
-      fetchJson(`${base}/object_info/CheckpointLoaderSimple`, headers),
-    ]);
-    const nodeInfo = (ck["CheckpointLoaderSimple"] ?? ck) as Record<string, unknown>;
-    const required = (nodeInfo["input"] as Record<string, unknown> | undefined)?.["required"] as
-      | Record<string, unknown>
-      | undefined;
-    const combo = required?.["ckpt_name"];
-    const names = Array.isArray(combo) && Array.isArray(combo[0]) ? (combo[0] as unknown[]) : [];
-    const checkpoints = names.filter((name): name is string => typeof name === "string");
-    const cards: ResourceCard[] = checkpoints.map((name, index) => {
-      const isSd15 = /v1-5|sd15|sd_1\.5/i.test(name);
-      const seed = LOCAL_COMFY_CARDS[0]!;
-      return isSd15
-        ? { ...seed, meta: { ...seed.meta } }
-        : {
-            id: `ckpt-${index}`,
-            kind: "models",
-            name,
-            description: "本机 ComfyUI 检查点列表中的模型。",
-            modality: "image",
-            status: "ready",
-            price: null,
-            meta: { format: "safetensors" },
-          };
-    });
-    if (!cards.some((card) => card.id === "sd15-fp16")) {
-      cards.unshift({ ...LOCAL_COMFY_CARDS[0]!, status: "not-installed", meta: { ...LOCAL_COMFY_CARDS[0]!.meta } });
+    const stats = await fetchJson(`${base}/system_stats`, headers);
+    // ACT: 优先取引擎自带模型目录（H20 自定义端点 /model_catalog：全部懒加载权重、
+    // 全类别、含 purpose/size/est_vram/loader/约百词描述）；无该端点的引擎（如 vanilla
+    // 本机 ComfyUI）回退到 CheckpointLoaderSimple 检查点组合。
+    let cards: ResourceCard[] = [];
+    try {
+      const catalog = await fetchJson(`${base}/model_catalog`, headers);
+      const models = catalog["models"];
+      if (Array.isArray(models)) {
+        cards = models.map((entry, index) => catalogCard(entry as Record<string, unknown>, index));
+      }
+    } catch {
+      /* 无 catalog 端点：回退检查点组合 */
     }
-    const ltxSeed = LOCAL_COMFY_CARDS[1]!;
-    const ltxPresent = checkpoints.some((name) => /ltx/i.test(name));
-    cards.push({ ...ltxSeed, status: ltxPresent ? "ready" : "not-installed", meta: { ...ltxSeed.meta } });
+    if (cards.length === 0) cards = await checkpointCards(base, headers);
+    // ACT: 模型清单与描述一律取自引擎实时 API（/model_catalog；无该端点时回退
+    // /object_info 检查点组合）——绝不注入任何硬编码/文档来源的种子卡（如 SD1.5、
+    // LTX-Video 2B）。引擎有什么就显示什么，描述用上游原生文本。
     const devices = stats["devices"];
     const device = Array.isArray(devices) ? (devices[0] as Record<string, unknown> | undefined) : undefined;
     const system = stats["system"] as Record<string, unknown> | undefined;
@@ -191,6 +175,72 @@ function providerInfoBridge(): Plugin {
         version: typeof system?.["comfyui_version"] === "string" ? system["comfyui_version"] : "",
       },
     };
+  }
+
+  /** 无 /model_catalog 端点引擎的回退卡列：仅检查点组合（/object_info）。 */
+  async function checkpointCards(base: string, headers: Record<string, string>): Promise<ResourceCard[]> {
+    const ck = await fetchJson(`${base}/object_info/CheckpointLoaderSimple`, headers);
+    const nodeInfo = (ck["CheckpointLoaderSimple"] ?? ck) as Record<string, unknown>;
+    const required = (nodeInfo["input"] as Record<string, unknown> | undefined)?.["required"] as
+      | Record<string, unknown>
+      | undefined;
+    const combo = required?.["ckpt_name"];
+    const names = Array.isArray(combo) && Array.isArray(combo[0]) ? (combo[0] as unknown[]) : [];
+    const checkpoints = names.filter((name): name is string => typeof name === "string");
+    // ACT: 检查点名称直接取自 /object_info 组合（引擎实时 API），描述用中性文案，
+    // 不再套用任何硬编码种子卡。
+    return checkpoints.map((name, index) => ({
+      id: `ckpt-${index}`,
+      kind: "models" as const,
+      name,
+      description: "所连引擎检查点列表（/object_info）中的模型。",
+      modality: "image" as const,
+      status: "ready" as const,
+      price: null,
+      meta: { format: "safetensors" },
+    }));
+  }
+
+  /** ACT: /model_catalog 单条目 → 模型卡（上游原生文本，不经 i18n 翻译，同百炼原生目录先例）。 */
+  function catalogCard(entry: Record<string, unknown>, index: number): ResourceCard {
+    const filename = typeof entry["filename"] === "string" ? entry["filename"] : String(entry["id"] ?? `model-${index}`);
+    const category = typeof entry["category"] === "string" ? entry["category"] : "";
+    const meta: Record<string, string> = { category };
+    if (typeof entry["size_human"] === "string") meta["size"] = entry["size_human"];
+    if (typeof entry["est_vram_gb"] === "number") meta["vram"] = `${entry["est_vram_gb"]} GB`;
+    if (typeof entry["loader"] === "string") meta["loader"] = entry["loader"];
+    const description = typeof entry["description"] === "string" && entry["description"] !== ""
+      ? entry["description"]
+      : (typeof entry["purpose"] === "string" ? entry["purpose"] : filename);
+    // ACT: 模态优先用上游 /model_catalog 自带的 modality 字段（若引擎提供）；
+    // 尚未提供时才回退到客户端类别/文件名推断，保证一旦 H20 补充该字段即完全 API 驱动。
+    const apiModality = entry["modality"];
+    const modality: Modality | undefined =
+      apiModality === "text" || apiModality === "image" || apiModality === "video" ||
+      apiModality === "audio" || apiModality === "3dgs" || apiModality === "mesh"
+        ? apiModality
+        : catalogModality(category, filename);
+    return {
+      id: typeof entry["id"] === "string" ? entry["id"] : `${category}/${filename}`,
+      kind: "models",
+      name: filename,
+      description,
+      modality,
+      status: "ready",
+      price: null,
+      meta,
+    };
+  }
+
+  /** ACT: 回退推断——仅当 /model_catalog 未提供 modality 字段时，由类别+文件名推导模态（组件类如 VAE 不给模态）。 */
+  function catalogModality(category: string, filename: string): Modality | undefined {
+    const f = filename.toLowerCase();
+    if (category === "vae") return undefined;
+    if (category === "echo_mimic" || category === "frame_interpolation" || /ltx|wan|vace|motion_module|denoising_unet|reference_unet|rife/.test(f)) return "video";
+    if (category === "audio" || /audio|whisper/.test(f)) return "audio";
+    if (category === "insightface" || category === "clip_vision" || category === "controlnet" || category === "instantid" || category === "upscale_models" || /qwen_image|sdxl|sd_xl|v1-5|sd15|instantid|ip-adapter|controlnet|clip|realesrgan|esrgan|face_locator/.test(f)) return "image";
+    if (category === "text_encoders") return "text";
+    return undefined;
   }
 
   /**
@@ -355,12 +405,16 @@ function providerInfoBridge(): Plugin {
         .catch(() => json(503, { error: "engine-offline" }));
       return;
     }
-    // ACT: .env 真源下发：客户端据此回填百炼 / 本机 ComfyUI 接入的类型字段（真实上游地址）。
+    // ACT: .env 真源下发：客户端据此回填百炼 / 本机 ComfyUI / 远程 ComfyUI 接入的类型字段（真实上游地址）。
     if (url === "/supply-env" || url.startsWith("/supply-env?")) {
       json(200, {
         bailianApiKey: SERVER_ENV["BAILIAN_API_KEY"] ?? "",
         bailianBaseUrl: BAILIAN_BASE,
         comfyBaseUrl: COMFY_BASE,
+        remoteComfyBaseUrl: (SERVER_ENV["REMOTE_COMFYUI_BASE_URL"] ?? "").replace(/\/+$/, ""),
+        remoteComfyToken: SERVER_ENV["REMOTE_COMFYUI_API_TOKEN"] ?? "",
+        remoteComfyClientId: SERVER_ENV["REMOTE_COMFYUI_CLIENT_ID"] ?? "",
+        remoteComfyWorkflowJson: SERVER_ENV["REMOTE_COMFYUI_WORKFLOW_JSON"] ?? "",
       });
       return;
     }

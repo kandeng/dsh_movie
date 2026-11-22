@@ -3449,12 +3449,9 @@
   "高斯泼溅重建的室内场景，可自由机位漫游。": "Dalaman dibina semula dengan gaussian splat, kamera bergerak bebas.",
   "四旋翼无人机低模网格，含 UV 与 PBR 贴图。": "Mesh quadcopter poli rendah dengan UV dan tekstur PBR.",
   "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，512×512 出图约 4 秒。": "Model terpangkas SD1.5 fp16 dipasang dalam ComfyUI tempatan; ~4 s setiap imej 512×512.",
-  "视频模板已就绪，权重尚未下载到本机 ComfyUI。": "Templat video sedia; pemberat belum dimuat turun ke ComfyUI tempatan.",
-  "本机 ComfyUI 检查点列表中的模型。": "Model daripada senarai checkpoint ComfyUI tempatan.",
   "CPU 引擎模式：生成约需 2–3 分钟，请耐心等待。": "Mod enjin CPU: penjanaan mengambil masa kira-kira 2–3 minit, sila tunggu.",
   "正在调用真实生成管线，请稍候…": "Menjalankan saluran penjanaan sebenar, sila tunggu…",
   "内存": "RAM",
-  "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，支持 512×512 出图。": "Model SD1.5 fp16 terpangkas yang dipasang dalam ComfyUI setempat; menyokong penjanaan imej 512×512.",
   "供应": "Bekalan",
   "添加供应": "Tambah bekalan",
   "搜索供应或地址": "Cari bekalan atau alamat",
@@ -3468,5 +3465,8 @@
   "供应技能": "Kemahiran",
   "供应资产": "Aset",
   "缺少 API 密钥": "Kunci API tiada",
-  "缺少端点地址": "URL endpoint tiada"
+  "缺少端点地址": "URL endpoint tiada",
+  "SD1.5 fp16 精简检查点：所连引擎的检查点列表含该权重时就绪。": "Checkpoint SD1.5 fp16 dipangkas: sedia apabila daftar checkpoint enjin bersambung memuat beratnya.",
+  "LTX-Video 2B 视频模板已就绪：所连引擎的检查点列表含 ltx-video-2b 权重时就绪。": "Templat video LTX-Video 2B sedia: sedia apabila daftar checkpoint enjin bersambung memuat berat ltx-video-2b.",
+  "所连引擎检查点列表中的模型。": "Model daripada daftar checkpoint enjin bersambung."
 }

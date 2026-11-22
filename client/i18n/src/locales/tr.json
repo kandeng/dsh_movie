@@ -3450,12 +3450,9 @@
   "高斯泼溅重建的室内场景，可自由机位漫游。": "Gaussian splat ile yeniden oluşturulmuş, serbest kamera dolaşımlı iç mekan.",
   "四旋翼无人机低模网格，含 UV 与 PBR 贴图。": "UV ve PBR dokuları içeren düşük poligonlu quadcopter mesh'i.",
   "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，512×512 出图约 4 秒。": "Yerel ComfyUI'da kurulu SD1.5 fp16 budanmış modeli; 512×512 görsel başına ~4 sn.",
-  "视频模板已就绪，权重尚未下载到本机 ComfyUI。": "Video şablonu hazır; ağırlıklar yerel ComfyUI'ya henüz indirilmedi.",
-  "本机 ComfyUI 检查点列表中的模型。": "Yerel ComfyUI checkpoint listesindeki model.",
   "CPU 引擎模式：生成约需 2–3 分钟，请耐心等待。": "CPU motor modu: üretim yaklaşık 2–3 dakika sürer, lütfen bekleyin.",
   "正在调用真实生成管线，请稍候…": "Gerçek üretim hattı çalıştırılıyor, lütfen bekleyin…",
   "内存": "RAM",
-  "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，支持 512×512 出图。": "Yerel ComfyUI'da kurulu SD1.5 fp16 budanmış model; 512×512 görüntü üretimini destekler.",
   "供应": "Tedarik",
   "添加供应": "Tedarik ekle",
   "搜索供应或地址": "Tedarik veya adres ara",
@@ -3469,5 +3466,8 @@
   "供应技能": "Beceri",
   "供应资产": "Varlık",
   "缺少 API 密钥": "API anahtarı eksik",
-  "缺少端点地址": "Uç nokta URL'si eksik"
+  "缺少端点地址": "Uç nokta URL'si eksik",
+  "SD1.5 fp16 精简检查点：所连引擎的检查点列表含该权重时就绪。": "SD1.5 fp16 budanmış kontrol noktası: bağlı motorun kontrol noktası listesi ağırlıklarını içerdiğinde hazır.",
+  "LTX-Video 2B 视频模板已就绪：所连引擎的检查点列表含 ltx-video-2b 权重时就绪。": "LTX-Video 2B video şablonu hazır: bağlı motorun kontrol noktası listesi ltx-video-2b ağırlıklarını içerdiğinde hazır.",
+  "所连引擎检查点列表中的模型。": "Bağlı motorun kontrol noktası listesinden model."
 }

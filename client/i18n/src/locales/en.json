@@ -3585,12 +3585,9 @@
   "高斯泼溅重建的室内场景，可自由机位漫游。": "Gaussian-splat reconstructed interior with free camera roaming.",
   "四旋翼无人机低模网格，含 UV 与 PBR 贴图。": "Low-poly quadcopter mesh with UVs and PBR textures.",
   "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，512×512 出图约 4 秒。": "SD1.5 fp16 pruned model installed in local ComfyUI; ~4 s per 512×512 image.",
-  "视频模板已就绪，权重尚未下载到本机 ComfyUI。": "Video template ready; weights not yet downloaded to local ComfyUI.",
-  "本机 ComfyUI 检查点列表中的模型。": "Model from the local ComfyUI checkpoint list.",
   "CPU 引擎模式：生成约需 2–3 分钟，请耐心等待。": "CPU engine mode: generation takes about 2–3 minutes, please wait.",
   "正在调用真实生成管线，请稍候…": "Running the real generation pipeline, please wait…",
   "内存": "RAM",
-  "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，支持 512×512 出图。": "SD1.5 fp16 pruned model installed in local ComfyUI; supports 512×512 image generation.",
   "供应": "Supply",
   "添加供应": "Add supply",
   "搜索供应或地址": "Search supplies or endpoint",
@@ -3604,5 +3601,8 @@
   "供应技能": "Skill",
   "供应资产": "Asset",
   "缺少 API 密钥": "Missing API key",
-  "缺少端点地址": "Missing endpoint URL"
+  "缺少端点地址": "Missing endpoint URL",
+  "SD1.5 fp16 精简检查点：所连引擎的检查点列表含该权重时就绪。": "SD1.5 fp16 pruned checkpoint: ready once the connected engine's checkpoint list includes its weights.",
+  "LTX-Video 2B 视频模板已就绪：所连引擎的检查点列表含 ltx-video-2b 权重时就绪。": "LTX-Video 2B video template ready: ready once the connected engine's checkpoint list includes the ltx-video-2b weights.",
+  "所连引擎检查点列表中的模型。": "Model from the connected engine's checkpoint list."
 }

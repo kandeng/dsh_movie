@@ -491,7 +491,7 @@ export const LOCAL_COMFY_CARDS: ResourceCard[] = [
     id: "sd15-fp16",
     kind: "models",
     name: "Stable Diffusion 1.5 (fp16)",
-    description: "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，支持 512×512 出图。",
+    description: "SD1.5 fp16 精简检查点：所连引擎的检查点列表含该权重时就绪。",
     modality: "image",
     status: "ready",
     price: null,
@@ -500,8 +500,8 @@ export const LOCAL_COMFY_CARDS: ResourceCard[] = [
   {
     id: "ltxv-2b-local",
     kind: "models",
-    name: "LTX-Video 2B（本机）",
-    description: "视频模板已就绪，权重尚未下载到本机 ComfyUI。",
+    name: "LTX-Video 2B",
+    description: "LTX-Video 2B 视频模板已就绪：所连引擎的检查点列表含 ltx-video-2b 权重时就绪。",
     modality: "video",
     status: "not-installed",
     price: null,
@@ -543,6 +543,14 @@ export function seedProviders(): ProviderRecord[] {
       // ACT: 类型化字段：Base URL 留空待 /supply-env 以 .env 的 COMFYUI_BASE_URL 回填。
       providerType: "local-comfy" as ProviderType,
       fields: { baseUrl: "", token: "", clientId: "" },
+    },
+    // ACT: 远程 ComfyUI（H20 over ZeroTier）：env 驱动接入。四个字段留空待
+    // /supply-env 以 .env 的 REMOTE_COMFYUI_* 回填（每次重启自动填充）；连接握手经
+    // /supply-probe 以字段所填地址真实访问远端引擎（/system_stats + /object_info）。
+    {
+      ...mk("remote-comfy-h20", "远程 ComfyUI H20", "comfy", "", { cards: [], usage: {} }),
+      providerType: "remote-comfy" as ProviderType,
+      fields: { baseUrl: "", token: "", clientId: "", workflowJson: "" },
     },
     // ACT: 百炼平台接入（env 驱动）：端点为同源桥 /bailian，apiKey 由 server/.env 的
     // BAILIAN_API_KEY 运行时回填（useProviders.applyEnvDefaults）；连接时桥以字段所填

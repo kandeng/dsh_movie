@@ -3449,12 +3449,9 @@
   "高斯泼溅重建的室内场景，可自由机位漫游。": "Gaussian-splat reconstructed interior na may free camera roaming.",
   "四旋翼无人机低模网格，含 UV 与 PBR 贴图。": "Low-poly quadcopter mesh na may UVs at PBR textures.",
   "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，512×512 出图约 4 秒。": "SD1.5 fp16 pruned model na naka-install sa local ComfyUI; ~4 s bawat 512×512 image.",
-  "视频模板已就绪，权重尚未下载到本机 ComfyUI。": "Handa na ang video template; hindi pa na-download ang weights sa local ComfyUI.",
-  "本机 ComfyUI 检查点列表中的模型。": "Model mula sa listahan ng checkpoint ng local ComfyUI.",
   "CPU 引擎模式：生成约需 2–3 分钟，请耐心等待。": "CPU engine mode: ang pagbuo ay tumatagal ng humigit-kumulang 2–3 minuto, mangyaring maghintay.",
   "正在调用真实生成管线，请稍候…": "Tinatakbo ang tunay na generation pipeline, mangyaring maghintay…",
   "内存": "RAM",
-  "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，支持 512×512 出图。": "SD1.5 fp16 pruned model na naka-install sa lokal na ComfyUI; sumusuporta sa 512×512 na pagbuo ng imahe.",
   "供应": "Suplay",
   "添加供应": "Magdagdag ng suplay",
   "搜索供应或地址": "Maghanap ng suplay o address",
@@ -3468,5 +3465,8 @@
   "供应技能": "Kasanayan",
   "供应资产": "Asset",
   "缺少 API 密钥": "Kulang ang API key",
-  "缺少端点地址": "Kulang ang URL ng endpoint"
+  "缺少端点地址": "Kulang ang URL ng endpoint",
+  "SD1.5 fp16 精简检查点：所连引擎的检查点列表含该权重时就绪。": "SD1.5 fp16 pruned checkpoint: handa kapag kasama sa checkpoint list ng nakakonektang engine ang mga weight nito.",
+  "LTX-Video 2B 视频模板已就绪：所连引擎的检查点列表含 ltx-video-2b 权重时就绪。": "Handa ang video template na LTX-Video 2B: handa kapag kasama sa checkpoint list ng nakakonektang engine ang mga weight ng ltx-video-2b.",
+  "所连引擎检查点列表中的模型。": "Modelo mula sa checkpoint list ng nakakonektang engine."
 }

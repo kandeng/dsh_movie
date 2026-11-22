@@ -3450,12 +3450,9 @@
   "高斯泼溅重建的室内场景，可自由机位漫游。": "Nội thất tái dựng bằng gaussian splat, tự do di chuyển camera.",
   "四旋翼无人机低模网格，含 UV 与 PBR 贴图。": "Mesh quadcopter low-poly kèm UV và texture PBR.",
   "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，512×512 出图约 4 秒。": "Mô hình SD1.5 fp16 tinh giản đã cài trong ComfyUI cục bộ; ~4 giây mỗi ảnh 512×512.",
-  "视频模板已就绪，权重尚未下载到本机 ComfyUI。": "Mẫu video đã sẵn sàng; trọng số chưa tải về ComfyUI cục bộ.",
-  "本机 ComfyUI 检查点列表中的模型。": "Mô hình trong danh sách checkpoint của ComfyUI cục bộ.",
   "CPU 引擎模式：生成约需 2–3 分钟，请耐心等待。": "Chế độ engine CPU: quá trình tạo mất khoảng 2–3 phút, vui lòng đợi.",
   "正在调用真实生成管线，请稍候…": "Đang chạy pipeline tạo thực, vui lòng đợi…",
   "内存": "RAM",
-  "本机 ComfyUI 已安装的 SD1.5 fp16 精简模型，支持 512×512 出图。": "Mô hình SD1.5 fp16 tinh giản đã cài trong ComfyUI cục bộ; hỗ trợ tạo ảnh 512×512.",
   "供应": "Cung ứng",
   "添加供应": "Thêm cung ứng",
   "搜索供应或地址": "Tìm cung ứng hoặc địa chỉ",
@@ -3469,5 +3466,8 @@
   "供应技能": "Kỹ năng",
   "供应资产": "Tài sản",
   "缺少 API 密钥": "Thiếu khóa API",
-  "缺少端点地址": "Thiếu URL điểm cuối"
+  "缺少端点地址": "Thiếu URL điểm cuối",
+  "SD1.5 fp16 精简检查点：所连引擎的检查点列表含该权重时就绪。": "Checkpoint SD1.5 fp16 tinh giản: sẵn sàng khi danh sách checkpoint của engine đang kết nối chứa trọng số của nó.",
+  "LTX-Video 2B 视频模板已就绪：所连引擎的检查点列表含 ltx-video-2b 权重时就绪。": "Mẫu video LTX-Video 2B đã sẵn: sẵn sàng khi danh sách checkpoint của engine đang kết nối chứa trọng số ltx-video-2b.",
+  "所连引擎检查点列表中的模型。": "Mô hình từ danh sách checkpoint của engine đang kết nối."
 }
