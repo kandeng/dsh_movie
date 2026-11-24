@@ -159,6 +159,10 @@ ports than the box has GPUs is harmless.
 ```bash
 cd "$COMFY_ROOT"
 { find ComfyUI/models -type f -size +1k ! -name 'put_*' ! -name '*.aria2'
+  # custom-node checkpoints live OUTSIDE models/ (e.g. Frame-Interpolation stores
+  # its ckpt at <node>/ckpts/<MODEL_TYPE>/<file>), so enumerate them too:
+  find ComfyUI/custom_nodes -type f -size +1k ! -name '*.aria2' \
+    \( -name '*.pth' -o -name '*.pt' -o -name '*.onnx' -o -name '*.bin' -o -name '*.safetensors' \)
   find CosyVoice/pretrained_models -type f
 } | while read -r f; do printf '%s\t%s\t-\n' "$f" "$(stat -c %s "$f")"; done \
   > /tmp/models.manifest

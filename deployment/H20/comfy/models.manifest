@@ -1,4 +1,4 @@
-ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife47.pth	21344827	https://hf-mirror.com/marduk191/rife/resolve/main/rife47.pth
+ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife/rife47.pth	21344827	https://hf-mirror.com/marduk191/rife/resolve/main/rife47.pth
 ComfyUI/models/checkpoints/sd_xl_base_1.0.safetensors	6938078334	https://www.modelscope.cn/models/AI-ModelScope/stable-diffusion-xl-base-1.0/resolve/master/sd_xl_base_1.0.safetensors
 ComfyUI/models/checkpoints/stable-audio-open-1.0.safetensors	4853889016	https://www.modelscope.cn/models/Comfy-Org/stable-audio-open-1.0_repackaged/resolve/master/stable-audio-open-1.0.safetensors
 ComfyUI/models/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors	2528373448	https://hf-mirror.com/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors
