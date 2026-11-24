@@ -1,7 +1,7 @@
 /**
  * comfy-remote: MCP server bridging dsh_movie to the remote H20 ComfyUI
  * service (host `yw01`, reached over the ZeroTier overlay — see
- * ../../zerotier/zt_install.sh and ../comfy_README.md "Remote access").
+ * ../../zerotier/zt_install.sh and ../../../deployment/H20/comfy/README.md "Remote access").
  *
  * This is NOT the Phase-2 canvas `comfy-bridge` inside dsh-movie-gateway, and
  * NOT the Phase-8 media seam (`comfy-provider.ts`). It is an operator/agent

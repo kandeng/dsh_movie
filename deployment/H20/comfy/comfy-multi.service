@@ -1,0 +1,17 @@
+[Unit]
+Description=ComfyUI movie-render fleet (8188 on GPU0 + instances 8189-8195 on GPU1-7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/root/comfy
+ExecStart=/root/comfy/comfy_start.sh
+# Stops only the additional instances (8189-8195). The 8188 instance is left
+# untouched on purpose; stop it with /root/comfy/comfy_stop.sh.
+ExecStop=/root/comfy/comfy_stop_multi.sh
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
