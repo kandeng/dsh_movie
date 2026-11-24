@@ -2,7 +2,7 @@
 
 The CosyVoice2 narration service on the H20 host listens on a **local Unix
 socket** (``/root/comfy/log/tts.sock``) and is never remotely reachable (see
-``extension/comfy/comfy_README.md`` §"TTS API" and §"Remote access"). The
+``deployment/H20/comfy/README.md`` §"TTS API" and §"Remote access"). The
 DSH-Movie gateway runs on a different machine and can only speak HTTP over the
 ZeroTier overlay, so it cannot open the Unix socket directly.
 

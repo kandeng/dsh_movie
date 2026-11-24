@@ -5,12 +5,12 @@ ComfyUI media factory on the remote H20 GPU server (`yw01`,
 `10.188.8.105` ZeroTier managed IP), reached over the **ZeroTier** overlay —
 the H20 sits behind an enterprise firewall with no inbound access.
 (Tailscale remains installed as a legacy alternative; see
-`comfy_README.md` §Remote access.)
+`deployment/H20/comfy/README.md` §Remote access.)
 
 | File | What it is |
 | --- | --- |
-| `comfy_README.md` | H20-side operator doc (start/stop, HTTP API, model catalog, TTS socket, remote-access runbook) — copied from the H20 |
-| `comfy_INSTALL.md` | H20-side install provenance (24 models, ~107 GB, deviations, acceptance runs) — copied from the H20 |
+| `deployment/H20/comfy/README.md` | H20-side operator doc (start/stop, HTTP API, model catalog, TTS socket, remote-access runbook) — snapshot of the H20 host file |
+| `deployment/H20/comfy/INSTALL.md` | H20-side install provenance (24 models, ~107 GB, deviations, acceptance runs) — snapshot of the H20 host file |
 | `src/server.ts` | The MCP server (stdio) |
 | `src/smoke.ts` | Upstream smoke check (no MCP layer needed) |
 | `../zerotier/zt_install.sh` | Local-side ZeroTier install/join script (prerequisite) |
@@ -87,7 +87,7 @@ Register in an MCP client (stdio):
 
 - The ComfyUI API has **no authentication**; exposure is limited by the
   ZeroTier private network (members must be authorized in ZeroTier Central).
-  See `comfy_README.md` §Remote access for the H20-side lockdown options.
+  See `deployment/H20/comfy/README.md` §Remote access for the H20-side lockdown options.
 - The CosyVoice2 TTS service listens on a **unix socket**
   (`/root/comfy/log/tts.sock`) on the H20 — not reachable over TCP/overlay;
   only via `ssh -L` socket forwarding. Not exposed as an MCP tool yet.

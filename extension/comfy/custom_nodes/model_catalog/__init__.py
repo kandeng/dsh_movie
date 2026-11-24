@@ -7,7 +7,7 @@ bridge can treat both engines identically:
     GET /model_catalog/categories   -> {"categories": [{"name", "count"}, ...]}
     GET /model_catalog/{category}   -> {"category", "models"} (404 if unknown)
 
-Each entry follows the documented schema (extension/comfy/comfy_README.md):
+Each entry follows the documented schema (deployment/H20/comfy/README.md):
 ``id``, ``category``, ``filename``, ``path``, ``size_bytes``, ``size_human``,
 ``lazy_loaded``, ``purpose``, ``loader``, ``est_vram_gb``, ``est_ram_gb``,
 ``description``.

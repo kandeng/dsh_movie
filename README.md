@@ -312,8 +312,10 @@ pool via `DSH_COMFY_POOL` for round-robin + submit-failover.
 
 For agent/operator access (model catalog introspection, job submission,
 output fetch) an MCP bridge lives in [`extension/comfy/`](extension/comfy/README.md);
-the H20-side operator and provenance docs are `extension/comfy/comfy_README.md`
-and `comfy_INSTALL.md`. Security notes: the ComfyUI API has **no
+the H20-side operator and provenance docs are
+[`deployment/H20/comfy/README.md`](deployment/H20/comfy/README.md) and
+[`deployment/H20/comfy/INSTALL.md`](deployment/H20/comfy/INSTALL.md).
+Security notes: the ComfyUI API has **no
 authentication** — exposure is limited to the ZeroTier private network
 (authorize only your own nodes; never publish the network), and the CosyVoice2
 TTS socket is not network-reachable.
