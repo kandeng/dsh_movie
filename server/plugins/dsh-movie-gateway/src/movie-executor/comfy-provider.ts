@@ -86,6 +86,20 @@ export interface ComfyProvider extends MediaProvider {
 /** Health-probe cache TTL and per-request probe timeout (P8-M5). */
 const PROBE_TTL_MS = 5_000
 const PROBE_TIMEOUT_MS_DEFAULT = 60_000
+/**
+ * P8-M7 health-gate tuning for the flaky ZeroTier overlay:
+ *  - capability (/object_info, ~2.4 MB) is static unless a custom node is
+ *    installed, so cache it per endpoint for a long TTL;
+ *  - liveness (/system_stats, ~1 KB) is cheap and bounds a hung ping;
+ *  - a transient liveness failure within the grace window of the last good
+ *    probe fails OPEN (run admitted) instead of 503-ing every submit;
+ *  - the ZeroTier-central re-resolve is throttled so a prompt storm does not
+ *    hammer the controller API on every run.
+ */
+const CAPABILITY_TTL_MS = 600_000
+const LIVENESS_TIMEOUT_MS = 8_000
+const READINESS_GRACE_MS = 120_000
+const ENDPOINT_REFRESH_TTL_MS = 60_000
 
 /**
  * Resolve the ComfyUI config from the environment (Phase-8 settings gate).
@@ -244,8 +258,13 @@ export function createComfyProvider(
 
   // --- dynamic endpoint resolution (ZeroTier overlay) ----------------------
   let currentEndpoints: string[] = config.endpoints
-  async function refreshEndpoints(): Promise<void> {
+  // P8-M7: throttle the ZeroTier-central re-resolve so a prompt storm does not
+  // hammer the controller API (which itself can be slow/blocked in-region).
+  let lastEndpointRefresh = 0
+  async function refreshEndpoints(force = false): Promise<void> {
     if (config.resolveEndpoints === undefined) return
+    if (!force && currentEndpoints.length > 0 && Date.now() - lastEndpointRefresh < ENDPOINT_REFRESH_TTL_MS) return
+    lastEndpointRefresh = Date.now()
     try {
       const resolved = await config.resolveEndpoints()
       if (resolved.length > 0) currentEndpoints = resolved
@@ -284,32 +303,59 @@ export function createComfyProvider(
     else inflight -= 1
   }
 
-  // --- health probe (P8-M5): fail-closed, short TTL -------------------------
+  // --- health probe (P8-M5 + P8-M7): liveness split from capability ---------
+  // P8-M7: the old gate forced a FULL probe (/system_stats + the 2.4 MB
+  // /object_info) on *every* /prompt. Over the flaky overlay that cost ~10-15 s
+  // per submit and 503'd whenever a single fetch hiccuped, even though the
+  // backend was healthy. Node coverage only changes when a custom node is
+  // installed, so it is cached per endpoint; each run gates on a cheap liveness
+  // ping, and a transient failure within READINESS_GRACE_MS of the last good
+  // probe fails OPEN (the job's own submit/poll — now backed by
+  // cancel-on-disconnect — settles a truly-dead backend honestly).
   let lastProbe: { at: number; result: ComfyReadiness } | undefined
   const NOT_READY: ComfyReadiness = { image: false, video: false, audio: false }
+  /** Per-endpoint /object_info coverage, cached (static unless nodes change). */
+  const capabilityCache = new Map<string, { at: number; result: ComfyReadiness }>()
 
-  async function probeEndpoint(endpoint: string): Promise<ComfyReadiness> {
+  /** Cheap reachability ping: true when /system_stats answers 2xx quickly. */
+  async function probeLiveness(endpoint: string): Promise<boolean> {
     try {
       const stats = await fetch(`${endpoint}/system_stats`, {
         headers: authHeaders(),
-        signal: AbortSignal.timeout(config.probeTimeoutMs ?? PROBE_TIMEOUT_MS_DEFAULT),
+        signal: AbortSignal.timeout(LIVENESS_TIMEOUT_MS),
       })
-      if (!stats.ok) return NOT_READY
+      return stats.ok
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Template node coverage from /object_info, cached per endpoint. `force`
+   * refreshes (used at activation); otherwise a fresh cache skips the 2.4 MB
+   * fetch, and a transient fetch failure keeps the last known coverage.
+   */
+  async function probeCapability(endpoint: string, force: boolean): Promise<ComfyReadiness> {
+    const cached = capabilityCache.get(endpoint)
+    if (!force && cached !== undefined && Date.now() - cached.at < CAPABILITY_TTL_MS) return cached.result
+    try {
       const infoResponse = await fetch(`${endpoint}/object_info`, {
         headers: authHeaders(),
         signal: AbortSignal.timeout(config.probeTimeoutMs ?? PROBE_TIMEOUT_MS_DEFAULT),
       })
-      if (!infoResponse.ok) return NOT_READY
+      if (!infoResponse.ok) return cached?.result ?? NOT_READY
       const objectInfo = (await infoResponse.json()) as Record<string, unknown>
-      return {
+      const result: ComfyReadiness = {
         image: missingNodeTypes(templates.image, objectInfo).length === 0,
         video: missingNodeTypes(templates.video, objectInfo).length === 0,
         audio: templates.audio !== undefined && missingNodeTypes(templates.audio, objectInfo).length === 0,
       }
+      capabilityCache.set(endpoint, { at: Date.now(), result })
+      return result
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      logger.warn('[movie-executor] comfy probe failed (%s): %s', endpoint, message)
-      return NOT_READY
+      logger.warn('[movie-executor] comfy capability probe failed (%s): %s', endpoint, message)
+      return cached?.result ?? NOT_READY
     }
   }
 
@@ -317,16 +363,33 @@ export function createComfyProvider(
     if (!force && lastProbe !== undefined && Date.now() - lastProbe.at < PROBE_TTL_MS) {
       return lastProbe.result
     }
-    await refreshEndpoints()
+    await refreshEndpoints(force)
     if (currentEndpoints.length === 0) {
       lastProbe = { at: Date.now(), result: NOT_READY }
       return NOT_READY
     }
-    const results = await Promise.all(currentEndpoints.map((endpoint): Promise<ComfyReadiness> => probeEndpoint(endpoint)))
+    const endpoints = [...currentEndpoints]
+    // Cheap liveness across the pool; only a LIVE endpoint pays for (cached)
+    // capability, so a dead one never triggers a 2.4 MB fetch.
+    const live = await Promise.all(endpoints.map((endpoint): Promise<boolean> => probeLiveness(endpoint)))
+    const caps = await Promise.all(endpoints.map((endpoint, index): Promise<ComfyReadiness> =>
+      live[index] === true ? probeCapability(endpoint, force) : Promise.resolve(NOT_READY)))
     const result: ComfyReadiness = {
-      image: results.some((entry): boolean => entry.image),
-      video: results.some((entry): boolean => entry.video),
-      audio: results.some((entry): boolean => entry.audio),
+      image: caps.some((entry): boolean => entry.image),
+      video: caps.some((entry): boolean => entry.video),
+      audio: caps.some((entry): boolean => entry.audio),
+    }
+    const anyLive = live.some((entry): boolean => entry)
+    const ready = result.image || result.video || result.audio
+    // P8-M7 fail-open: a transient overlay hiccup (no endpoint answered) within
+    // the grace window of a last-good ready probe holds the prior readiness so a
+    // healthy-but-momentarily-unreachable backend does not 503 every submit.
+    // lastProbe.at is deliberately NOT refreshed, so the grace stays bounded.
+    if (!anyLive && !ready && lastProbe !== undefined
+        && (lastProbe.result.image || lastProbe.result.video)
+        && Date.now() - lastProbe.at < READINESS_GRACE_MS) {
+      logger.warn('[movie-executor] comfy liveness hiccup; holding last-good readiness within %dms grace', READINESS_GRACE_MS)
+      return lastProbe.result
     }
     lastProbe = { at: Date.now(), result }
     return result
@@ -530,10 +593,22 @@ export function createComfyProvider(
           logger.warn('[movie-executor] comfy ws attach failed (%s): %s — polling only', endpoint, message)
         }
 
+        // Read the abort flag through a predicate so TS control-flow narrowing
+        // does not assume it stays false across the `await sleep` below.
+        const aborted = (): boolean => hooks?.signal?.aborted === true
         try {
           for (;;) {
+            // P8-M6: honour a cancel (client disconnect → registry kill →
+            // controller.abort) *before* waiting, so the single in-flight slot
+            // frees within milliseconds instead of after the next poll tick.
+            // The `timeoutMs` deadline below is only a backstop for a client
+            // that stays connected while the backend itself hangs.
+            if (aborted()) {
+              interrupt(endpoint)
+              throw new Error('comfy generation interrupted')
+            }
             await sleep(config.pollIntervalMs)
-            if (hooks?.signal?.aborted === true) {
+            if (aborted()) {
               interrupt(endpoint)
               throw new Error('comfy generation interrupted')
             }

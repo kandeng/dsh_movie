@@ -291,12 +291,15 @@ export function apply(ctx: Context, config: Config): void {
         ...(llmText === undefined ? {} : { review: (classType: string, artifact: unknown, criteria: string): Promise<string> => llmText.review(classType, artifact, criteria) }),
         ...(matrixChat === undefined ? {} : { matrixChat }),
         ...(movieMarket === undefined ? {} : { movieMarket }),
-        // P8-M5: fail-closed pre-run health gate. When ComfyUI is configured but
-        // unreachable/lacking template nodes, /prompt answers 503 instead of
-        // queueing work onto an unready backend.
+        // P8-M5/P8-M7: pre-run health gate. Uses the cheap cached probe (a
+        // /system_stats liveness ping + long-lived /object_info coverage) rather
+        // than forcing a full 2.4 MB re-probe on every submit; the provider
+        // fails OPEN on a transient overlay hiccup within its grace window, so a
+        // healthy-but-momentarily-unreachable backend no longer 503s each prompt.
+        // The activation probe above (force=true) still seeds the coverage cache.
         ...(comfyProvider === undefined ? {} : {
           beforeRun: async (): Promise<void> => {
-            const readiness = await comfyProvider.probe(true)
+            const readiness = await comfyProvider.probe(false)
             if (!readiness.image && !readiness.video) {
               throw new Error('ComfyUI backend is not ready (health probe failed closed)')
             }

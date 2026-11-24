@@ -81,7 +81,7 @@ import { applyOpsToGraph } from './movie-executor/apply-ops.ts'
 import { availabilityFromInventory, type ModelAvailability } from './movie-executor/model-catalog.ts'
 import type { ReviewFn } from './movie-executor/llm-text.ts'
 import { downloadSkillToRoom, resolveNodeSkills, executeSkillToRoom, executeNodeSkills } from './skill-import.ts'
-import type { JobRegistry } from '@deepseek-ai/dsh-jobs'
+import type { JobId, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MovieGatewayInfo } from './types.ts'
 import type { CanvasScriptAgent, CanvasGenerateResult } from './canvas-agent.ts'
 import type { MovieDirector, MovieRunListener } from './movie-team/director.ts'
@@ -451,6 +451,48 @@ const MAX_REPLANS = 2
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
   const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage, movieMarket, beforeRun } = deps
   const execClients = new Set<WebSocket>()
+  // P8-M6: cancel-on-disconnect. Bind each `/ws` exec client to the backend jobs
+  // it submitted (ComfyUI-style `clientId`). When the client goes away its live
+  // jobs are killed -> the provider aborts the remote job and releases the
+  // in-flight semaphore slot, instead of orphaning it until the 900s server
+  // deadline (which, with inflightMax=1, wedged the whole executor and forced a
+  // gateway restart -- the deterministic S3-9 storyboard failure).
+  const execClientIds = new Map<WebSocket, string>()
+  const clientJobs = new Map<string, Set<JobId>>()
+
+  /** Extract the ComfyUI-style clientId from a `/ws` upgrade request query. */
+  function execClientIdFromReq(req: IncomingMessage | undefined): string {
+    if (req === undefined) return ''
+    const url = req.url ?? ''
+    const q = url.indexOf('?')
+    if (q < 0) return ''
+    const params = new URLSearchParams(url.slice(q + 1))
+    return params.get('clientId') ?? params.get('client_id') ?? ''
+  }
+
+  /** Register a freshly-started job against its submitting client (if any). */
+  function trackClientJob(clientId: string, jobId: JobId): void {
+    if (clientId === '') return
+    let set = clientJobs.get(clientId)
+    if (set === undefined) { set = new Set<JobId>(); clientJobs.set(clientId, set) }
+    set.add(jobId)
+  }
+
+  /** Kill every live job submitted by a now-disconnected exec client. */
+  function cancelClientJobs(clientId: string, reason: string): void {
+    const set = clientJobs.get(clientId)
+    if (set === undefined) return
+    clientJobs.delete(clientId)
+    if (jobs === undefined) return
+    for (const jobId of set) {
+      try {
+        const state = jobs.kill(jobId, undefined, reason)
+        logger.info('[movie-gateway] cancel-on-disconnect: job %s -> %s (client %s)', jobId, state, clientId)
+      } catch (error) {
+        logger.warn('[movie-gateway] cancel-on-disconnect: kill %s failed: %s', jobId, String(error))
+      }
+    }
+  }
   // D15/D8: the model-availability gate. Degrades safely: no availability → a
   // conservative gate (text only when a text seam is wired).
   const executorAvailability: ModelAvailability = availability
@@ -1613,6 +1655,9 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
     // The Leg B `/prompt` surface is room-agnostic; the client may optionally
     // thread the active room so D15 notices / D8 echoes land somewhere.
     let roomId = ''
+    // P8-M6: the submitting exec client's id (matches its `/ws?clientId=`),
+    // used to cancel this job if that client disconnects before it settles.
+    let clientId = ''
     try {
       const params = await readParams(req)
       const raw = params['prompt']
@@ -1622,6 +1667,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
       }
       prompt = raw as PromptGraph
       roomId = stringParam(params, 'room_id') ?? stringParam(params, 'roomId') ?? ''
+      clientId = stringParam(params, 'client_id') ?? stringParam(params, 'clientId') ?? ''
     } catch (error) {
       logger.warn('[movie-gateway] /prompt bad body: %s', String(error))
       sendRaw(res, 400, { error: 'bad-request', message: 'invalid JSON body' })
@@ -1679,7 +1725,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
 
     if (jobs !== undefined) {
       try {
-        startPromptJob({
+        const jobId = startPromptJob({
           jobs,
           broadcast: broadcastExec,
           mediaProvider: mediaProvider ?? cannedMediaProvider,
@@ -1695,6 +1741,8 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           number,
           label: `movie-exec prompt ${number}`,
         }, prompt, sorted.order)
+        // P8-M6: bind the job to its submitting client so a disconnect cancels it.
+        trackClientJob(clientId, jobId)
         sendRaw(res, 200, { prompt_id: promptId, number })
         return
       } catch (error) {
@@ -1861,10 +1909,19 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
   const execWs = new WebSocketServer({ noServer: true })
   const muxWs = new WebSocketServer({ noServer: true })
 
-  execWs.on('connection', (socket: WebSocket) => {
+  execWs.on('connection', (socket: WebSocket, req?: IncomingMessage) => {
     execClients.add(socket)
-    socket.on('close', () => execClients.delete(socket))
-    socket.on('error', () => execClients.delete(socket))
+    // P8-M6: bind this socket to its clientId so its jobs die with it.
+    const clientId = execClientIdFromReq(req)
+    if (clientId !== '') execClientIds.set(socket, clientId)
+    const detach = (): void => {
+      execClients.delete(socket)
+      const cid = execClientIds.get(socket)
+      execClientIds.delete(socket)
+      if (cid !== undefined) cancelClientJobs(cid, 'exec client disconnected')
+    }
+    socket.on('close', detach)
+    socket.on('error', detach)
     sendExec(socket, { type: 'status', data: { status: { exec_info: { queue_remaining: 0 } } } })
   })
 
