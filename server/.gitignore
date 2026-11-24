@@ -16,3 +16,9 @@ plugins/*/lib/
 
 # Scratch logs
 *.log
+
+# Temporary headless driver harnesses — superseded in production by the
+# dsh_bot / customer_service agent that plans + draws + executes the graph.
+scripts/drive-movie.ts
+scripts/drive-episode-clip.ts
+scripts/room-post.ts
