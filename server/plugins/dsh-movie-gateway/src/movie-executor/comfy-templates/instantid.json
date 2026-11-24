@@ -1,0 +1,119 @@
+{
+  "meta": {
+    "modality": "image",
+    "promptNode": "2",
+    "negativeNode": "3",
+    "latentNode": "4",
+    "samplerNode": "10",
+    "saveNode": "13",
+    "seedNode": "10",
+    "stepsNode": "10",
+    "ckptNode": "1",
+    "vaeNode": "11",
+    "imageNode": "8"
+  },
+  "prompt": {
+    "1": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": {
+        "ckpt_name": "sd_xl_base_1.0.safetensors"
+      }
+    },
+    "2": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "",
+        "clip": ["1", 1]
+      }
+    },
+    "3": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "blurry, low quality, distorted, watermark, deformed face",
+        "clip": ["1", 1]
+      }
+    },
+    "4": {
+      "class_type": "EmptyLatentImage",
+      "inputs": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      }
+    },
+    "5": {
+      "class_type": "InstantIDModelLoader",
+      "inputs": {
+        "instantid_file": "ip-adapter.bin"
+      }
+    },
+    "6": {
+      "class_type": "InstantIDFaceAnalysis",
+      "inputs": {
+        "provider": "CPU"
+      }
+    },
+    "7": {
+      "class_type": "ControlNetLoader",
+      "inputs": {
+        "control_net_name": "control_instantid_sdxl.safetensors"
+      }
+    },
+    "8": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "dsh-input.png"
+      }
+    },
+    "9": {
+      "class_type": "ApplyInstantID",
+      "inputs": {
+        "instantid": ["5", 0],
+        "insightface": ["6", 0],
+        "control_net": ["7", 0],
+        "image": ["8", 0],
+        "model": ["1", 0],
+        "positive": ["2", 0],
+        "negative": ["3", 0],
+        "weight": 0.9,
+        "start_at": 0.0,
+        "end_at": 1.0
+      }
+    },
+    "10": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 20,
+        "cfg": 5,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1,
+        "model": ["9", 0],
+        "positive": ["9", 1],
+        "negative": ["9", 2],
+        "latent_image": ["4", 0]
+      }
+    },
+    "11": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "sd-vae-ft-mse.safetensors"
+      }
+    },
+    "12": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": ["10", 0],
+        "vae": ["11", 0]
+      }
+    },
+    "13": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "dsh-movie-face",
+        "images": ["12", 0]
+      }
+    }
+  }
+}

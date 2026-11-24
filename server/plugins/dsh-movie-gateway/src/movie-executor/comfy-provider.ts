@@ -61,12 +61,15 @@ export interface ComfyConfig {
   timeoutMs: number
   /** Maximum concurrent generations submitted to the backend. */
   inflightMax: number
+  /** Per-request health-probe timeout (H20's /object_info is ~2.4 MB over the overlay). */
+  probeTimeoutMs?: number
 }
 
 /** Per-modality backend readiness (fail-closed: unknown = not ready). */
 export interface ComfyReadiness {
   image: boolean
   video: boolean
+  audio: boolean
 }
 
 /** The ComfyUI provider: the media seam plus probe/readiness for the gate. */
@@ -82,7 +85,7 @@ export interface ComfyProvider extends MediaProvider {
 
 /** Health-probe cache TTL and per-request probe timeout (P8-M5). */
 const PROBE_TTL_MS = 5_000
-const PROBE_TIMEOUT_MS = 5_000
+const PROBE_TIMEOUT_MS_DEFAULT = 60_000
 
 /**
  * Resolve the ComfyUI config from the environment (Phase-8 settings gate).
@@ -103,6 +106,9 @@ export function comfyConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ComfyC
   const pollIntervalMs = Number(env['DSH_COMFY_POLL_MS'] ?? '1500')
   const timeoutMs = Number(env['DSH_COMFY_TIMEOUT_MS'] ?? '900000')
   const inflightMax = Number(env['DSH_COMFY_INFLIGHT_MAX'] ?? '1')
+  // Remote H20-class backends answer /object_info with a multi-MB payload over
+  // the ZeroTier overlay (~14 s observed); 5 s always died. Env-overridable.
+  const probeTimeoutMs = Number(env['DSH_COMFY_PROBE_MS'] ?? String(PROBE_TIMEOUT_MS_DEFAULT))
   // Dynamic remote endpoint: resolve the ZeroTier member's current managed IP
   // at probe time and prepend it to the static endpoints (fail-closed on error).
   const resolveEndpoints = ztRef === undefined ? undefined : async (): Promise<string[]> => {
@@ -118,6 +124,7 @@ export function comfyConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ComfyC
     pollIntervalMs: Number.isFinite(pollIntervalMs) && pollIntervalMs > 0 ? pollIntervalMs : 1_500,
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 900_000,
     inflightMax: Number.isFinite(inflightMax) && inflightMax > 0 ? Math.floor(inflightMax) : 1,
+    probeTimeoutMs: Number.isFinite(probeTimeoutMs) && probeTimeoutMs > 0 ? probeTimeoutMs : PROBE_TIMEOUT_MS_DEFAULT,
   }
 }
 
@@ -139,6 +146,22 @@ function num(value: unknown): number | undefined {
     if (Number.isFinite(parsed)) return parsed
   }
   return undefined
+}
+
+/** Coerce a `models` override payload to a node-id → filename map. */
+function modelsOf(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const out: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === 'string' && entry.trim() !== '') out[key] = entry.trim()
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** Wan frame count for a duration in seconds (16 fps, 4n+1 frames). */
+function wanFrames(seconds: number): number {
+  const raw = Math.min(Math.max(Math.round(seconds * 16), 9), 129)
+  return 4 * Math.round((raw - 1) / 4) + 1
 }
 
 /** Build the generation prompt from a generator node's resolved inputs. */
@@ -167,6 +190,10 @@ const MIME_BY_EXT: Record<string, string> = {
   mp4: 'video/mp4',
   webm: 'video/webm',
   mkv: 'video/x-matroska',
+  flac: 'audio/flac',
+  wav: 'audio/wav',
+  mp3: 'audio/mpeg',
+  ogg: 'audio/ogg',
 }
 
 function mimeOf(filename: string): string {
@@ -178,7 +205,7 @@ function mimeOf(filename: string): string {
 interface PromptEnvelope {
   prompt_id?: string
   node_errors?: Record<string, unknown>
-  error?: string
+  error?: unknown
 }
 
 /** One saved output file as reported by /history. */
@@ -259,24 +286,25 @@ export function createComfyProvider(
 
   // --- health probe (P8-M5): fail-closed, short TTL -------------------------
   let lastProbe: { at: number; result: ComfyReadiness } | undefined
-  const NOT_READY: ComfyReadiness = { image: false, video: false }
+  const NOT_READY: ComfyReadiness = { image: false, video: false, audio: false }
 
   async function probeEndpoint(endpoint: string): Promise<ComfyReadiness> {
     try {
       const stats = await fetch(`${endpoint}/system_stats`, {
         headers: authHeaders(),
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        signal: AbortSignal.timeout(config.probeTimeoutMs ?? PROBE_TIMEOUT_MS_DEFAULT),
       })
       if (!stats.ok) return NOT_READY
       const infoResponse = await fetch(`${endpoint}/object_info`, {
         headers: authHeaders(),
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        signal: AbortSignal.timeout(config.probeTimeoutMs ?? PROBE_TIMEOUT_MS_DEFAULT),
       })
       if (!infoResponse.ok) return NOT_READY
       const objectInfo = (await infoResponse.json()) as Record<string, unknown>
       return {
         image: missingNodeTypes(templates.image, objectInfo).length === 0,
         video: missingNodeTypes(templates.video, objectInfo).length === 0,
+        audio: templates.audio !== undefined && missingNodeTypes(templates.audio, objectInfo).length === 0,
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -298,6 +326,7 @@ export function createComfyProvider(
     const result: ComfyReadiness = {
       image: results.some((entry): boolean => entry.image),
       video: results.some((entry): boolean => entry.video),
+      audio: results.some((entry): boolean => entry.audio),
     }
     lastProbe = { at: Date.now(), result }
     return result
@@ -355,10 +384,13 @@ export function createComfyProvider(
   }
 
   /** Wire an uploaded input image into the image template as img2img. */
-  function applyImg2Img(graph: Record<string, ComfyNode>, ckptNode: string, samplerNode: string, uploaded: string): void {
+  function applyImg2Img(graph: Record<string, ComfyNode>, meta: { ckptNode: string; samplerNode: string; vaeNode?: string }, uploaded: string): void {
     graph['90'] = { class_type: 'LoadImage', inputs: { image: uploaded } }
-    graph['91'] = { class_type: 'VAEEncode', inputs: { pixels: ['90', 0], vae: [ckptNode, 2] } }
-    const sampler = graph[samplerNode]
+    const vaeLink: [string, number] = meta.vaeNode !== undefined && graph[meta.vaeNode] !== undefined
+      ? [meta.vaeNode, 0]
+      : [meta.ckptNode, 2]
+    graph['91'] = { class_type: 'VAEEncode', inputs: { pixels: ['90', 0], vae: vaeLink } }
+    const sampler = graph[meta.samplerNode]
     if (sampler) {
       sampler.inputs.latent_image = ['91', 0]
       if ('denoise' in sampler.inputs) sampler.inputs.denoise = 0.75
@@ -369,7 +401,7 @@ export function createComfyProvider(
   function savedFileOf(entry: HistoryEntry, saveNode: string): HistoryFile | undefined {
     const outputs = entry.outputs?.[saveNode]
     if (outputs === undefined) return undefined
-    for (const key of ['images', 'gifs', 'video']) {
+    for (const key of ['images', 'gifs', 'video', 'audio', 'audios']) {
       const list = outputs[key]
       if (Array.isArray(list)) {
         const first = list.find((item): item is HistoryFile =>
@@ -387,7 +419,15 @@ export function createComfyProvider(
     },
 
     async generate(classType: string, inputs: Record<string, unknown>, hooks?: MediaHooks): Promise<MediaGeneration> {
-      const template = templateFor(classType, templates)
+      // Template variant: explicit `variant` wins; else the widget mode maps
+      // VideoGenerator image_to_video → the VACE i2v graph.
+      const mode = text(inputs['mode'])
+      let hint = text(inputs['variant'])
+      if (hint === undefined && classType === 'VideoGenerator') {
+        if (mode === 'image_to_video') hint = 'i2v'
+        else if (mode === 'text_to_video') hint = 't2v'
+      }
+      const template = templateFor(classType, templates, hint)
       if (template === undefined) throw new Error(`comfy provider: unsupported step ${classType}`)
       await acquire(hooks?.signal)
       try {
@@ -404,6 +444,13 @@ export function createComfyProvider(
         if (length !== undefined) params.length = length
         const steps = num(inputs['steps'])
         if (steps !== undefined) params.steps = steps
+        const seconds = num(inputs['seconds']) ?? num(inputs['duration'])
+        if (seconds !== undefined) params.seconds = seconds
+        if (template.meta.modality === 'video' && params.length === undefined && seconds !== undefined) {
+          params.length = wanFrames(seconds)
+        }
+        const models = modelsOf(inputs['models'])
+        if (models !== undefined) params.models = models
         const graph = instantiate(template, params)
 
         const clientId = randomUUID()
@@ -411,8 +458,9 @@ export function createComfyProvider(
         let endpoint = ''
         let promptId = ''
 
-        // Optional img2img: an image reference on an ImageGenerator step.
-        const imageRef = classType === 'ImageGenerator' ? text(inputs['image']) : undefined
+        // Optional reference image: img2img on the SDXL graph, or the template's
+        // LoadImage node (VACE first frame / InstantID face reference).
+        const imageRef = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? text(inputs['image']) : undefined
 
         // Submit with failover across the pool (P8-M5).
         let submitError = ''
@@ -421,7 +469,12 @@ export function createComfyProvider(
             if (imageRef !== undefined && (imageRef.startsWith('data:') || /^https?:/i.test(imageRef))) {
               const bytes = await inputImageBytes(imageRef)
               const uploaded = await uploadImage(candidate, bytes)
-              applyImg2Img(graph, template.meta.ckptNode, template.meta.samplerNode, uploaded)
+              const imageNode = template.meta.imageNode
+              if (imageNode !== undefined && graph[imageNode] !== undefined) {
+                graph[imageNode].inputs.image = uploaded
+              } else if (classType === 'ImageGenerator') {
+                applyImg2Img(graph, template.meta, uploaded)
+              }
             }
             const response = await fetch(`${candidate}/prompt`, {
               method: 'POST',
@@ -432,7 +485,9 @@ export function createComfyProvider(
             const envelope = (await response.json()) as PromptEnvelope
             const nodeErrors = envelope.node_errors ?? {}
             if (!response.ok || envelope.prompt_id === undefined || Object.keys(nodeErrors).length > 0) {
-              submitError = `HTTP ${response.status} ${envelope.error ?? JSON.stringify(nodeErrors)}`.trim()
+              const detail = Object.keys(nodeErrors).length > 0 ? JSON.stringify(nodeErrors) : JSON.stringify(envelope.error ?? {})
+              submitError = `HTTP ${response.status} ${detail}`.trim()
+              logger.warn('[movie-executor] comfy submit rejected on %s: %s', candidate, submitError)
               continue
             }
             endpoint = candidate

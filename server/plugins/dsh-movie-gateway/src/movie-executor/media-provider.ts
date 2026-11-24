@@ -12,7 +12,8 @@
  * offline/dev placeholder (used by the verifier and the legacy six-step path),
  * and {@link createRoutingMediaProvider}, which routes the functional
  * `VideoGenerator` to the real provider when configured and everything else to
- * the canned fallback so legacy behavior is unchanged.
+ * the canned fallback so legacy behavior is unchanged. Phase-8 adds the
+ * ComfyUI-backed `AudioGenerator` route (Stable Audio Open on the GPU host).
  *
  * @module dsh-movie-gateway/movie-executor/media-provider
  */
@@ -79,11 +80,12 @@ export const cannedMediaProvider: MediaProvider = {
  * @param routes - the real image/video providers (when configured) + the canned fallback.
  * @returns the routing provider injected as the executor's media seam.
  */
-export function createRoutingMediaProvider(routes: { image?: MediaProvider | undefined; video?: MediaProvider | undefined; fallback: MediaProvider }): MediaProvider {
+export function createRoutingMediaProvider(routes: { image?: MediaProvider | undefined; video?: MediaProvider | undefined; audio?: MediaProvider | undefined; fallback: MediaProvider }): MediaProvider {
   return {
     async generate(step: string, inputs: Record<string, unknown>, hooks?: MediaHooks): Promise<MediaGeneration> {
       if (step === 'ImageGenerator' && routes.image !== undefined) return routes.image.generate(step, inputs, hooks)
       if (step === 'VideoGenerator' && routes.video !== undefined) return routes.video.generate(step, inputs, hooks)
+      if (step === 'AudioGenerator' && routes.audio !== undefined) return routes.audio.generate(step, inputs, hooks)
       return routes.fallback.generate(step, inputs, hooks)
     },
   }

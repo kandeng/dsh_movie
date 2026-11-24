@@ -188,7 +188,7 @@ export function apply(ctx: Context, config: Config): void {
     // P5-M2: the real modality adapters + the D15 availability gate.
     //  - text  -> a shared Bailian LLM turn (LlmTextAgent), gated on subagents.
     //  - video -> the Bailian "Happyhorse" DashScope seam, gated on env config.
-    //  - image/audio -> no model on the current Bailian-only inventory: the gate
+    //  - image/audio -> the ComfyUI GPU backend (Phase 8); without it the gate
     //    fails the node and `customer_service` posts the "no such model" notice.
     const subagents = ctx.get('subagents')
     const bailianKey = resolveBailianKey(serverRoot)
@@ -228,17 +228,20 @@ export function apply(ctx: Context, config: Config): void {
       : createComfyProvider(comfyConfig, ctx.logger, loadComfyTemplates())
     // Route functional generators (D15 + P8 D2): ImageGenerator → ComfyUI when
     // configured; VideoGenerator → ComfyUI when configured else Happyhorse;
-    // everything else stays on the canned offline fallback so the legacy
-    // six-step pipeline + verify bridges are unchanged.
+    // AudioGenerator → ComfyUI (Stable Audio Open) when configured; everything
+    // else stays on the canned offline fallback so the legacy six-step
+    // pipeline + verify bridges are unchanged.
     const routingMediaProvider = createRoutingMediaProvider({
       ...(comfyProvider === undefined ? {} : { image: comfyProvider }),
       ...((comfyProvider ?? videoProvider) === undefined ? {} : { video: comfyProvider ?? videoProvider }),
+      ...(comfyProvider === undefined ? {} : { audio: comfyProvider }),
       fallback: cannedMediaProvider,
     })
     // The D15 availability gate, now dynamic for the GPU modalities (P8-M5):
     // text needs a live LLM; image needs a configured ComfyUI whose last health
     // probe passed (fail-closed before the first probe); video needs a ready
-    // ComfyUI OR a configured Happyhorse endpoint; audio is never backed.
+    // ComfyUI OR a configured Happyhorse endpoint; audio needs a ready ComfyUI
+    // whose inventory covers the Stable Audio template.
     const availability: ModelAvailability = {
       for(modality) {
         if (modality === undefined) return 'available'
@@ -248,6 +251,7 @@ export function apply(ctx: Context, config: Config): void {
           const comfyReady = comfyProvider !== undefined && comfyProvider.readiness().video
           return comfyReady || videoProvider !== undefined ? 'available' : 'unavailable'
         }
+        if (modality === 'audio') return comfyProvider !== undefined && comfyProvider.readiness().audio ? 'available' : 'unavailable'
         return 'unavailable'
       },
     }
@@ -264,7 +268,7 @@ export function apply(ctx: Context, config: Config): void {
       // gate reflects reality from the first run (fail-closed until it passes).
       if (comfyProvider !== undefined) {
         void comfyProvider.probe(true).then((readiness): void => {
-          ctx.logger.info('[movie-gateway] P8 comfy readiness at activation: image=%s video=%s', readiness.image, readiness.video)
+          ctx.logger.info('[movie-gateway] P8 comfy readiness at activation: image=%s video=%s audio=%s', readiness.image, readiness.video, readiness.audio)
         })
       }
       // The Leg B executor schedules prompts as `movie-exec` background jobs.

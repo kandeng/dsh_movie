@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export interface ComfyTemplateMeta {
-  modality: 'image' | 'video';
+  modality: 'image' | 'video' | 'audio';
   promptNode: string;
   negativeNode: string;
   latentNode: string;
@@ -22,6 +22,10 @@ export interface ComfyTemplateMeta {
   seedNode: string;
   stepsNode: string;
   ckptNode: string;
+  /** Optional standalone VAELoader node; img2img encodes through it when present. */
+  vaeNode?: string;
+  /** Optional LoadImage node fed with the uploaded reference (i2v / face lock). */
+  imageNode?: string;
 }
 
 export interface ComfyNode {
@@ -35,8 +39,18 @@ export interface ComfyTemplate {
 }
 
 export interface ComfyTemplates {
+  /** SDXL 1.0 text-to-image (1024x1024, mse VAE). */
   image: ComfyTemplate;
+  /** Wan 2.2 two-stage text-to-video (832x480, 16 fps). */
   video: ComfyTemplate;
+  /** Qwen-Image 20B t2i (typography/posters, 1328x1328). */
+  imageQwen?: ComfyTemplate;
+  /** Wan 2.1 VACE first-frame image-to-video. */
+  videoI2v?: ComfyTemplate;
+  /** Stable Audio Open 1.0 (SFX / BGM beds). */
+  audio?: ComfyTemplate;
+  /** SDXL + InstantID face-identity lock. */
+  instantid?: ComfyTemplate;
 }
 
 export interface TemplateParams {
@@ -45,9 +59,13 @@ export interface TemplateParams {
   seed?: number;
   width?: number;
   height?: number;
-  /** Video frame count (LTXV length, step of 8). */
+  /** Video frame count (Wan length, 4n+1 at 16 fps). */
   length?: number;
   steps?: number;
+  /** Audio duration in seconds (EmptyLatentAudio). */
+  seconds?: number;
+  /** Model filename overrides keyed by node id (sourced from /model_catalog). */
+  models?: Record<string, string>;
 }
 
 let cached: ComfyTemplates | undefined;
@@ -61,24 +79,41 @@ function loadTemplate(file: string): ComfyTemplate {
   return parsed;
 }
 
-/** Load (and cache) the bundled image/video workflow templates. */
+/** Load (and cache) the bundled workflow templates (H20 inventory). */
 export function loadComfyTemplates(): ComfyTemplates {
   if (!cached) {
     cached = {
       image: loadTemplate('./comfy-templates/image.json'),
-      video: loadTemplate('./comfy-templates/video.json'),
+      video: loadTemplate('./comfy-templates/video_t2v.json'),
+      imageQwen: loadTemplate('./comfy-templates/image_qwen.json'),
+      videoI2v: loadTemplate('./comfy-templates/video_i2v.json'),
+      audio: loadTemplate('./comfy-templates/audio.json'),
+      instantid: loadTemplate('./comfy-templates/instantid.json'),
     };
   }
   return cached;
 }
 
-/** Map a movie-executor generator class type to its template. */
+/**
+ * Map a movie-executor generator class type to its template.
+ * @param hint - optional variant: `qwen` / `instantid` for images, `i2v` for
+ * video (default video is the Wan 2.2 t2v two-stage graph).
+ */
 export function templateFor(
   classType: string,
   templates: ComfyTemplates,
+  hint?: string,
 ): ComfyTemplate | undefined {
-  if (classType === 'ImageGenerator') return templates.image;
-  if (classType === 'VideoGenerator') return templates.video;
+  if (classType === 'ImageGenerator') {
+    if (hint === 'instantid' && templates.instantid !== undefined) return templates.instantid;
+    if (hint === 'qwen' && templates.imageQwen !== undefined) return templates.imageQwen;
+    return templates.image;
+  }
+  if (classType === 'VideoGenerator') {
+    if (hint === 'i2v' && templates.videoI2v !== undefined) return templates.videoI2v;
+    return templates.video;
+  }
+  if (classType === 'AudioGenerator') return templates.audio;
   return undefined;
 }
 
@@ -140,6 +175,42 @@ export function instantiate(
     setIfPresent(latent, 'width', params.width);
     setIfPresent(latent, 'height', params.height);
     setIfPresent(latent, 'length', params.length);
+    setIfPresent(latent, 'seconds', params.seconds);
+  }
+
+  // Model filename overrides (the driver sources exact names from /model_catalog).
+  if (params.models !== undefined) {
+    for (const [nodeId, filename] of Object.entries(params.models)) {
+      const target = graph[nodeId];
+      if (target === undefined) continue;
+      for (const key of ['ckpt_name', 'unet_name', 'vae_name', 'clip_name', 'instantid_file', 'control_net_name']) {
+        if (key in target.inputs) {
+          target.inputs[key] = filename;
+          break;
+        }
+      }
+    }
+  }
+
+  // Keep VACE conditioning batches/scales in sync with the sampled geometry.
+  // The i2v graph carries TWO RepeatImageBatch nodes: the control-video
+  // repeater (source = ImageScale) matches `length`; the first-frame mask
+  // repeater (source = MaskToImage) fills the `length - 1` generated frames
+  // (frame 0 is the kept reference). This ComfyUI build's SolidMask has no
+  // batch_size input, so the mask batch is assembled from images instead.
+  if (params.length !== undefined || params.width !== undefined || params.height !== undefined) {
+    for (const node of Object.values(graph)) {
+      if (params.length !== undefined && node.class_type === 'RepeatImageBatch') {
+        const srcRef = node.inputs.image;
+        const srcId = Array.isArray(srcRef) ? String(srcRef[0]) : '';
+        const src = graph[srcId];
+        node.inputs.amount = src?.class_type === 'MaskToImage' ? params.length - 1 : params.length;
+      }
+      if (node.class_type === 'ImageScale') {
+        setIfPresent(node, 'width', params.width);
+        setIfPresent(node, 'height', params.height);
+      }
+    }
   }
   return graph;
 }

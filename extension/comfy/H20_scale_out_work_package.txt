@@ -1,0 +1,174 @@
+H20 SCALE-OUT WORK PACKAGE — paste this whole message into qodercli ON the H20 host (yw01, ZeroTier 10.188.8.105).
+
+GOAL (two independent upgrades to the ComfyUI media factory):
+  (A) Expose the CosyVoice2 TTS service over HTTP so the remote DSH-Movie gateway can synthesize voice-over narration. Today TTS is a LOCAL UNIX SOCKET ONLY (/root/comfy/log/tts.sock) and is unreachable off-host.
+  (B) Scale out: add 3 more ComfyUI workers on GPUs 1-3 (ports 8189-8191) alongside the main engine (GPU0, 8188) = 4 poolable endpoints, ~4x throughput for the movie pipeline.
+
+VERIFIED CONTEXT (do not re-derive):
+  - ComfyUI root : /root/comfy/ComfyUI   (main.py lives here; models/ and custom_nodes/ are shared by every worker)
+  - venv python  : /root/comfy/venv/bin/python   (torch 2.15 cu132, torch.cuda.device_count()==8)
+  - main engine  : GPU0 port 8188, launched by /root/comfy/start.sh (idempotent; also starts the TTS socket service)
+  - logs         : /root/comfy/log/
+  - TTS socket   : /root/comfy/log/tts.sock   GET /health -> {"status":"ok","model_loaded":bool}; POST /tts {"text","speaker_id"} -> 24kHz mono WAV bytes. speaker_id in {female_zh, female_zh_alt}. First call after idle pays ~90s cold load.
+
+────────────────────────────────────────────────────────────
+STEP 1 — create the file /root/comfy/ComfyUI/custom_nodes/tts_route/__init__.py with EXACTLY this content:
+
+```python
+"""Routes-only TTS proxy for ComfyUI (H20 scale-out edition).
+
+Registers two HTTP routes on ComfyUI's aiohttp server (port 8188) that proxy the
+CosyVoice2 UNIX socket, so the off-host DSH-Movie gateway can reach TTS over the
+ZeroTier overlay:
+
+    GET  /tts_health -> proxies GET  /health on the socket -> JSON
+    POST /tts_http   -> proxies POST /tts    on the socket -> WAV bytes (audio/wav)
+
+POST /tts_http JSON body: {"text": "...", "speaker_id": "female_zh"|"female_zh_alt"}
+Never loads weights; defines no executable graph nodes.
+"""
+
+from __future__ import annotations
+
+import os
+
+from server import PromptServer
+
+NODE_CLASS_MAPPINGS: dict = {}
+NODE_DISPLAY_NAME_MAPPINGS: dict = {}
+
+TTS_SOCK = os.environ.get("DSH_TTS_SOCK", "/root/comfy/log/tts.sock")
+_UPSTREAM_TOTAL_S = float(os.environ.get("DSH_TTS_TIMEOUT_S", "300"))
+_UPSTREAM_CONNECT_S = 10.0
+
+routes = PromptServer.instance.routes
+
+
+async def _proxy(method: str, path: str, json_body: dict | None = None):
+    import aiohttp
+    from aiohttp import web
+
+    if not os.path.exists(TTS_SOCK):
+        return web.json_response(
+            {"status": "error", "error": "tts-socket-missing", "socket": TTS_SOCK}, status=503
+        )
+    timeout = aiohttp.ClientTimeout(total=_UPSTREAM_TOTAL_S, sock_connect=_UPSTREAM_CONNECT_S)
+    connector = aiohttp.UnixConnector(path=TTS_SOCK)
+    try:
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            request = session.request(method, f"http://localhost{path}", json=json_body)
+            async with request as upstream:
+                body = await upstream.read()
+                content_type = upstream.headers.get("Content-Type")
+                if content_type is None:
+                    content_type = "application/json" if path == "/health" else "audio/wav"
+                return web.Response(body=body, status=upstream.status, content_type=content_type)
+    except Exception as exc:
+        return web.json_response(
+            {"status": "error", "error": "tts-proxy-failed", "detail": str(exc), "socket": TTS_SOCK},
+            status=502,
+        )
+
+
+@routes.get("/tts_health")
+async def tts_health(request):
+    return await _proxy("GET", "/health")
+
+
+@routes.post("/tts_http")
+async def tts_http(request):
+    from aiohttp import web
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"status": "error", "error": "invalid-json-body"}, status=400)
+    if not isinstance(payload, dict) or not str(payload.get("text", "")).strip():
+        return web.json_response(
+            {"status": "error", "error": "missing-text", "hint": '{"text": "...", "speaker_id": "female_zh"}'},
+            status=400,
+        )
+    body = {"text": str(payload.get("text", "")), "speaker_id": str(payload.get("speaker_id", "female_zh"))}
+    return await _proxy("POST", "/tts", json_body=body)
+```
+
+────────────────────────────────────────────────────────────
+STEP 2 — create the file /root/comfy/start_workers.sh with EXACTLY this content, then `chmod +x` it:
+
+```bash
+#!/usr/bin/env bash
+# H20 ComfyUI scale-out: 3 extra workers on GPUs 1-3, ports 8189-8191.
+# Shares the main install (models/, custom_nodes/); one GPU + one output dir each.
+# Idempotent: a worker whose port already answers /system_stats is skipped.
+set -uo pipefail
+
+COMFY_ROOT="${COMFY_ROOT:-/root/comfy/ComfyUI}"
+PY="${COMFY_PY:-/root/comfy/venv/bin/python}"
+LOG_DIR="${COMFY_LOG_DIR:-/root/comfy/log}"
+LISTEN_HOST="${COMFY_LISTEN:-0.0.0.0}"
+READY_TIMEOUT="${COMFY_READY_TIMEOUT:-120}"
+
+GPUS=(1 2 3)
+PORTS=(8189 8190 8191)
+
+mkdir -p "$LOG_DIR"
+port_up() { curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$1/system_stats"; }
+wait_port() {
+  local deadline=$((SECONDS + READY_TIMEOUT))
+  while (( SECONDS < deadline )); do
+    if port_up "$1"; then echo "  ok   $2 listening on :$1"; return 0; fi
+    sleep 2
+  done
+  echo "  FAIL $2 did not answer on :$1 within ${READY_TIMEOUT}s (see $LOG_DIR/worker-$1.log)"; return 1
+}
+
+echo "── H20 ComfyUI scale-out (GPUs ${GPUS[*]} → ports ${PORTS[*]})"
+cd "$COMFY_ROOT" || { echo "ComfyUI root not found: $COMFY_ROOT"; exit 1; }
+
+for i in "${!GPUS[@]}"; do
+  gpu="${GPUS[$i]}"; port="${PORTS[$i]}"
+  if port_up "$port"; then echo "  skip :$port already up (GPU $gpu)"; continue; fi
+  CUDA_VISIBLE_DEVICES="$gpu" \
+    setsid nohup "$PY" main.py \
+      --listen "$LISTEN_HOST" --port "$port" --cuda-device 0 \
+      --disable-auto-launch --output-directory "$COMFY_ROOT/output-$port" \
+      >"$LOG_DIR/worker-$port.log" 2>&1 </dev/null &
+  echo "  launched GPU $gpu worker on :$port (pid $!, log $LOG_DIR/worker-$port.log)"
+done
+
+echo "── waiting for workers"
+rc=0
+for i in "${!PORTS[@]}"; do port="${PORTS[$i]}"; port_up "$port" || wait_port "$port" "GPU ${GPUS[$i]} worker" || rc=1; done
+
+echo "── self-verify (all four endpoints)"
+for port in 8188 "${PORTS[@]}"; do
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$port/system_stats")"
+  echo "  :$port /system_stats -> $code"
+done
+(( rc == 0 )) && echo "DONE: 4 endpoints ready." || echo "DONE with errors: inspect $LOG_DIR/worker-*.log"
+exit "$rc"
+```
+
+────────────────────────────────────────────────────────────
+STEP 3 — activate:
+  1. Reload the main engine so it picks up the new tts_route node:   bash /root/comfy/start.sh
+     (idempotent; if it refuses to restart a live engine, restart it the way you normally do — the route only appears after a ComfyUI process start.)
+  2. Launch the workers:                                             bash /root/comfy/start_workers.sh
+
+STEP 4 — SELF-VERIFY and REPORT BACK these exact outputs:
+  a) TTS route live on the main engine:
+       curl -s http://127.0.0.1:8188/tts_health
+     expect: {"status":"ok","model_loaded":false,...}   (model_loaded may be false until first use — that is fine)
+  b) All four engines answering:
+       for p in 8188 8189 8190 8191; do curl -s -o /dev/null -w "$p %{http_code}\n" http://127.0.0.1:$p/system_stats; done
+     expect: 8188 200 / 8189 200 / 8190 200 / 8191 200
+  c) (optional, ~90s cold) warm TTS round-trip:
+       curl -s --max-time 200 -X POST http://127.0.0.1:8188/tts_http -H 'Content-Type: application/json' -d '{"text":"深夜的机房里，八块显卡同时亮起绿灯。","speaker_id":"female_zh"}' -o /tmp/tts_test.wav && ls -l /tmp/tts_test.wav
+     expect: a non-trivial /tmp/tts_test.wav (tens of KB+)
+
+REPORT BACK: the four /system_stats codes, the /tts_health JSON body, and (if you ran 4c) the WAV file size. If any worker failed, paste the tail of its /root/comfy/log/worker-<port>.log.
+
+────────────────────────────────────────────────────────────
+AFTER you report all-green, the DSH-Movie host side (already prepared) is a one-line switch: uncomment in server/comfy.env
+    export DSH_COMFY_POOL=http://10.188.8.105:8189,http://10.188.8.105:8190,http://10.188.8.105:8191
+and restart the gateway (./start.sh). The provider already pools all endpoints round-robin with submit failover at DSH_COMFY_INFLIGHT_MAX=1 each, and will call POST /tts_http for voice-over in the audio task. No further H20 action needed.

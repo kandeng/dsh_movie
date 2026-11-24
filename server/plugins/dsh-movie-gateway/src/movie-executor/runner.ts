@@ -256,7 +256,15 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
                     ...(result.filename === undefined ? {} : { name: result.filename }),
                   }
                   artifact = uri
-                  outputsByNode.set(id, [uri, ...result.outputs.slice(1)])
+                  // Downstream media providers re-fetch a backend URL directly
+                  // (the ComfyUI provider downloads it, then re-uploads it as
+                  // the i2v / face-lock reference). Keep the provider's own
+                  // fetchable http(s)/data artifact resolvable downstream; only
+                  // fall back to the posted room/workspace uri when the
+                  // produced reference isn't something a provider can fetch.
+                  const produced = result.outputs[0]
+                  const fetchable = typeof produced === 'string' && /^(https?:|data:)/i.test(produced)
+                  outputsByNode.set(id, fetchable ? result.outputs : [uri, ...result.outputs.slice(1)])
                 }
               }
               output = {

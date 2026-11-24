@@ -91,8 +91,15 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
     async run(ctx: NodeHandlerContext): Promise<NodeHandlerOutput> {
       const sections = resolvedInputsBySlot(schema, ctx)
       const promptWidget = schema.widgets.find((entry): boolean => entry.name === 'prompt' || entry.name === 'text')
-      const prompt = promptWidget === undefined ? '' : display(ctx.inputs[promptWidget.name])
-      const inputs: Record<string, unknown> = { ...ctx.inputs, resolved: sections, prompt }
+      const prompt = promptWidget === undefined ? '' : display(resolveValue(ctx, ctx.inputs[promptWidget.name]))
+      // Resolve ComfyUI link tuples (`[sourceId, slot]`) to their upstream
+      // artifact values before handing the inputs to a seam, so a media
+      // provider receives the REAL reference (e.g. the t2i image URL feeding an
+      // i2v `image` input) rather than the raw link. Widget literals pass
+      // through unchanged (resolveValue is identity for non-links).
+      const linked: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(ctx.inputs)) linked[key] = resolveValue(ctx, value)
+      const inputs: Record<string, unknown> = { ...linked, resolved: sections, prompt }
       if (schema.modality === 'text') {
         const artifact = ctx.text === undefined
           ? cannedText(schema.classType, `generated text from ${sections.length} linked section(s)`)
