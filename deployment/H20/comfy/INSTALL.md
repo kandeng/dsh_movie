@@ -1,5 +1,12 @@
 # ComfyUI Installation Report
 
+> **Provenance log, not a runbook.** This file records, phase by phase, what was
+> installed on the reference host (`yw01`) and why. To bring the stack up on a
+> NEW box, follow [`DEPLOY.md`](DEPLOY.md) instead. Sections below that describe
+> a single-instance `start.sh`/`stop.sh` on port 8188 only are **historical**:
+> the current runtime is the 8-GPU fleet (`comfy_start.sh` →
+> `comfy_start_multi.sh`, supervised by `comfy-multi.service`).
+
 ## Environment
 - OS: Ubuntu 22.04
 - GPU: 8x NVIDIA H20 96GB
@@ -91,7 +98,11 @@ No model checkpoints, LoRAs, or other weights were downloaded. The `models/` dir
 - The first generation attempt failed with CUDA OOM because an existing `sglang serve` process was occupying all 8 H20 GPUs. It was terminated to free VRAM for the smoke test.
 - No 720p generation was run.
 
-## Usage
+## Usage (historical — single-instance; superseded by the fleet)
+
+> Kept for provenance. The current bring-up/teardown is `comfy_start.sh` /
+> `comfy_stop_multi.sh` under `comfy-multi.service`; see `DEPLOY.md`.
+
 ```bash
 # Start both services (ComfyUI on TCP 8188 + CosyVoice2 TTS on unix socket /root/comfy/log/tts.sock)
 /root/comfy/start.sh
@@ -99,7 +110,7 @@ No model checkpoints, LoRAs, or other weights were downloaded. The `models/` dir
 # Stop both services
 /root/comfy/stop.sh
 ```
-Both scripts are idempotent: `start.sh` matches only real python processes (ignores shells whose command line contains the pattern), skips services already running, and waits until both health endpoints answer; `stop.sh` sends SIGTERM to each, escalates to SIGKILL after 15 s, and removes the stale TTS socket. Logs go to `/root/comfy/log/`. **No TCP port other than 8188 is used.**
+Both scripts are idempotent: `start.sh` matches only real python processes (ignores shells whose command line contains the pattern), skips services already running, and waits until both health endpoints answer; `stop.sh` sends SIGTERM to each, escalates to SIGKILL after 15 s, and removes the stale TTS socket. Logs go to `/root/comfy/log/`. **No TCP port other than 8188 was used at this stage** (the fleet later adds 8189-8195).
 
 ---
 
@@ -170,7 +181,7 @@ All sizes exact; safetensors headers validated (1933 / 1446 / 194 tensors).
 - `/root/kdeng` = 16 GB: `project` 12 GB, `dataset` 4.3 GB, `package` 56 MB, `asset` 47 MB, `output` 2.5 MB, `model` 40 KB.
 
 ## Service
-ComfyUI on `0.0.0.0:8188` and CosyVoice2 TTS on unix socket `/root/comfy/log/tts.sock` (no TCP port) are both managed by `start.sh`/`stop.sh`. Conda base untouched.
+ComfyUI on `0.0.0.0:8188` and CosyVoice2 TTS on unix socket `/root/comfy/log/tts.sock` (no TCP port) are both managed by `start.sh`/`stop.sh` (single-instance stage; the fleet came later — see `DEPLOY.md`). Conda base untouched.
 
 ---
 
@@ -253,8 +264,8 @@ Both verified with `torchaudio.info` (venv-cosy). Seeds 20261122 and 777001; `Sa
 6. Two pip install workarounds needed (setuptools pin + wheel pre-fetch) as detailed above; Aliyun mirror throttled specific large wheels to <80 KiB/s.
 7. `torchaudio.info()` is gone from the ComfyUI venv's torchaudio 2.11; acceptance duration checks were done with venv-cosy's torchaudio 2.3.1 (and FLAC header parsing as a cross-check).
 
-## Service state
-- ComfyUI: single instance on `0.0.0.0:8188` (managed by start.sh/stop.sh).
+## Service state (as of this phase)
+- ComfyUI: single instance on `0.0.0.0:8188` (managed by start.sh/stop.sh; the 8-GPU fleet came later — see `DEPLOY.md`).
 - CosyVoice2 TTS API: unix socket `/root/comfy/log/tts.sock` (FastAPI, lazy + idle unload, managed by the same scripts, log `/root/comfy/log/cosy_tts_server.log`). No TCP port.
 - Conda base untouched (venv-cosy is a plain Python venv; no conda env created).
 
@@ -297,7 +308,7 @@ All downloaded files were size-verified against the source listing (exact match)
 
 ## Service state (unchanged)
 - ComfyUI (TCP 8188) and CosyVoice2 TTS (unix socket `/root/comfy/log/tts.sock`) are both managed by `start.sh`/`stop.sh` (ComfyUI was additionally restarted for P1b and P3a installs).
-- The only TCP port is 8188; conda base untouched.
+- The only TCP port at this stage is 8188 (fleet 8189-8195 added later); conda base untouched.
 
 ## Lazy-loading policy
 - All AI models are lazy: ComfyUI stages checkpoints/VAEs/encoders into VRAM only when a workflow node executes (model manager can offload/free them), and the CosyVoice2 TTS service builds its model on the first `/tts` call and unloads it after `COSY_IDLE_TIMEOUT` idle seconds (default 600 s). Nothing is eagerly loaded at service start.

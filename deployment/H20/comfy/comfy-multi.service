@@ -6,6 +6,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# COMFY_ROOT is read by the launcher scripts. If you install the stack
+# somewhere other than /root/comfy, set it here AND rewrite the two absolute
+# ExecStart/ExecStop paths below (systemd does not expand $COMFY_ROOT there).
+Environment=COMFY_ROOT=/root/comfy
 WorkingDirectory=/root/comfy
 ExecStart=/root/comfy/comfy_start.sh
 # Stops only the additional instances (8189-8195). The 8188 instance is left

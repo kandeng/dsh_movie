@@ -12,6 +12,11 @@ unit, and the operator/provenance docs.
 | `comfy-multi.service` | The installed systemd unit (`/etc/systemd/system/comfy-multi.service`) |
 | `README.md` | H20-side operator runbook (start/stop, HTTP API, model catalog, TTS socket, remote access) |
 | `INSTALL.md` | H20-side install provenance (24 models, ~107 GB, deviations, acceptance runs) |
+| `DEPLOY.md` | Ordered bring-up runbook for a **fresh** GPU box (prereqs → models → TTS → unit → ZeroTier → verify → gateway wiring) |
+| `download_models.sh` | Manifest-driven, size-verified model provisioning (`--check-only` audits an existing box) |
+| `models.manifest` | Model bill-of-materials TSV (`dest<TAB>size_bytes<TAB>url`), generated on the reference host |
+| `verify.sh` | Fresh-box acceptance gate (system_stats + model_catalog + TTS health; `--with-prompt` adds an SDXL smoke) |
+| `cosyvoice_tts_server.py` | The CosyVoice2 unix-socket TTS service launched by `comfy_start.sh` |
 
 ## Host
 

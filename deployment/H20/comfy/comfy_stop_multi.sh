@@ -3,7 +3,8 @@
 # Deliberately does not touch the 8188 instance or the TTS server.
 set -uo pipefail
 
-VENV_PYTHON="/root/comfy/venv/bin/python"
+COMFY_ROOT="${COMFY_ROOT:-/root/comfy}"
+VENV_PYTHON="${COMFY_ROOT}/venv/bin/python"
 HOST="0.0.0.0"
 GPU_IDS="${COMFY_GPU_IDS:-1 2 3 4 5 6 7}"
 

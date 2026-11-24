@@ -5,9 +5,10 @@
 # sqlite db never collide, while /root/comfy/ComfyUI/models stays shared.
 set -uo pipefail
 
-COMFY_DIR="/root/comfy/ComfyUI"
-VENV_PYTHON="/root/comfy/venv/bin/python"
-LOG_DIR="/root/comfy/log"
+COMFY_ROOT="${COMFY_ROOT:-/root/comfy}"
+COMFY_DIR="${COMFY_ROOT}/ComfyUI"
+VENV_PYTHON="${COMFY_ROOT}/venv/bin/python"
+LOG_DIR="${COMFY_ROOT}/log"
 HOST="0.0.0.0"
 GPU_IDS="${COMFY_GPU_IDS:-1 2 3 4 5 6 7}"
 BOOT_TIMEOUT="${COMFY_BOOT_TIMEOUT:-180}"
@@ -34,13 +35,13 @@ for i in $GPU_IDS; do
         continue
     fi
 
-    mkdir -p "/root/comfy/output-${i}" "/root/comfy/user-${i}"
+    mkdir -p "${COMFY_ROOT}/output-${i}" "${COMFY_ROOT}/user-${i}"
     cd "$COMFY_DIR"
     CUDA_VISIBLE_DEVICES=$i setsid nohup "$VENV_PYTHON" main.py \
         --listen "$HOST" \
         --port "$port" \
-        --output-directory "/root/comfy/output-${i}" \
-        --user-directory  "/root/comfy/user-${i}" \
+        --output-directory "${COMFY_ROOT}/output-${i}" \
+        --user-directory  "${COMFY_ROOT}/user-${i}" \
         > "$LOG_DIR/comfyui-${port}.log" 2>&1 </dev/null &
     echo "ComfyUI GPU ${i} starting on ${HOST}:${port} (PID $!), log ${LOG_DIR}/comfyui-${port}.log"
 

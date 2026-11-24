@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMFY_DIR="/root/comfy/ComfyUI"
-VENV_PYTHON="/root/comfy/venv/bin/python"
-LOG_DIR="/root/comfy/log"
+# COMFY_ROOT is the only path knob: everything below derives from it, so a new
+# host can install the stack anywhere (default keeps the reference layout).
+COMFY_ROOT="${COMFY_ROOT:-/root/comfy}"
+COMFY_DIR="${COMFY_ROOT}/ComfyUI"
+VENV_PYTHON="${COMFY_ROOT}/venv/bin/python"
+LOG_DIR="${COMFY_ROOT}/log"
 HOST="0.0.0.0"
 PORT="8188"
 
-TTS_PYTHON="/root/comfy/venv-cosy/bin/python"
-TTS_SCRIPT="/root/comfy/script/cosyvoice_tts_server.py"
-TTS_SOCKET="${COSY_UDS:-/root/comfy/log/tts.sock}"
+TTS_PYTHON="${COMFY_ROOT}/venv-cosy/bin/python"
+TTS_SCRIPT="${COMFY_ROOT}/script/cosyvoice_tts_server.py"
+TTS_SOCKET="${COSY_UDS:-${COMFY_ROOT}/log/tts.sock}"
 
-COMFY_PATTERN="/root/comfy/venv/bin/python main.py --listen ${HOST} --port ${PORT}"
+COMFY_PATTERN="${VENV_PYTHON} main.py --listen ${HOST} --port ${PORT}"
 TTS_PATTERN="${TTS_PYTHON} ${TTS_SCRIPT}"
 
 # Match only real python processes (ignore shells whose command line happens to contain the pattern).
@@ -41,7 +44,7 @@ fi
 if proc_running "$TTS_PATTERN"; then
     echo "CosyVoice2 TTS already running (socket ${TTS_SOCKET})."
 else
-    cd /root/comfy
+    cd "$COMFY_ROOT"
     CUDA_VISIBLE_DEVICES=0 nohup "$TTS_PYTHON" "$TTS_SCRIPT" \
         > "$LOG_DIR/cosy_tts_server.log" 2>&1 &
     echo "CosyVoice2 TTS starting on unix socket ${TTS_SOCKET} (PID $!)"
@@ -65,6 +68,6 @@ done
 
 # Additional fleet instances: GPU 1-7 -> ports 8189-8195.
 # Failures here must not change the exit status of the 8188/TTS startup above.
-/root/comfy/comfy_start_multi.sh || echo "WARNING: some fleet instances failed to start (see ${LOG_DIR}/comfyui-81xx.log)."
+"${COMFY_ROOT}/comfy_start_multi.sh" || echo "WARNING: some fleet instances failed to start (see ${LOG_DIR}/comfyui-81xx.log)."
 
 [ "$comfy_ok" = 1 ] && [ "$tts_ok" = 1 ]
