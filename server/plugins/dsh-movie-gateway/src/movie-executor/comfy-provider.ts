@@ -258,6 +258,15 @@ export function createComfyProvider(
 
   // --- dynamic endpoint resolution (ZeroTier overlay) ----------------------
   let currentEndpoints: string[] = config.endpoints
+  // P8-M8: liveness-driven pool sizing. `config.inflightMax` is the CEILING; the
+  // effective concurrency cap tracks how many pool endpoints actually answered
+  // the last liveness probe, so the fleet self-tunes to 8/4/1 usable cards and
+  // self-heals when an instance dies or a new one comes up. One ComfyUI instance
+  // == one pinned GPU, so live-endpoint count == usable-card count.
+  // `liveEndpoints` is the subset round-robin submits to (dead cards are skipped
+  // up front instead of costing a failed submit + failover).
+  let liveEndpoints: string[] = []
+  let effectiveCap = config.inflightMax
   // P8-M7: throttle the ZeroTier-central re-resolve so a prompt storm does not
   // hammer the controller API (which itself can be slow/blocked in-region).
   let lastEndpointRefresh = 0
@@ -280,7 +289,7 @@ export function createComfyProvider(
 
   function acquire(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted === true) return Promise.reject(new Error('comfy generation interrupted'))
-    if (inflight < config.inflightMax) {
+    if (inflight < effectiveCap) {
       inflight += 1
       return Promise.resolve()
     }
@@ -298,9 +307,46 @@ export function createComfyProvider(
   }
 
   function release(): void {
+    inflight -= 1
+    // P8-M8: hand the freed slot to the next waiter only while still under the
+    // effective cap (which may have SHRUNK since admission, e.g. a GPU dropped).
     const next = waiters.shift()
-    if (next) next.resolve() // hand the slot straight to the next waiter
-    else inflight -= 1
+    if (next !== undefined) {
+      if (inflight < effectiveCap) {
+        inflight += 1
+        next.resolve() // hand the slot straight to the next waiter
+      } else {
+        waiters.unshift(next) // over cap now; a later release/pump will admit it
+      }
+    }
+  }
+
+  /** P8-M8: effective cap = live endpoint count, clamped to [1, ceiling]. */
+  function recomputeCap(): void {
+    effectiveCap = Math.max(1, Math.min(config.inflightMax, liveEndpoints.length))
+  }
+
+  /** P8-M8: admit queued jobs after the cap GROWS (a dropped card came back). */
+  function pumpWaiters(): void {
+    while (waiters.length > 0 && inflight < effectiveCap) {
+      const next = waiters.shift()
+      if (next === undefined) break
+      inflight += 1
+      next.resolve()
+    }
+  }
+
+  /**
+   * P8-M8: drop an endpoint that failed at the NETWORK level mid-run so the next
+   * job does not also waste a submit on it. Self-correcting: the next liveness
+   * probe (<= PROBE_TTL_MS) re-adds it if it is actually alive.
+   */
+  function markDead(endpoint: string): void {
+    const index = liveEndpoints.indexOf(endpoint)
+    if (index < 0) return
+    liveEndpoints.splice(index, 1)
+    recomputeCap()
+    logger.warn('[movie-executor] comfy endpoint unreachable; dropping %s from live pool (%d live, cap %d)', endpoint, liveEndpoints.length, effectiveCap)
   }
 
   // --- health probe (P8-M5 + P8-M7): liveness split from capability ---------
@@ -391,6 +437,13 @@ export function createComfyProvider(
       logger.warn('[movie-executor] comfy liveness hiccup; holding last-good readiness within %dms grace', READINESS_GRACE_MS)
       return lastProbe.result
     }
+    // P8-M8: record the live subset so round-robin skips dead cards and the
+    // effective concurrency cap self-tunes to the usable-GPU count (8/4/1...).
+    // The grace branch above returns early, so a transient TOTAL hiccup keeps the
+    // last-good live set and cap instead of collapsing them to zero.
+    liveEndpoints = endpoints.filter((_, index): boolean => live[index] === true)
+    recomputeCap()
+    pumpWaiters()
     lastProbe = { at: Date.now(), result }
     return result
   }
@@ -398,10 +451,14 @@ export function createComfyProvider(
   // --- endpoint pooling: round-robin with submit failover -------------------
   let rrIndex = 0
   function endpointOrder(): string[] {
-    if (currentEndpoints.length === 0) return []
-    const start = rrIndex % currentEndpoints.length
+    // P8-M8: rotate over the LIVE subset so we do not waste a submit + failover
+    // on a dead card; fall back to the full candidate list when the live set is
+    // empty (e.g. a transient total hiccup inside the fail-open grace window).
+    const pool = liveEndpoints.length > 0 ? liveEndpoints : currentEndpoints
+    if (pool.length === 0) return []
+    const start = rrIndex % pool.length
     rrIndex += 1
-    return [...currentEndpoints.slice(start), ...currentEndpoints.slice(0, start)]
+    return [...pool.slice(start), ...pool.slice(0, start)]
   }
 
   function interrupt(endpoint: string): void {
@@ -558,6 +615,10 @@ export function createComfyProvider(
             break
           } catch (error) {
             submitError = error instanceof Error ? error.message : String(error)
+            // P8-M8: a network-level failure (not an HTTP rejection) means this
+            // card is unreachable right now; drop it from the live pool so the
+            // next job skips it. The next liveness probe re-adds it if it recovers.
+            markDead(candidate)
           }
         }
         if (promptId === '') throw new Error(`comfy prompt submit failed: ${submitError}`)
