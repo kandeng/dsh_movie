@@ -6,8 +6,11 @@ import threading
 import time
 import wave
 
-sys.path.append('/root/comfy/CosyVoice')
-sys.path.append('/root/comfy/CosyVoice/third_party/Matcha-TTS')
+# Single path knob, matching the launcher scripts (default = reference layout).
+COMFY_ROOT = os.environ.get('COMFY_ROOT', '/root/comfy')
+
+sys.path.append(f'{COMFY_ROOT}/CosyVoice')
+sys.path.append(f'{COMFY_ROOT}/CosyVoice/third_party/Matcha-TTS')
 
 import numpy as np
 import torch
@@ -18,14 +21,14 @@ from pydantic import BaseModel
 
 from cosyvoice.cli.cosyvoice import AutoModel
 
-MODEL_DIR = '/root/comfy/CosyVoice/pretrained_models/CosyVoice2-0.5B'
-UDS_PATH = os.environ.get('COSY_UDS', '/root/comfy/log/tts.sock')
+MODEL_DIR = f'{COMFY_ROOT}/CosyVoice/pretrained_models/CosyVoice2-0.5B'
+UDS_PATH = os.environ.get('COSY_UDS', f'{COMFY_ROOT}/log/tts.sock')
 IDLE_TIMEOUT = float(os.environ.get('COSY_IDLE_TIMEOUT', '600'))
 SAMPLE_RATE = 24000
 
 PROMPTS = {
-    'female_zh': ('希望你以后能够做的比我还好呦。', '/root/comfy/CosyVoice/asset/zero_shot_prompt.wav'),
-    'female_zh_alt': ('', '/root/comfy/CosyVoice/asset/cross_lingual_prompt.wav'),
+    'female_zh': ('希望你以后能够做的比我还好呦。', f'{COMFY_ROOT}/CosyVoice/asset/zero_shot_prompt.wav'),
+    'female_zh_alt': ('', f'{COMFY_ROOT}/CosyVoice/asset/cross_lingual_prompt.wav'),
 }
 
 app = FastAPI(title='CosyVoice2 TTS (lazy, unix socket)')
