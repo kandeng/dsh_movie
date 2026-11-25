@@ -16,5 +16,18 @@ server/static/comfy/
 .env
 comfy.env
 
+# NEVER upload: TLS private keys / certs and OAuth credentials.
+# deployment/tls/ holds the live *.pem keypairs plus google_oauth.json — these
+# are host secrets, not source. Rule mirrors the drone-navigation-v2 repo.
+# The broad patterns below are a safety net so a stray key dropped anywhere else
+# in the tree can never be swept up by `git add -A` either. A genuine test
+# fixture can still be committed deliberately with `git add -f <path>`.
+deployment/tls/
+*.pem
+*.key
+*.p12
+*.pfx
+*oauth*.json
+
 # OS / editor cruft
 .DS_Store
