@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # DSH Movie stack shutdown (idempotent):
 #   1. web client (vite :5173) and DSH server (:8787/:8788) process trees
-#   2. systemd user services: dsh-synapse then dsh-postgre
+#   2. systemd user services: dsh-synapse then dsh-postgre, followed by a port
+#      sweep of :8008/:5432 that catches instances started BY HAND — those live
+#      outside the unit's cgroup, so systemctl alone cannot stop them
 # NOTE: the local ComfyUI engine (:8188) is deliberately NOT stopped here — its
 # lifecycle is owned by server/comfy_stop.sh (and the Supply page Disconnect
 # button). Stop it explicitly with: ./server/comfy_stop.sh
@@ -44,6 +46,15 @@ sleep 1
 echo "── 2/2 systemd user services (synapse → postgres)"
 systemctl --user stop dsh-synapse.service
 systemctl --user stop dsh-postgre.service
+
+# Fallback port sweep. A homeserver/postgres launched from a terminal is
+# reparented to `systemd --user` but stays in the launching terminal's scope
+# (e.g. app-gnome-qoder-*.scope), NOT in dsh-synapse.service — so the stops above
+# are a silent no-op against it and :8008 keeps listening. Killing by port catches
+# it whichever cgroup it is in. Order mirrors the services: homeserver first, then
+# the database it depends on (SIGTERM is a clean fast shutdown for postgres).
+stop_port 8008 "synapse (by port)"
+stop_port 5432 "postgres (by port)"
 
 echo
 LEFT=""
