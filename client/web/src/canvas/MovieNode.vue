@@ -90,12 +90,24 @@ const connectedHandles = computed(() => {
  * 1) still has a handle to attach to. Storage/execution keep the real slots.
  */
 const mergedInputs = computed(() => mergesInputs(data.value.classType));
+/**
+ * The input slots actually rendered as handles. The live schema stays
+ * authoritative even at render time (belt-and-braces over the load path): a slot
+ * removed from the protocol never renders, not even from a stale in-memory node
+ * whose `data.inputs` was built by an older build. Unknown class types keep
+ * every stored slot (they have no schema to converge to).
+ */
+const renderedInputs = computed(() => {
+  const slots = data.value.inputs ?? [];
+  const schema = schemaFor(data.value.classType);
+  return schema === undefined ? slots : slots.slice(0, schema.inputs.length);
+});
 /** Any input slot connected — drives the single merged dot's filled state. */
 const anyInputConnected = computed(() =>
-  (data.value.inputs ?? []).some((_, i) => connectedHandles.value.has(`in-${i}`)));
+  renderedInputs.value.some((_, i) => connectedHandles.value.has(`in-${i}`)));
 /** Hover tooltip for the merged handle: every role the one drop zone accepts. */
 const mergedTitle = computed(() =>
-  (data.value.inputs ?? []).map((slot) => `${slot.name || "in"} · ${slot.type}`).join("  |  "));
+  renderedInputs.value.map((slot) => `${slot.name || "in"} · ${slot.type}`).join("  |  "));
 
 function asText(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -190,13 +202,13 @@ const mediaName = computed(() => {
            Each dot carries its slot NAME on the canvas side so a port's role
            (prompt / image / skill …) is readable without hovering a tooltip. -->
       <Handle
-        v-for="(slot, i) in (data.inputs ?? [])" :key="`hin-${i}`"
+        v-for="(slot, i) in renderedInputs" :key="`hin-${i}`"
         :id="`in-${i}`" type="target" :position="Position.Left"
         class="nodeHandle"
         :class="mergedInputs
           ? { mergedAnchor: i > 0, connected: i === 0 && anyInputConnected }
           : { connected: connectedHandles.has(`in-${i}`) }"
-        :style="{ top: mergedInputs ? '50%' : `${((i + 1) / ((data.inputs ?? []).length + 1)) * 100}%` }"
+        :style="{ top: mergedInputs ? '50%' : `${((i + 1) / (renderedInputs.length + 1)) * 100}%` }"
         :title="mergedInputs ? (i === 0 ? mergedTitle : '') : `${slot.name || `in ${i}`} · ${slot.type}`">
         <span v-if="!mergedInputs" class="portLabel portIn">{{ slot.name || `in ${i}` }}</span>
         <component

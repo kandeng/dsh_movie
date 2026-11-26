@@ -202,12 +202,16 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
   {
     classType: 'TextInput',
     displayName: 'Text Input',
-    description: 'Provide raw text (idea, request, script excerpt; markdown supported) to the graph. An optional `ref` input is appended to the body as a labeled block.',
+    description: 'Provide raw text (idea, request, script excerpt; markdown supported) to the graph.',
     category: 'movie/source',
     family: 'source',
     modality: 'text',
     supportsSkillImport: true,
-    inputs: [{ name: 'ref', type: 'TEXT', optional: true, variadic: true }],
+    // Sources are the graph's ultimate roots: no input slots, so nothing can be
+    // linked INTO a Text Input. (The phase-1 optional variadic `ref` slot was
+    // removed once variadic TEXT inputs on generators made upstream chaining
+    // into a source redundant.)
+    inputs: [],
     outputs: [{ name: 'text', type: 'TEXT' }],
     widgets: [{ name: 'text', type: 'STRING', multiline: true, default: '' }],
   },

@@ -276,6 +276,23 @@ function viewportFromGraph(graph: WorkflowGraph): ViewportTransform {
 }
 
 /**
+ * The input slots a node presents on the canvas. For a KNOWN class type the
+ * live schema is authoritative, so a slot removed from the protocol (e.g. the
+ * Text Input's retired `ref`) disappears from ALREADY-SAVED graphs on load and
+ * they converge to pure-root sources; the stored per-node serialization is only
+ * a fallback for unknown class types. The stored `link` pointer is carried over
+ * by slot index so connected handles still render filled.
+ */
+function declaredInputs(node: WorkflowNode): WorkflowSlot[] {
+  const schema = schemaFor(node.type);
+  const stored = node.inputs ?? [];
+  if (schema === undefined) return stored.map((slot): WorkflowSlot => ({ ...slot }));
+  return schema.inputs.map(
+    (slot, index): WorkflowSlot => ({ name: slot.name, type: slot.type, link: stored[index]?.link ?? null }),
+  );
+}
+
+/**
  * Translate a ComfyUI {@link WorkflowGraph} into a Vue Flow graph.
  * @param graph - the server-authoritative workflow graph.
  * @returns the Vue Flow nodes/edges/viewport for the editor.
@@ -288,7 +305,7 @@ export function workflowToVueFlow(graph: WorkflowGraph): VueFlowGraph {
       classType: node.type,
       widgets: widgetsFromValues(node.type, widgetsValues),
       widgetsValues,
-      inputs: (node.inputs ?? []).map((slot): WorkflowSlot => ({ ...slot })),
+      inputs: declaredInputs(node),
       outputs: (node.outputs ?? []).map((slot): WorkflowSlot => ({ ...slot })),
       size: [size[0], size[1]],
       mode: node.mode ?? 0,
@@ -315,7 +332,18 @@ export function workflowToVueFlow(graph: WorkflowGraph): VueFlowGraph {
     } as MovieFlowNode;
   });
 
-  const edges: MovieFlowEdge[] = (graph.links ?? []).map((tuple): MovieFlowEdge => {
+  // A saved graph can carry links into slots the live schema no longer declares
+  // (e.g. an edge saved against the Text Input's retired `ref`). Drop them at
+  // load: they would render dangling and re-serialize into an invalid graph.
+  const typeById = new Map<string, string>();
+  for (const node of graph.nodes ?? []) typeById.set(String(node.id), node.type);
+  const edges: MovieFlowEdge[] = (graph.links ?? [])
+    .filter((tuple): boolean => {
+      const t = tuple as WorkflowLinkTuple;
+      const targetSchema = schemaFor(typeById.get(String(t[3])) ?? "");
+      return targetSchema === undefined || Number(t[4]) < targetSchema.inputs.length;
+    })
+    .map((tuple): MovieFlowEdge => {
     const [linkId, fromNode, fromSlot, toNode, toSlot] = tuple as WorkflowLinkTuple;
     return {
       id: `link-${linkId}`,

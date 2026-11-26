@@ -61,11 +61,23 @@ const FAMILY_LABEL: Record<NodeFamily, string> = {
   combiner: "组合器",
 };
 
+/**
+ * Class types hidden from the add-node cascade. `TextMerge` is functionally
+ * subsumed by variadic TEXT input slots — any TEXT input already concatenates
+ * N linked texts in link-creation order with a blank-line separator — so
+ * offering it only invites redundant graphs. This is a PALETTE-level hide, not
+ * a deletion: the class type stays registered in the protocol/executor, so
+ * existing saved graphs containing a TextMerge still validate and execute.
+ */
+const HIDDEN_FROM_PALETTE: ReadonlySet<string> = new Set(["TextMerge"]);
+
 const branches = computed<Branch[]>(() => {
   const familyBranches = FAMILY_ORDER.map((family): Branch => ({
     key: family,
     label: translate(FAMILY_LABEL[family]),
-    classes: FUNCTIONAL_NODES.filter((node) => node.family === family).map((node): ClassEntry => ({
+    classes: FUNCTIONAL_NODES.filter(
+      (node) => node.family === family && !HIDDEN_FROM_PALETTE.has(node.classType),
+    ).map((node): ClassEntry => ({
       classType: node.classType,
       // The protocol ships English display names; route them through the i18n
       // catalog (keyed by the English name) so the cascade leaves localize.
