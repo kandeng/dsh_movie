@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
 import type { NodeRunStatus, WorkflowGraph, WorkflowGroup, MovieStepResult, MovieStepStatus, MovieStepId, ImportedSkillRef, SkillTarget } from "@dsh-movie/protocol";
 import { FUNCTIONAL_NODES, MOVIE_NODES, templateById } from "@dsh-movie/protocol";
@@ -18,13 +18,12 @@ import { DEFAULT_GROUP_COLOR, GROUP_COLOR_KEYS, groupColor } from "@/canvas/grou
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
 import { useRoomRole } from "@/composables/useRoomRole";
 import { useImportStore } from "@/stores/import";
-import { usePlugins } from "@/composables/usePlugins";
 import { useWorkspaceGraph } from "@/composables/useWorkspaceGraph";
 import { useExecStatus } from "@/composables/useExecStatus";
 import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
 import { useMovieRun } from "@/composables/useMovieRun";
 import { buildDemoWorkflow, buildDemoPrompt, findMovieNode } from "@/utils/demoWorkflow";
-import { schemaFor, workflowToPrompt, type MovieNodeData, type NodeWidgetView, type ContentRef } from "@/canvas/graphMapper";
+import { mergesInputs, routeInputSlotByType, schemaFor, workflowToPrompt, type MovieNodeData, type NodeWidgetView, type ContentRef } from "@/canvas/graphMapper";
 import { fetchMediaBlobUrl } from "@/lib/matrixMedia";
 import { nodeSkin } from "@/canvas/nodeSkin";
 import { previewKind, type TextPreviewKind } from "@/utils/textPreview";
@@ -148,7 +147,6 @@ const roomRole = useRoomRole(roomIdRef);
 // ACT: 跨路由技能导入暂存（Phase-7 D7 mode-1）：编辑器 Import 跳转 /plugins pick-mode，
 // 返回后由此消费已下载的正文与引用。
 const importStore = useImportStore();
-const plugins = usePlugins();
 const workspace = useWorkspaceGraph(roomIdRef, bridge, roomRole);
 
 // ── Phase 8 P8-M3: real GPU-generated media. The executor posts the output bytes
@@ -749,79 +747,6 @@ function removeImportedSkill(index: number): void {
   draft.importedSkills = next;
 }
 
-// ── Phase-7 D9a: the editor-chip Run trigger. An imported-skill chip that names an
-//    executable skill can be run in-place; its sandboxed output is appended to the
-//    node's primary text widget (mirroring the Import paste). Trust+consent gating
-//    lives server-side in SkillIndex.run — clean/yellow auto-run, orange prompts for
-//    consent (ElMessageBox) then records it server-globally and retries, red refuses. ──
-
-/** Append run output into the editor's primary text widget (mirrors the import paste). */
-function pasteIntoEditor(content: string): void {
-  if (editorReadonly.value || content === "") return;
-  const draft = editorDraft.value;
-  if (draft === null) return;
-  const widgetName = editorImportWidget.value;
-  if (widgetName !== "") {
-    const widget = draft.widgets.find((candidate) => candidate.name === widgetName);
-    if (widget !== undefined) {
-      const current = asString(widget.value);
-      widget.value = current === "" ? content : `${current}\n\n${content}`;
-    }
-  }
-  saveEditor();
-}
-
-/** Chip Run button: execute an imported skill in the current room (D9a). */
-async function runChipSkill(skill: ImportedSkillRef): Promise<void> {
-  if (editorReadonly.value) return;
-  const roomId = roomIdRef.value;
-  if (roomId === "") {
-    ElMessage.warning(translate("请先进入一个房间再导入技能"));
-    return;
-  }
-  await attemptChipRun(skill, roomId);
-}
-
-async function attemptChipRun(skill: ImportedSkillRef, roomId: string): Promise<void> {
-  try {
-    const { run, status } = await plugins.run(skill.id, roomId);
-    if (status === "ok" && run !== null) {
-      pasteIntoEditor(run.content);
-      ElMessage.success(translate("运行结果已写入节点"));
-      return;
-    }
-    if (status === "consent-required") {
-      try {
-        await ElMessageBox.confirm(
-          translate("该技能为可疑内容，运行前需要你的授权。"),
-          translate("需要授权后运行"),
-          {
-            confirmButtonText: translate("授权运行"),
-            cancelButtonText: translate("拒绝"),
-            type: "warning",
-          },
-        );
-      } catch {
-        return; // the user declined the orange-consent prompt
-      }
-      await plugins.consent(skill.id, true);
-      await attemptChipRun(skill, roomId);
-      return;
-    }
-    if (status === "blocked") {
-      ElMessage.error(translate("恶意内容已被阻止运行"));
-      return;
-    }
-    if (status === "not-executable") {
-      ElMessage.warning(translate("此技能不可执行"));
-      return;
-    }
-    ElMessage.error(translate("运行失败"));
-  } catch {
-    ElMessage.error(translate("运行失败"));
-  }
-}
-
 /**
  * Splice a downloaded skill body into the open draft's target widget and append
  * its additive `importedSkills` ref. This is the ONE paste path, used by the
@@ -1238,6 +1163,21 @@ function onConnectPick(payload: { source: number; target: number }) {
     fromId = payload.target;
     toId = payload.source;
     pairs = reversed;
+  }
+  // A merged-input target hides its slots behind ONE handle, so auto-route by
+  // the source's output type instead of raising the port chooser: TEXT -> the
+  // first TEXT slot (`prompt`), IMAGE -> the `image` slot.
+  const toClassType = bridge.flow.findNode(String(toId))?.data?.classType ?? "";
+  if (mergesInputs(toClassType)) {
+    const fromOutputs = bridge.flow.findNode(String(fromId))?.data?.outputs ?? [];
+    const routed = pairs.find((pair) => {
+      const outType = fromOutputs[pair.fromSlot]?.type ?? "*";
+      return pair.toSlot === routeInputSlotByType(toClassType, outType);
+    });
+    if (routed !== undefined) {
+      addConnectEdge(fromId, toId, routed);
+      return;
+    }
   }
   const only = pairs[0];
   if (pairs.length === 1 && only !== undefined) {
@@ -1970,30 +1910,17 @@ function goLogin() {
               </el-button>
             </div>
             <div v-if="(editorDraft?.importedSkills?.length ?? 0) > 0" class="skillChips">
-              <span
+              <el-tag
                 v-for="(skill, index) in editorDraft?.importedSkills ?? []"
                 :key="`${skill.id}-${index}`"
-                class="skillChipRow">
-                <el-tag
-                  class="skillChip"
-                  size="small"
-                  type="success"
-                  effect="plain"
-                  :closable="!editorReadonly"
-                  @close="removeImportedSkill(index)">
-                  {{ skill.id }}
-                </el-tag>
-                <el-button
-                  class="chipRunButton"
-                  size="small"
-                  text
-                  type="primary"
-                  :disabled="editorReadonly"
-                  :loading="plugins.busy.value"
-                  @click="runChipSkill(skill)">
-                  {{ translate("运行") }}
-                </el-button>
-              </span>
+                class="skillChip"
+                size="small"
+                type="success"
+                effect="plain"
+                :closable="!editorReadonly"
+                @close="removeImportedSkill(index)">
+                {{ skill.id }}
+              </el-tag>
             </div>
             <p v-else class="contentHint">{{ translate("尚未导入技能") }}</p>
           </div>
@@ -3150,19 +3077,8 @@ function goLogin() {
   gap: 6px;
 }
 
-.skillChipRow {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
 .skillChip {
   max-width: 100%;
-}
-
-.chipRunButton {
-  height: 24px;
-  padding: 0 6px;
 }
 
 .contentHint {

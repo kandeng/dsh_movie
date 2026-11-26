@@ -29,7 +29,10 @@ export interface WorkflowSlot {
   type?: string
   /**
    * Id of the link connected to this slot, or `null` when unconnected. Input
-   * slots carry a single `link`; output slots additionally carry `links`.
+   * slots carry a single `link` — the PRIMARY edge: the OLDEST link on a
+   * variadic input (link-creation order is the composition order), the only
+   * link otherwise; output slots additionally carry `links`. A variadic
+   * input's full ordered edge list lives in `graph.links`.
    */
   link: number | null
   /**

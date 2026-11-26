@@ -28,7 +28,7 @@ import { FUNCTIONAL_NODES, MOVIE_NODES, type WorkflowGroup } from "@dsh-movie/pr
 import MovieNode from "@/canvas/MovieNode.vue";
 import canvasEmpty from "@/canvas/canvasEmpty.vue";
 import { boundingFromDrag, groupColor } from "@/canvas/groupOverlay";
-import type { MovieNodeData } from "@/canvas/graphMapper";
+import { mergesInputs, type MovieNodeData } from "@/canvas/graphMapper";
 import { CANVAS_TOOL_KEY, type CanvasToolMode } from "@/canvas/toolContext";
 
 import "@vue-flow/core/dist/style.css";
@@ -200,6 +200,16 @@ function isValidConnection(connection: Connection): boolean {
   const source = nodes.value.find((node) => node.id === connection.source)?.data as MovieNodeData | undefined;
   const target = nodes.value.find((node) => node.id === connection.target)?.data as MovieNodeData | undefined;
   const outType = source?.outputs?.[handleSlot(connection.sourceHandle)]?.type ?? "*";
+  // A merged-input node shows ONE drop handle, so a drag always lands on slot 0;
+  // accept when the source type fits ANY input slot (the bridge then routes the
+  // edge to the matching role on connect). Without this an IMAGE dragged onto
+  // the merged handle would be rejected by slot 0's TEXT type.
+  if (mergesInputs(target?.classType ?? "")) {
+    return (target?.inputs ?? []).some((slot) => {
+      const inType = slot.type ?? "*";
+      return outType === "*" || inType === "*" || outType === inType;
+    });
+  }
   const inType = target?.inputs?.[handleSlot(connection.targetHandle)]?.type ?? "*";
   return outType === "*" || inType === "*" || outType === inType;
 }

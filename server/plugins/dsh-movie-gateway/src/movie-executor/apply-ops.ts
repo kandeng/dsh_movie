@@ -185,19 +185,45 @@ function detachLink(graph: WorkflowGraph, linkId: number, fromId: number, fromSl
   if (inSlot !== undefined && inSlot.link === linkId) inSlot.link = null
 }
 
+/**
+ * Recompute one input slot's primary `link` pointer from `graph.links`: the
+ * OLDEST edge on a variadic slot (link-creation order is the composition
+ * order), the NEWEST on a single-link slot (legacy last-wins semantics for
+ * saved ghost duplicates).
+ */
+function resyncInputPointer(graph: WorkflowGraph, nodeId: number, slotIndex: number): void {
+  const node = findNode(graph, nodeId)
+  const inSlot = node?.inputs?.[slotIndex]
+  if (node === undefined || inSlot === undefined) return
+  const touching = (graph.links ?? []).filter((entry): boolean => {
+    const t = entry as WorkflowLinkTuple
+    return Number(t[3]) === nodeId && Number(t[4]) === slotIndex
+  })
+  if (touching.length === 0) {
+    inSlot.link = null
+    return
+  }
+  const variadic = SCHEMA_BY_TYPE.get(node.type)?.inputs?.[slotIndex]?.variadic === true
+  const chosen = variadic ? touching[0] : touching[touching.length - 1]
+  inSlot.link = Number((chosen as WorkflowLinkTuple)[0])
+}
+
 /** Remove every link touching a node and clear the node's own slot link refs. */
 function removeNodeLinks(graph: WorkflowGraph, id: number): void {
   const links = graph.links ?? []
   const surviving: WorkflowLinkTuple[] = []
+  const affected: Array<[number, number]> = []
   for (const tuple of links) {
     const [, fromNode, fromSlot, toNode, toSlot] = tuple as WorkflowLinkTuple
     if (Number(fromNode) === id || Number(toNode) === id) {
       detachLink(graph, Number(tuple[0]), Number(fromNode), Number(fromSlot), Number(toNode), Number(toSlot))
+      if (Number(toNode) !== id) affected.push([Number(toNode), Number(toSlot)])
       continue
     }
     surviving.push(tuple)
   }
   graph.links = surviving
+  for (const [nodeId, slotIndex] of affected) resyncInputPointer(graph, nodeId, slotIndex)
 }
 
 /** A short human label for a node type used in the D9 narration. */
@@ -285,11 +311,27 @@ function applyOne(graph: WorkflowGraph, op: CanvasOp, narration: string[]): stri
       if (target === undefined) return `edge target #${toId} not found`
       if (source.outputs?.[fromSlot] === undefined) return `node #${fromId} has no output slot ${fromSlot}`
       if (target.inputs?.[toSlot] === undefined) return `node #${toId} has no input slot ${toSlot}`
+      // Replace-on-connect for single-link slots (mirrors the client onConnect):
+      // a non-variadic input keeps at most ONE edge - a new connect retires the
+      // old one instead of leaving a ghost edge execution would silently ignore.
+      // Variadic slots stack, ordered by link-creation time.
+      if (SCHEMA_BY_TYPE.get(target.type)?.inputs?.[toSlot]?.variadic !== true) {
+        const stale = (graph.links ?? []).find((entry): boolean => {
+          const t = entry as WorkflowLinkTuple
+          return Number(t[3]) === toId && Number(t[4]) === toSlot
+        })
+        if (stale !== undefined) {
+          const t = stale as WorkflowLinkTuple
+          detachLink(graph, Number(t[0]), Number(t[1]), Number(t[2]), toId, toSlot)
+          graph.links = (graph.links ?? []).filter((entry): boolean => entry !== stale)
+        }
+      }
       const linkId = nextLinkId(graph)
       const tuple: WorkflowLinkTuple = [linkId, fromId, fromSlot, toId, toSlot]
       graph.links = [...(graph.links ?? []), tuple]
       graph.last_link_id = Math.max(graph.last_link_id ?? 0, linkId)
       attachLink(graph, linkId, fromId, fromSlot, toId, toSlot)
+      resyncInputPointer(graph, toId, toSlot)
       narration.push(`edge #${fromId}→#${toId}`)
       return null
     }
@@ -301,6 +343,7 @@ function applyOne(graph: WorkflowGraph, op: CanvasOp, narration: string[]): stri
       const [, fromNode, fromSlot, toNode, toSlot] = tuple as WorkflowLinkTuple
       detachLink(graph, id, Number(fromNode), Number(fromSlot), Number(toNode), Number(toSlot))
       graph.links = links.filter((entry): boolean => Number(entry[0]) !== id)
+      resyncInputPointer(graph, Number(toNode), Number(toSlot))
       narration.push(`−edge #${id}`)
       return null
     }

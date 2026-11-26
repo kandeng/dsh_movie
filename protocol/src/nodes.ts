@@ -26,6 +26,13 @@ export interface NodeSlotSchema {
   type: string
   /** Whether a link into this input slot is optional (functional nodes). */
   optional?: boolean
+  /**
+   * Whether this INPUT slot accepts several simultaneous links (variadic).
+   * Every linked value resolves in link-creation order and the family adapter
+   * composes the ordered list (TEXT slots join with `\n\n`). Single-link slots
+   * instead retire the old edge when a new one connects (replace-on-connect).
+   */
+  variadic?: boolean
 }
 
 /** A widget (non-connection) field rendered inside the node body. */
@@ -77,6 +84,15 @@ export interface MovieNodeSchema {
    * and the six legacy step classes (kept as newbie shortcuts, D11).
    */
   supportsSkillImport?: boolean
+  /**
+   * Whether the canvas presents this node's several input slots as ONE visible
+   * drop handle (a single "drop zone"). The slots stay distinct in the schema,
+   * storage, and executor; only the rendering merges them. On connect the bridge
+   * auto-routes each edge to the first input slot whose type is compatible with
+   * the source output (TEXT -> `prompt`, IMAGE -> `image`, ...), so the user never
+   * picks a port by hand. Meaningless for a node with fewer than two inputs.
+   */
+  mergeInputs?: boolean
   /** Connection inputs. */
   inputs: readonly NodeSlotSchema[]
   /** Connection outputs. */
@@ -191,7 +207,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     family: 'source',
     modality: 'text',
     supportsSkillImport: true,
-    inputs: [{ name: 'ref', type: 'TEXT', optional: true }],
+    inputs: [{ name: 'ref', type: 'TEXT', optional: true, variadic: true }],
     outputs: [{ name: 'text', type: 'TEXT' }],
     widgets: [{ name: 'text', type: 'STRING', multiline: true, default: '' }],
   },
@@ -237,7 +253,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     family: 'generator',
     modality: 'text',
     supportsSkillImport: true,
-    inputs: [{ name: 'context', type: 'TEXT', optional: true }],
+    inputs: [{ name: 'context', type: 'TEXT', optional: true, variadic: true }],
     outputs: [{ name: 'text', type: 'TEXT' }],
     widgets: [{ name: 'prompt', type: 'STRING', multiline: true, default: '' }],
   },
@@ -249,14 +265,19 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     family: 'generator',
     modality: 'image',
     supportsSkillImport: true,
+    mergeInputs: true,
     inputs: [
-      { name: 'prompt', type: 'TEXT', optional: true },
-      { name: 'image', type: 'IMAGE', optional: true },
+      { name: 'prompt', type: 'TEXT', optional: true, variadic: true },
+      // Variadic: an Image Generator accepts SEVERAL reference images at once
+      // (no more replace-on-connect dropping the second). They resolve to an
+      // ORDERED array of refs; the active ComfyUI variant consumes the first as
+      // its img2img init / face reference (the bundled templates each take one).
+      { name: 'image', type: 'IMAGE', optional: true, variadic: true },
       // A craft skill wired in from an upstream Text Input (as opposed to one
       // imported onto the node, which the runner injects as `inputs.skills`).
       // APPENDED at index 2 so slot 0 (`prompt`) and slot 1 (`image`) keep their
       // meaning in every saved graph.
-      { name: 'skill', type: 'TEXT', optional: true },
+      { name: 'skill', type: 'TEXT', optional: true, variadic: true },
     ],
     outputs: [{ name: 'image', type: 'IMAGE' }],
     widgets: [
@@ -279,7 +300,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     modality: 'video',
     supportsSkillImport: true,
     inputs: [
-      { name: 'prompt', type: 'TEXT', optional: true },
+      { name: 'prompt', type: 'TEXT', optional: true, variadic: true },
       { name: 'image', type: 'IMAGE', optional: true },
     ],
     outputs: [{ name: 'clip', type: 'VIDEO' }],
@@ -296,7 +317,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     family: 'generator',
     modality: 'audio',
     supportsSkillImport: true,
-    inputs: [{ name: 'prompt', type: 'TEXT', optional: true }],
+    inputs: [{ name: 'prompt', type: 'TEXT', optional: true, variadic: true }],
     outputs: [{ name: 'audio', type: 'AUDIO' }],
     widgets: [{ name: 'kind', type: 'COMBO', options: ['sound', 'music'], default: 'sound' }],
   },

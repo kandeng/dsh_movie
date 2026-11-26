@@ -90,25 +90,39 @@ export function validatePromptGraph(graph: PromptGraph): PromptValidation {
     }
 
     for (const [inputKey, value] of Object.entries(inputs as Record<string, unknown>)) {
-      if (!isLink(value)) continue
-      const sourceId = String(value[0])
-      const slot = value[1]
-      if (!Object.prototype.hasOwnProperty.call(graph, sourceId)) {
-        addError(id, classType, `input "${inputKey}" links to missing node "${sourceId}"`)
+      // A variadic input slot carries an ORDERED list of link tuples (link-
+      // creation order = composition order); a single-link slot carries exactly
+      // one tuple. Anything else is a widget literal: nothing to validate here.
+      const links: ReadonlyArray<[string | number, number]> = isLink(value)
+        ? [value]
+        : Array.isArray(value) && value.length > 0 && value.every(isLink)
+          ? (value as Array<[string | number, number]>)
+          : []
+      if (links.length === 0) continue
+      if (links.length > 1 && inputSlotSchema(classType, inputKey)?.variadic !== true) {
+        addError(id, classType, `input "${inputKey}" carries ${links.length} links but the slot is not variadic`)
         continue
       }
-      const sourceNode: PromptGraphNode | undefined = graph[sourceId]
-      const sourceOutputs = sourceNode === undefined ? undefined : classTypeOutputs(sourceNode.class_type)
-      if (sourceOutputs !== undefined && (slot < 0 || slot >= sourceOutputs.length)) {
-        addError(id, classType, `input "${inputKey}" links to out-of-range slot ${slot} on node "${sourceId}"`)
-        continue
-      }
-      // D2 type compatibility: only when both endpoints are protocol-declared
-      // slots (canned demo nodes and free-form input keys stay range-checked).
-      const sourceType = sourceNode === undefined ? undefined : outputSlotSchema(sourceNode.class_type, slot)?.type
-      const targetType = inputSlotSchema(classType, inputKey)?.type
-      if (sourceType !== undefined && targetType !== undefined && !slotCompatible(sourceType, targetType)) {
-        addError(id, classType, `input "${inputKey}" type mismatch: ${sourceType} (node "${sourceId}" slot ${slot}) is not assignable to ${targetType}`)
+      for (const tuple of links) {
+        const sourceId = String(tuple[0])
+        const slot = tuple[1]
+        if (!Object.prototype.hasOwnProperty.call(graph, sourceId)) {
+          addError(id, classType, `input "${inputKey}" links to missing node "${sourceId}"`)
+          continue
+        }
+        const sourceNode: PromptGraphNode | undefined = graph[sourceId]
+        const sourceOutputs = sourceNode === undefined ? undefined : classTypeOutputs(sourceNode.class_type)
+        if (sourceOutputs !== undefined && (slot < 0 || slot >= sourceOutputs.length)) {
+          addError(id, classType, `input "${inputKey}" links to out-of-range slot ${slot} on node "${sourceId}"`)
+          continue
+        }
+        // D2 type compatibility: only when both endpoints are protocol-declared
+        // slots (canned demo nodes and free-form input keys stay range-checked).
+        const sourceType = sourceNode === undefined ? undefined : outputSlotSchema(sourceNode.class_type, slot)?.type
+        const targetType = inputSlotSchema(classType, inputKey)?.type
+        if (sourceType !== undefined && targetType !== undefined && !slotCompatible(sourceType, targetType)) {
+          addError(id, classType, `input "${inputKey}" type mismatch: ${sourceType} (node "${sourceId}" slot ${slot}) is not assignable to ${targetType}`)
+        }
       }
     }
   }

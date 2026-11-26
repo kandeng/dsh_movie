@@ -8,7 +8,9 @@
  *  - `source`    → pass-through: the widget payload (or a resolved upstream
  *                  link) becomes the node's single output artifact. Declared
  *                  input slots (exp: TextInput's optional `ref`) resolve and
- *                  append as labeled blocks instead of a bare concatenation.
+ *                  append as labeled blocks instead of a bare concatenation;
+ *                  a variadic slot with several links appends one numbered
+ *                  block per link, in link-creation order.
  *  - `generator/text` → the LLM seam (`ctx.text`, the generalized
  *                  `StepTextGenerator`); canned text fallback when absent.
  *  - `generator/image|video|audio` → first the D15 availability gate
@@ -70,9 +72,36 @@ function display(artifact: unknown): string {
   return typeof artifact === 'string' ? artifact : String(artifact ?? '')
 }
 
+/** Narrow an input value to an ORDERED list of link tuples (a variadic slot). */
+function asLinkList(value: unknown): Array<[string, number]> | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  if (!value.every((entry): boolean => asLink(entry) !== undefined)) return undefined
+  return (value as Array<[string, number]>).map((entry) => asLink(entry)!)
+}
+
+/**
+ * Resolve one input slot to its ordered artifact list: a variadic link list
+ * resolves element-wise IN LINK ORDER, a single link tuple resolves alone, and
+ * a widget literal passes through as the single element.
+ */
+function resolveSlotValues(ctx: NodeHandlerContext, value: unknown): unknown[] {
+  const list = asLinkList(value)
+  if (list !== undefined) return list.map((link): unknown => ctx.resolve(link[0], link[1]))
+  const link = asLink(value)
+  return link === undefined ? [value] : [ctx.resolve(link[0], link[1])]
+}
+
+/** Resolve one input slot to a single text: ordered artifacts joined with `\n\n`. */
+function resolveSlotText(ctx: NodeHandlerContext, value: unknown): string {
+  return resolveSlotValues(ctx, value)
+    .map((entry): string => display(entry))
+    .filter((text): boolean => text !== '')
+    .join('\n\n')
+}
+
 /** Assemble display strings for every resolved input, in declared slot order. */
 function resolvedInputsBySlot(schema: MovieNodeSchema, ctx: NodeHandlerContext): string[] {
-  return schema.inputs.map((slot): string => display(resolveValue(ctx, ctx.inputs[slot.name]))).filter((text): boolean => text !== '')
+  return schema.inputs.map((slot): string => resolveSlotText(ctx, ctx.inputs[slot.name])).filter((text): boolean => text !== '')
 }
 
 /** Build the handler for one source class (payload widget → typed output).
@@ -89,11 +118,19 @@ function sourceHandler(schema: MovieNodeSchema): NodeHandler {
       const raw = ctx.inputs[widget]
       const artifact = asLink(raw) === undefined ? raw : resolveValue(ctx, raw)
       const blocks = schema.inputs
-        .map((slot): string => {
-          const text = display(resolveValue(ctx, ctx.inputs[slot.name]))
-          return text === '' ? '' : `【${slot.name}】\n${text}`
+        .flatMap((slot): string[] => {
+          const texts = resolveSlotValues(ctx, ctx.inputs[slot.name])
+            .map((entry): string => display(entry))
+            .filter((text): boolean => text !== '')
+          if (texts.length === 0) return []
+          // A variadic slot with several linked references numbers its blocks
+          // (【ref 1】, 【ref 2】, …) so the downstream model can tell them
+          // apart; a single reference keeps the plain 【ref】 label.
+          if (slot.variadic === true && texts.length > 1) {
+            return texts.map((text, index): string => `【${slot.name} ${index + 1}】\n${text}`)
+          }
+          return [`【${slot.name}】\n${texts.join('\n\n')}`]
         })
-        .filter((text): boolean => text !== '')
       if (blocks.length === 0) return { outputs: [artifact ?? ''], artifact: display(artifact) }
       const composed = [display(artifact ?? ''), ...blocks].filter((text): boolean => text !== '').join('\n\n')
       return { outputs: [composed], artifact: composed }
@@ -114,7 +151,24 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
       // i2v `image` input) rather than the raw link. Widget literals pass
       // through unchanged (resolveValue is identity for non-links).
       const linked: Record<string, unknown> = {}
-      for (const [key, value] of Object.entries(ctx.inputs)) linked[key] = resolveValue(ctx, value)
+      for (const [key, value] of Object.entries(ctx.inputs)) {
+        const list = asLinkList(value)
+        if (list === undefined) {
+          // A single link tuple or a widget literal resolves exactly as before.
+          linked[key] = resolveValue(ctx, value)
+          continue
+        }
+        // A VARIADIC slot (several links) resolves element-wise in link-creation
+        // order. How it composes depends on the slot TYPE:
+        //  - TEXT (or a TEXT subtype / wildcard) joins into ONE `\n\n`-separated
+        //    string, so promptOf / ctx.text keep seeing plain text;
+        //  - a MEDIA slot (IMAGE/VIDEO/AUDIO) stays an ORDERED ARRAY of refs, so
+        //    the provider consumes each reference by role and never stringifies a
+        //    URL into the prompt (e.g. an Image Generator's several input images).
+        const slotType = schema.inputs.find((slot): boolean => slot.name === key)?.type ?? 'TEXT'
+        const textual = slotType === 'TEXT' || slotType === 'SCRIPT' || slotType === '*'
+        linked[key] = textual ? resolveSlotText(ctx, value) : resolveSlotValues(ctx, value)
+      }
       // An EMPTY prompt widget must not clobber a linked prompt slot. The media
       // generators have no `prompt` widget at all (theirs are `mode`/`variant`),
       // so `prompt` resolved to '' and overwrote the upstream text the link had

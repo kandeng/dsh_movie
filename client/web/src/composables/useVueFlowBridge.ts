@@ -37,8 +37,10 @@ import type {
 } from "@dsh-movie/protocol";
 import {
   inHandle,
+  mergesInputs,
   nextNodeId,
   outHandle,
+  routeInputSlotByType,
   schemaFor,
   vueFlowToWorkflow,
   workflowToVueFlow,
@@ -389,6 +391,9 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
       }
       case "edge.add": {
         const p = payload as BridgeCommandPayloads["edge.add"];
+        // Replace-on-connect for single-link slots (mirror of the server
+        // applier): a non-variadic input keeps ONE edge; variadic slots stack.
+        retireStaleEdge(String(p.toId), inHandle(p.toSlot));
         const link = allocateLinkId();
         const edge: MovieFlowEdge = {
           id: `link-${link}`,
@@ -486,14 +491,46 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
     for (const handler of selectHandlers) handler(null);
   });
 
+  /**
+   * Replace-on-connect for single-link slots: retire any existing edge into a
+   * NON-variadic target handle, so the canvas never paints a ghost edge that
+   * execution would silently ignore. Variadic TEXT slots stack in draw order.
+   */
+  function retireStaleEdge(targetId: string, targetHandle: string): void {
+    const slotIndex = Number(targetHandle.split("-")[1] ?? 0);
+    const classType = flow.findNode(targetId)?.data?.classType ?? "";
+    if (schemaFor(classType)?.inputs?.[slotIndex]?.variadic === true) return;
+    const stale = flow.getEdges.value.filter((edge) => edge.target === targetId && edge.targetHandle === targetHandle);
+    if (stale.length > 0) flow.removeEdges(stale.map((edge) => edge.id));
+  }
+
+  /**
+   * Resolve the target handle for a connection. A merged-input node shows ONE
+   * drop handle, so the drag always lands on slot 0; route it to the input slot
+   * whose type matches the source output (TEXT -> `prompt`, IMAGE -> `image`).
+   * Every other node keeps the handle the user actually dropped on.
+   */
+  function routeMergedHandle(connection: Connection): string {
+    const fallback = connection.targetHandle ?? inHandle(0);
+    const targetClassType = flow.findNode(connection.target)?.data?.classType ?? "";
+    if (!mergesInputs(targetClassType)) return fallback;
+    const sourceHandle = connection.sourceHandle ?? outHandle(0);
+    const sourceSlot = Number(sourceHandle.split("-")[1] ?? 0);
+    const sourceOutType = flow.findNode(connection.source)?.data?.outputs?.[sourceSlot]?.type ?? "*";
+    const routed = routeInputSlotByType(targetClassType, sourceOutType);
+    return routed >= 0 ? inHandle(routed) : fallback;
+  }
+
   const offConnect = flow.onConnect((connection: Connection) => {
+    const targetHandle = routeMergedHandle(connection);
+    retireStaleEdge(connection.target, targetHandle);
     const link = allocateLinkId();
     const edge: MovieFlowEdge = {
       id: `link-${link}`,
       source: connection.source,
       target: connection.target,
       sourceHandle: connection.sourceHandle ?? outHandle(0),
-      targetHandle: connection.targetHandle ?? inHandle(0),
+      targetHandle,
       data: { linkId: link },
     } as MovieFlowEdge;
     flow.addEdges(edge);
