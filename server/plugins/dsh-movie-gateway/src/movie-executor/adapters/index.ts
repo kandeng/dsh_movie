@@ -6,7 +6,9 @@
  * module activation. Each adapter is a thin composition of the existing seams:
  *
  *  - `source`    → pass-through: the widget payload (or a resolved upstream
- *                  link) becomes the node's single output artifact.
+ *                  link) becomes the node's single output artifact. Declared
+ *                  input slots (exp: TextInput's optional `ref`) resolve and
+ *                  append as labeled blocks instead of a bare concatenation.
  *  - `generator/text` → the LLM seam (`ctx.text`, the generalized
  *                  `StepTextGenerator`); canned text fallback when absent.
  *  - `generator/image|video|audio` → first the D15 availability gate
@@ -73,14 +75,28 @@ function resolvedInputsBySlot(schema: MovieNodeSchema, ctx: NodeHandlerContext):
   return schema.inputs.map((slot): string => display(resolveValue(ctx, ctx.inputs[slot.name]))).filter((text): boolean => text !== '')
 }
 
-/** Build the handler for one source class (payload widget → typed output). */
+/** Build the handler for one source class (payload widget → typed output).
+ *
+ *  EXP(textinput-toonflow): when the schema declares input slots (TextInput's
+ *  optional `ref`), each resolved non-empty input is appended to the widget body
+ *  as a labeled block — `【slot】\nvalue`, the semantic-slot cousin of Toonflow's
+ *  `参考 N：` and infinite-canvas' `【文本N】` — so a downstream model can tell body
+ *  from reference. Sources without input slots keep the exact old passthrough. */
 function sourceHandler(schema: MovieNodeSchema): NodeHandler {
   const widget = schema.widgets[0]?.name ?? 'text'
   return {
     async run(ctx: NodeHandlerContext): Promise<NodeHandlerOutput> {
       const raw = ctx.inputs[widget]
       const artifact = asLink(raw) === undefined ? raw : resolveValue(ctx, raw)
-      return { outputs: [artifact ?? ''], artifact: display(artifact) }
+      const blocks = schema.inputs
+        .map((slot): string => {
+          const text = display(resolveValue(ctx, ctx.inputs[slot.name]))
+          return text === '' ? '' : `【${slot.name}】\n${text}`
+        })
+        .filter((text): boolean => text !== '')
+      if (blocks.length === 0) return { outputs: [artifact ?? ''], artifact: display(artifact) }
+      const composed = [display(artifact ?? ''), ...blocks].filter((text): boolean => text !== '').join('\n\n')
+      return { outputs: [composed], artifact: composed }
     },
   }
 }

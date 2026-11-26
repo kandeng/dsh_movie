@@ -1651,6 +1651,74 @@ function applyTextFocus(): void {
   viewerVisible.value = false;
 }
 
+// ── EXP(textinput-toonflow): Toonflow-style TextInput upgrade (test build, no
+//    i18n — labels are hard-coded literals). Two mechanisms: local text upload
+//    into the primary widget, and reference chips derived from incoming edges
+//    on the new optional `ref` input slot (the server appends a resolved ref as
+//    a labeled block). Rollback = delete this branch; nothing here persists
+//    beyond the normal widget values. ──
+
+/** True when the edited node is a TextInput (the experiment's only target). */
+const editorIsTextInput = computed(() => selectedSchema.value?.classType === "TextInput");
+
+/** Hidden picker behind the Upload button; text files only, 256 KB cap. */
+const textFileInput = ref<HTMLInputElement | null>(null);
+const TEXT_UPLOAD_MAX_BYTES = 256 * 1024;
+function pickTextFile(): void {
+  textFileInput.value?.click();
+}
+function onTextFile(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (file === undefined) return;
+  if (file.size > TEXT_UPLOAD_MAX_BYTES) {
+    ElMessage.error("Text file too large (256 KB max)");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (): void => {
+    const widgets = editorDraft.value?.widgets ?? [];
+    const index = widgets.findIndex((widget) => widget.type === "STRING" && widget.multiline === true);
+    setDraftWidget(index >= 0 ? index : 0, String(reader.result ?? ""));
+  };
+  reader.readAsText(file);
+}
+
+/** One incoming-edge reference chip (Toonflow's refList, edge-derived). */
+interface RefChip {
+  linkId: number;
+  slot: string;
+  label: string;
+}
+
+/** Chips for every edge into the edited node, or null when it has no input
+ *  slots (the References row stays hidden for such nodes). */
+const editorRefChips = computed<RefChip[] | null>(() => {
+  const id = editingNodeId.value;
+  const schema = selectedSchema.value;
+  if (id === null || schema === undefined || schema.inputs.length === 0) return null;
+  return bridge.flow.getEdges.value
+    .filter((edge) => edge.target === String(id))
+    .map((edge): RefChip => {
+      const source = bridge.flow.findNode(edge.source)?.data as MovieNodeData | undefined;
+      const slotIndex = Number(edge.targetHandle?.split("-")[1] ?? -1);
+      return {
+        linkId: Number((edge.data as { linkId?: unknown } | undefined)?.linkId ?? 0),
+        slot: schema.inputs[slotIndex]?.name ?? `in ${String(slotIndex)}`,
+        label: source?.title ?? source?.classType ?? edge.source,
+      };
+    });
+});
+
+/** Chip close = remove the underlying edge (Toonflow's removeReference). */
+function removeRefChip(linkId: number): void {
+  if (editorReadonly.value || !Number.isFinite(linkId) || linkId <= 0) return;
+  void bridge.request("edge.remove", { id: linkId }).catch(() => {
+    ElMessage.error("Failed to remove the reference link");
+  });
+}
+
 function goLogin() {
   void router.push({ path: "/account", query: { login: "1", redirect: "/studio" } });
 }
@@ -1805,7 +1873,21 @@ function goLogin() {
                 @click="openTextFocus">
                 {{ translate("展开编辑") }}
               </el-button>
+              <el-button
+                v-if="editorIsTextInput"
+                text
+                size="small"
+                :disabled="editorReadonly"
+                @click="pickTextFile">
+                Upload
+              </el-button>
             </div>
+            <input
+              ref="textFileInput"
+              type="file"
+              class="fileInput"
+              accept=".md,.markdown,.txt,text/plain,text/markdown"
+              @change="onTextFile" />
             <div v-for="(widget, index) in editorDraft?.widgets ?? []" :key="widget.name" class="fieldRow">
               <label class="fieldLabel">{{ widget.name }}</label>
               <el-input
@@ -1847,6 +1929,27 @@ function goLogin() {
                 @update:model-value="(value) => setDraftWidget(index, value)" />
               <span v-else class="fieldRaw">{{ asString(widget.value) }}</span>
             </div>
+          </div>
+
+          <!-- EXP(textinput-toonflow): reference chips for nodes with input slots
+               (TextInput's `ref`). One chip per incoming edge; close removes the
+               edge, mirroring Toonflow's removeReference. -->
+          <div v-if="editorRefChips !== null" class="fieldGroup">
+            <div class="outputLabel">References</div>
+            <div v-if="editorRefChips.length > 0" class="skillChips">
+              <el-tag
+                v-for="chip in editorRefChips"
+                :key="chip.linkId"
+                class="skillChip"
+                size="small"
+                type="info"
+                effect="plain"
+                :closable="!editorReadonly"
+                @close="removeRefChip(chip.linkId)">
+                {{ chip.slot }} ← {{ chip.label }}
+              </el-tag>
+            </div>
+            <p v-else class="contentHint">No wired reference — connect a TEXT output into the ref port.</p>
           </div>
 
           <!-- Row 4c: imported craft skills (Phase-7 D7). Shown for any node whose
