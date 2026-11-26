@@ -371,6 +371,32 @@ async function availabilityChecks(): Promise<void> {
     textCanned?.artifact ?? 'none',
   )
 
+  // Phase-2 vision: a linked IMAGE slot reaches the text seam as an ordered
+  // array of resolved refs under its own key, and never leaks into the
+  // composed prompt sections (`resolved`).
+  let visionInputs: Record<string, unknown> = {}
+  const visionOut = await textHandler?.run(handlerCtx(bailianOnly, {
+    inputs: { prompt: 'describe the picture', image: [['imgNode', 0]] },
+    resolve: (): unknown => 'https://example.invalid/x.png',
+    text: async (_classType: string, inputs: Record<string, unknown>): Promise<string> => {
+      visionInputs = inputs
+      return 'vision-ok'
+    },
+  }))
+  const visionImage = visionInputs['image']
+  check(
+    'vision: the image slot reaches the text seam as an ordered array of resolved refs',
+    Array.isArray(visionImage) && visionImage[0] === 'https://example.invalid/x.png',
+    JSON.stringify(visionImage ?? null),
+  )
+  const visionResolved = visionInputs['resolved']
+  check(
+    'vision: image urls never leak into the resolved prompt sections',
+    Array.isArray(visionResolved) && !visionResolved.some((entry): boolean => String(entry).includes('example.invalid')),
+    JSON.stringify(visionResolved ?? null),
+  )
+  check('vision: the text generator returns the seam artifact with images linked', visionOut?.artifact === 'vision-ok', visionOut?.artifact ?? 'none')
+
   // The reviewer seam: verdict (output 0) + passthrough of the reviewed artifact.
   const reviewOut = await handlerFor('TextReviewer')?.run(handlerCtx(bailianOnly, {
     inputs: { text: ['1', 0], criteria: 'must mention the sea' },

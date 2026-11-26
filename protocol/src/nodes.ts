@@ -257,7 +257,17 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     family: 'generator',
     modality: 'text',
     supportsSkillImport: true,
-    inputs: [{ name: 'context', type: 'TEXT', optional: true, variadic: true }],
+    // Phase-2 vision: an IMAGE slot so an Image Input (or any IMAGE / ASSET /
+    // STORYBOARD output) can be linked into the generator; the executor admits
+    // the fetched bytes into the attachment store and sends them as image
+    // blocks beside the prompt. `mergeInputs` collapses the two slots into ONE
+    // canvas drop handle and auto-routes by type (TEXT -> context, IMAGE ->
+    // image). The slot is APPENDED after `context` so saved graphs keep order.
+    mergeInputs: true,
+    inputs: [
+      { name: 'context', type: 'TEXT', optional: true, variadic: true },
+      { name: 'image', type: 'IMAGE', optional: true, variadic: true },
+    ],
     outputs: [{ name: 'text', type: 'TEXT' }],
     // `model` is APPENDED (never inserted before `prompt`): saved graphs zip
     // widgets_values positionally, so prepending would shift every stored value.

@@ -34,7 +34,7 @@
  * @module dsh-movie-gateway/movie-executor/adapters
  */
 
-import { FUNCTIONAL_NODES, type MovieNodeSchema } from '@dsh-movie/protocol'
+import { FUNCTIONAL_NODES, MEDIA_SLOT_TYPES, type MovieNodeSchema } from '@dsh-movie/protocol'
 import { ModelUnavailableError } from '../errors.ts'
 import {
   registerNodeHandlers,
@@ -99,9 +99,15 @@ function resolveSlotText(ctx: NodeHandlerContext, value: unknown): string {
     .join('\n\n')
 }
 
-/** Assemble display strings for every resolved input, in declared slot order. */
+/** Assemble display strings for every resolved TEXTUAL input, in declared slot
+ *  order. Media slots (IMAGE/VIDEO/AUDIO — e.g. TextGenerator's Phase-2 vision
+ *  slot) are excluded: their refs travel to the seam as an ordered array under
+ *  their own key and must never be stringified into the prompt body. */
 function resolvedInputsBySlot(schema: MovieNodeSchema, ctx: NodeHandlerContext): string[] {
-  return schema.inputs.map((slot): string => resolveSlotText(ctx, ctx.inputs[slot.name])).filter((text): boolean => text !== '')
+  return schema.inputs
+    .filter((slot): boolean => !MEDIA_SLOT_TYPES.includes(slot.type))
+    .map((slot): string => resolveSlotText(ctx, ctx.inputs[slot.name]))
+    .filter((text): boolean => text !== '')
 }
 
 /** Build the handler for one source class (payload widget → typed output).

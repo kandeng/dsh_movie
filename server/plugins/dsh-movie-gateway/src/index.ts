@@ -19,6 +19,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
 import z from '@deepseek-ai/schemastery'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -212,6 +213,11 @@ export function apply(ctx: Context, config: Config): void {
         agentDefaultModel: ctx.agentDefaultModel,
         sessions: ctx.sessions,
         subagents,
+        // Phase-2 vision: the store linked image bytes are admitted into. Reuse
+        // a host-mounted one when present; otherwise mount a local
+        // content-addressed store on THIS context — the provider adapters
+        // resolve image refs through the same context at request time.
+        attachments: ctx.get('attachments') ?? new LocalAttachmentStore(ctx, {}),
         cwd: process.cwd(),
         logger: ctx.logger,
       })

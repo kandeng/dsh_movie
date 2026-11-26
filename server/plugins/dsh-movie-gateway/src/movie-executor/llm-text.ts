@@ -23,7 +23,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentOptions } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { admitEncodedImages, type AttachmentStore, type ImageMediaType } from '@deepseek-ai/dsh-attachment'
+import { createUserMessage, type ImageBlock } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type Session, type SessionId } from '@deepseek-ai/dsh-session'
 import { brandString } from '@deepseek-ai/dsh-brand'
 // Empty type-only imports pull the Context service-key merges used below.
@@ -48,6 +49,12 @@ export interface LlmTextDeps {
   sessions: Context['sessions']
   /** Optional subagent tree settlement (`ctx.subagents`). */
   subagents?: Context['subagents'] | undefined
+  /**
+   * Phase-2 vision: the attachment store linked image bytes are admitted into
+   * (durable ImageBlocks for the user message). Omitted = linked images degrade
+   * to an honest prompt note instead of failing the turn.
+   */
+  attachments?: AttachmentStore | undefined
   /** Working directory the executor agent runs in. */
   cwd: string
   /** Diagnostics sink. */
@@ -77,6 +84,56 @@ function executorModelSession(model: string): SessionId {
 /** Coerce one value to a display string. */
 function display(value: unknown): string {
   return typeof value === 'string' ? value : String(value ?? '')
+}
+
+/** Ordered http(s) image URLs linked into a text generator's `image` slot. */
+function imageURLs(value: unknown): string[] {
+  const list = Array.isArray(value) ? value : [value]
+  return list
+    .map((entry): string => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter((url): boolean => url.startsWith('http://') || url.startsWith('https://'))
+}
+
+/** Hard cap of image blocks per turn (well inside the SDK per-message budget). */
+const MAX_TURN_IMAGES = 4
+
+/** The raster media types the version-one attachment path admits. */
+const IMAGE_MEDIA_TYPES: readonly ImageMediaType[] = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+
+/**
+ * Phase-2 vision: fetch each linked image and admit its bytes into the
+ * attachment store, yielding durable ImageBlocks for the user message. A
+ * failed fetch/admit is logged and skipped so the turn still runs text-only.
+ * @param attachments - the store owning batch admission policy.
+ * @param urls - resolved upstream image URLs, in link order.
+ * @param logger - diagnostics sink.
+ * @returns the admitted image blocks, in url order.
+ */
+async function admitImageBlocks(attachments: AttachmentStore, urls: string[], logger: LlmTextLogger): Promise<ImageBlock[]> {
+  const blocks: ImageBlock[] = []
+  for (const url of urls.slice(0, MAX_TURN_IMAGES)) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+      if (!response.ok) {
+        logger.warn('[movie-executor] image fetch %s -> %s', url, String(response.status))
+        continue
+      }
+      // The attachment path admits exactly four raster types; anything else
+      // (svg, html error page, ...) is skipped honestly rather than coerced.
+      const headerType = (response.headers.get('content-type') ?? '').split(';')[0]!.trim()
+      const mediaType = IMAGE_MEDIA_TYPES.find((entry): boolean => entry === headerType)
+      if (mediaType === undefined) {
+        logger.warn('[movie-executor] image %s has unsupported media type %s', url, headerType === '' ? '(none)' : headerType)
+        continue
+      }
+      const bytes = Buffer.from(await response.arrayBuffer())
+      const ref = (await admitEncodedImages(attachments, [{ data: bytes.toString('base64'), mediaType }]))[0]
+      if (ref !== undefined) blocks.push({ type: 'image', attachment: ref })
+    } catch (error) {
+      logger.warn('[movie-executor] image admit failed for %s: %s', url, error instanceof Error ? error.message : String(error))
+    }
+  }
+  return blocks
 }
 
 /** The resolved upstream text sections the adapter folded into `inputs.resolved`. */
@@ -235,7 +292,26 @@ export class LlmTextAgent {
     // adapter's resolved inputs) pins the LLM route for THIS turn. Empty = the
     // executor's default-model agent (unchanged behavior).
     const model = display(inputs['model']).trim()
-    return this.enqueue((): Promise<string> => this.runTurn(buildTextPrompt(classType, inputs), `text:${classType}`, model))
+    // Phase-2 vision: linked IMAGE refs (ordered array from the adapter) become
+    // image blocks beside the prompt; a vision model route (e.g. qwen-vl-max,
+    // pinned via the Phase-1 selector) then reads them.
+    const urls = imageURLs(inputs['image'])
+    return this.enqueue(async (): Promise<string> => {
+      let prompt = buildTextPrompt(classType, inputs)
+      let images: ImageBlock[] = []
+      if (urls.length > 0) {
+        const attachments = this.deps.attachments
+        if (attachments === undefined) {
+          prompt += `\n\n(NOTE: ${urls.length} linked image(s) are NOT attached — no attachment store is mounted; answer from the text alone.)`
+        } else {
+          images = await admitImageBlocks(attachments, urls, this.deps.logger)
+          prompt += images.length > 0
+            ? `\n\n(The ${images.length} attached image(s) accompany this message; use their content as the task requires.)`
+            : `\n\n(NOTE: ${urls.length} linked image(s) failed to load; answer from the text alone.)`
+        }
+      }
+      return this.runTurn(prompt, `text:${classType}`, model, images)
+    })
   }
 
   /**
@@ -324,12 +400,12 @@ export class LlmTextAgent {
   }
 
   /** Drive one turn to quiescence and return its final assistant text. */
-  private async runTurn(prompt: string, label: string, model = ''): Promise<string> {
+  private async runTurn(prompt: string, label: string, model = '', images: readonly ImageBlock[] = []): Promise<string> {
     if (this.closed) throw new Error('executor text agent disposed')
     const agent = await this.ensureAgent(model)
     const firstSeq = Number(agent.session.seq)
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: prompt }],
+      content: [{ type: 'text', text: prompt }, ...images],
       source: { kind: 'user' },
     }))
     const subagents = this.deps.subagents
