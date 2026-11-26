@@ -18,6 +18,7 @@ import { DEFAULT_GROUP_COLOR, GROUP_COLOR_KEYS, groupColor } from "@/canvas/grou
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
 import { useRoomRole } from "@/composables/useRoomRole";
 import { useImportStore } from "@/stores/import";
+import { useModelPickStore } from "@/stores/modelPick";
 import { useWorkspaceGraph } from "@/composables/useWorkspaceGraph";
 import { useExecStatus } from "@/composables/useExecStatus";
 import { useCanvasScript, type CanvasScriptStage } from "@/composables/useCanvasScript";
@@ -147,6 +148,12 @@ const roomRole = useRoomRole(roomIdRef);
 // ACT: 跨路由技能导入暂存（Phase-7 D7 mode-1）：编辑器 Import 跳转 /plugins pick-mode，
 // 返回后由此消费已下载的正文与引用。
 const importStore = useImportStore();
+// ACT: 跨路由模型选择暂存（Phase-1 模型选择器）：编辑器顶部选择器跳转 /plugins
+// 模型 pick-mode，返回后由此消费选中的模型 id 写入节点的 `model` widget。
+const modelPickStore = useModelPickStore();
+// ACT: 会话内模型 id → 展示名映射（pick 返回时填充）；选择器标签优先用展示名，
+// 未知名回落到原始 id。widget 只持久化 id，故刷新后仅显示 id（可接受）。
+const modelDisplayNames = ref<Record<string, string>>({});
 const workspace = useWorkspaceGraph(roomIdRef, bridge, roomRole);
 
 // ── Phase 8 P8-M3: real GPU-generated media. The executor posts the output bytes
@@ -225,6 +232,9 @@ async function hydrate(roomId: string): Promise<void> {
   // Phase-7 D7 mode-1: on return from the Plugins pick-mode, paste the downloaded
   // skill body into its node + record the additive ref (no-op when none pending).
   consumeReturnedImport();
+  // Phase-1 model selector: on return from the Plugins Models pick-mode, write the
+  // chosen model id into its node's `model` widget (no-op when none pending).
+  consumeReturnedModelPick();
 }
 
 /** The deprecated step class types still present in a persisted graph (Phase-5 M5). */
@@ -797,6 +807,92 @@ function consumeReturnedImport(): void {
   openEditor(nodeId);
   if (!applySkillToDraft(taken.body, taken.ref, taken.widgetName, taken.insertionPoint)) return;
   ElMessage.success(translate("技能已导入编辑器，点击保存生效"));
+}
+
+// ── Phase-1 model selector. A node whose schema declares a `model` widget (the
+//    Text Generator) renders a selector row at the TOP of the editor card. It
+//    behaves like the skill Import button: clicking it stashes the pick context,
+//    routes to the Plugins page Models view in pick-mode, and — on return — writes
+//    the chosen model id into the node's `model` widget as a DIRTY DRAFT (Save
+//    stays the single canonical mutation, D6). Empty = the executor's default. ──
+
+/** The draft index of the `model` widget, or -1 when the node has none. */
+const editorModelIndex = computed<number>(() =>
+  (editorDraft.value?.widgets ?? []).findIndex((widget) => widget.name === "model"),
+);
+
+/** True when the edited node exposes a model selector (schema declares `model`). */
+const editorHasModel = computed(() => editorModelIndex.value >= 0);
+
+/** The currently selected model id ("" = default). */
+const editorModelValue = computed<string>(() => {
+  const index = editorModelIndex.value;
+  if (index < 0) return "";
+  return asString(editorDraft.value?.widgets[index]?.value ?? "");
+});
+
+/** The selector label: the picked display name when known, else the raw id, else a
+ *  "default model" placeholder. */
+const editorModelLabel = computed<string>(() => {
+  const id = editorModelValue.value;
+  if (id === "") return translate("默认模型");
+  return modelDisplayNames.value[id] ?? id;
+});
+
+/**
+ * The generic Row-4b parameter widgets, EXCLUDING the `model` widget (rendered
+ * separately as the top selector). Each entry keeps its ORIGINAL draft index so
+ * {@link setDraftWidget} still writes to the correct slot.
+ */
+const editorParamWidgets = computed<Array<{ widget: NodeWidgetView; index: number }>>(() =>
+  (editorDraft.value?.widgets ?? [])
+    .map((widget, index) => ({ widget, index }))
+    .filter((entry) => entry.widget.name !== "model"),
+);
+
+/** Model selector: stash the pick context and route to /plugins Models pick-mode. */
+function startModelPick(): void {
+  const id = editingNodeId.value;
+  if (editorReadonly.value || id === null || !editorHasModel.value) return;
+  const roomId = roomIdRef.value;
+  if (roomId === "") {
+    ElMessage.warning(translate("请先进入一个房间再选择模型"));
+    return;
+  }
+  // Persist in-flight edits so the return re-opens from the saved canonical data.
+  if (editorDirty.value) saveEditor();
+  modelPickStore.begin({ roomId, nodeId: String(id), classType: editorClassType.value });
+  void router.push({ path: "/plugins", query: { category: "models", mode: "pick" } });
+}
+
+/** Revert the selector to the executor default (close the model chip). */
+function clearModelPick(): void {
+  const index = editorModelIndex.value;
+  if (editorReadonly.value || index < 0) return;
+  setDraftWidget(index, "");
+}
+
+/**
+ * Consume a completed model pick exactly once (called after hydrate so the target
+ * node exists): re-open its editor and write the chosen model id into the `model`
+ * widget as a DIRTY DRAFT. Save stays the single canonical mutation (D6). Guest
+ * returns and vanished nodes are silent no-ops (D7).
+ */
+function consumeReturnedModelPick(): void {
+  if (modelPickStore.completed === null) return;
+  const taken = modelPickStore.takeCompleted();
+  if (taken === null) return;
+  if (editorReadonly.value) return;
+  const nodeId = Number(taken.nodeId);
+  if (!Number.isFinite(nodeId) || bridge.flow.findNode(taken.nodeId) === undefined) return;
+  if (taken.modelId !== "" && taken.modelName !== "") {
+    modelDisplayNames.value = { ...modelDisplayNames.value, [taken.modelId]: taken.modelName };
+  }
+  openEditor(nodeId);
+  const index = editorModelIndex.value;
+  if (index < 0) return;
+  setDraftWidget(index, taken.modelId);
+  ElMessage.success(translate("模型已选择，点击保存生效"));
 }
 
 /** Double-click entry (D3): the canvas already gated this to the cursor state. */
@@ -1716,6 +1812,36 @@ function goLogin() {
             {{ translate("只读：只有主持人可以编辑，请在聊天中提出修改建议") }}
           </p>
 
+          <!-- Phase-1 model selector (at TOP, decision a): laid out EXACTLY like the
+               Skills group — the gray text "选择" button sits to the RIGHT of the
+               "模型" title (same as Skills/Import), and the current choice renders
+               as a success chip identical to an imported-skill chip. Clicking the
+               button jumps to Plugins → Models pick-mode; empty = default model. -->
+          <div v-if="editorHasModel" class="fieldGroup">
+            <div class="outputLabel">
+              {{ translate("模型") }}
+              <el-button
+                class="openButton"
+                text
+                size="small"
+                :disabled="editorReadonly"
+                @click="startModelPick">
+                {{ translate("选择") }}
+              </el-button>
+            </div>
+            <div class="skillChips">
+              <el-tag
+                class="skillChip"
+                size="small"
+                type="success"
+                effect="plain"
+                :closable="!editorReadonly && editorModelValue !== ''"
+                @close="clearModelPick">
+                {{ editorModelLabel }}
+              </el-tag>
+            </div>
+          </div>
+
           <!-- Row 2: the node name (D11: it cannot be empty). -->
           <div class="fieldRow">
             <label class="fieldLabel" for="editorNodeName">{{ translate("节点名称") }}</label>
@@ -1801,7 +1927,7 @@ function goLogin() {
           <!-- Row 4b: every OTHER node's widgets (text source + generator/reviewer/
                combiner parameters) are edited HERE — the card has no input DOM (D1).
                A text source additionally offers the full-height focus editor (D2). -->
-          <div v-else-if="(editorDraft?.widgets.length ?? 0) > 0" class="fieldGroup">
+          <div v-else-if="editorParamWidgets.length > 0" class="fieldGroup">
             <div class="outputLabel">
               {{ translate("内容") }}
               <el-button
@@ -1828,7 +1954,7 @@ function goLogin() {
               class="fileInput"
               accept=".md,.markdown,.txt,text/plain,text/markdown"
               @change="onTextFile" />
-            <div v-for="(widget, index) in editorDraft?.widgets ?? []" :key="widget.name" class="fieldRow">
+            <div v-for="{ widget, index } in editorParamWidgets" :key="widget.name" class="fieldRow">
               <label class="fieldLabel">{{ widget.name }}</label>
               <el-input
                 v-if="widget.type === 'STRING' && widget.multiline === true"

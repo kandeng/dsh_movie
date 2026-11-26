@@ -31,6 +31,7 @@ import type { CardKind, Modality, ResourceCard } from "@/lib/providerCatalog";
 import { useMatrixChat } from "@/composables/useMatrixChat";
 import { useRoomRole } from "@/composables/useRoomRole";
 import { useImportStore } from "@/stores/import";
+import { useModelPickStore } from "@/stores/modelPick";
 
 type Category = "models" | "tools" | "skills" | "assets";
 
@@ -38,6 +39,7 @@ const route = useRoute();
 const router = useRouter();
 const plugins = usePlugins();
 const importStore = useImportStore();
+const modelPickStore = useModelPickStore();
 const { activeRoomId, bootstrap } = useMatrixChat();
 
 // ACT: 房间与角色。pick-mode 的下载目标房间优先取暂存的 pending.roomId（跨路由往返），
@@ -49,14 +51,20 @@ const canManage = computed(() => roomRole.isHost.value);
 const pickMode = computed(() => route.query.mode === "pick");
 const pending = computed(() => importStore.pending);
 const pickRoomId = computed(() => pending.value?.roomId ?? activeRoomId.value ?? "");
+// ACT: 模型 pick-mode（编辑器模型选择器跳转）：与技能 pick 共用 mode=pick，
+// 由 query.category 区分两种往返；pendingModel 非空 = 正在为某节点挑选模型。
+const pendingModel = computed(() => modelPickStore.pending);
+const modelPickMode = computed(() => pickMode.value && pendingModel.value !== null);
 
 // ACT: 左栏分类（Phase-9 §4 顺序：模型→工具→技能→资产）；初值来自路由 query.category
-// （编辑器 Import 跳转时带 category=skills）；pick-mode 强制技能视图。
+// （编辑器 Import 跳转时带 category=skills，模型选择器跳转时带 category=models）；
+// pick-mode 下 category 决定强制视图（skills 强制技能，models 强制模型）。
 const queryCategory = route.query.category;
 const initialCategory: Category =
-  route.query.mode === "pick" ? "skills"
-  : queryCategory === "tools" || queryCategory === "skills" || queryCategory === "assets" ? queryCategory
-  : "models";
+  route.query.mode === "pick"
+    ? queryCategory === "models" ? "models" : "skills"
+    : queryCategory === "tools" || queryCategory === "skills" || queryCategory === "assets" ? queryCategory
+    : "models";
 const activeCategory = ref<Category>(initialCategory);
 
 // ACT: 技能搜索框，pick-mode 下由 pending.query 意图预填（D10）。
@@ -119,7 +127,7 @@ onMounted(async () => {
   bannerVisible.value = localStorage.getItem(BANNER_KEY) === null;
   await bootstrap();
   await refresh();
-  if (activeCategory.value === "skills" || pickMode.value) await runSearch();
+  if (activeCategory.value === "skills" || (pickMode.value && !modelPickMode.value)) await runSearch();
   focusModelFromQuery();
 });
 
@@ -173,6 +181,23 @@ function selectSub(id: string): void {
 
 function cancelPick(): void {
   importStore.clearPending();
+  modelPickStore.clearPending();
+  void router.push({ path: "/studio" });
+}
+
+/**
+ * ACT: 模型 pick-mode「选择」：把选中的模型 id/名称暂存为 completed，回到 Studio
+ * 由其消费写入节点的 `model` widget（脏草稿，保存仍是唯一权威变更）。
+ */
+function confirmModelPick(row: CardFeedRow): void {
+  const target = pendingModel.value;
+  if (target === null) return;
+  modelPickStore.complete({
+    nodeId: target.nodeId,
+    modelId: row.card.id,
+    modelName: row.card.name,
+  });
+  modelPickStore.clearPending();
   void router.push({ path: "/studio" });
 }
 
@@ -448,8 +473,13 @@ watch(supplyOptions, (options) => {
   if (!options.some((option) => option.value === modelSupply.value)) modelSupply.value = "all";
 });
 
+// ACT: 文本生成节点（TextGenerator）的候选模型过滤：文本模态 + 卡片就绪。pick-mode
+// 与普通浏览共用同一卡片源（cardsOf），保证「直接进 Model 页能看到什么，挑选页就能
+// 看到什么」，仅额外限定 text/ready；之前按 provider.kind==='llm' 另取源会在百炼
+// 未返回卡片（未配 API Key）而模型实际挂在 ComfyUI 供应下时把挑选页滤空。
 const visibleModels = computed(() =>
   registry.cardsOf("models").filter((row) =>
+    (!modelPickMode.value || (row.card.modality === "text" && row.card.status === "ready")) &&
     (modelModality.value === "all" || row.card.modality === modelModality.value) &&
     (modelSupply.value === "all" || row.provider.id === modelSupply.value) &&
     matchesQuery(row, modelQuery.value)),
@@ -623,10 +653,10 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
     </aside>
 
     <section class="pluginsMain">
-      <!-- ACT: pick-mode 顶部条：说明正在为哪个节点挑选技能，并提供取消返回。 -->
+      <!-- ACT: pick-mode 顶部条：说明正在为哪个节点挑选技能/模型，并提供取消返回。 -->
       <div v-if="pickMode" class="pickBar">
         <icon-download :size="16" aria-hidden="true" />
-        <span>{{ translate("选择一个技能导入到编辑器") }}</span>
+        <span>{{ translate(modelPickMode ? "选择一个模型供文本生成节点使用" : "选择一个技能导入到编辑器") }}</span>
         <el-button size="small" text @click="cancelPick">{{ translate("取消") }}</el-button>
       </div>
 
@@ -714,6 +744,13 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
             <p class="cardProvider">{{ translate("来源") }}：{{ row.provider.name }}</p>
             <footer class="cardActions">
               <el-button v-if="!row.card.url" size="small" text @click="openModel(row)">{{ translate("详情") }}</el-button>
+              <el-button
+                v-if="modelPickMode"
+                size="small"
+                type="primary"
+                @click="confirmModelPick(row)">
+                {{ translate("选择") }}
+              </el-button>
             </footer>
           </article>
         </div>

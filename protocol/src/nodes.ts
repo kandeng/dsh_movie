@@ -259,7 +259,14 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     supportsSkillImport: true,
     inputs: [{ name: 'context', type: 'TEXT', optional: true, variadic: true }],
     outputs: [{ name: 'text', type: 'TEXT' }],
-    widgets: [{ name: 'prompt', type: 'STRING', multiline: true, default: '' }],
+    // `model` is APPENDED (never inserted before `prompt`): saved graphs zip
+    // widgets_values positionally, so prepending would shift every stored value.
+    // Empty string = the executor's default model selection. The Studio editor
+    // renders it as a top-of-card selector row (pick-mode jump), not a text box.
+    widgets: [
+      { name: 'prompt', type: 'STRING', multiline: true, default: '' },
+      { name: 'model', type: 'STRING', default: '' },
+    ],
   },
   {
     classType: 'ImageGenerator',

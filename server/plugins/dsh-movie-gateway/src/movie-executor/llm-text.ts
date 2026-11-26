@@ -62,6 +62,18 @@ function executorSession(): SessionId {
   return brandString<SessionId>('movie-executor-text')
 }
 
+/**
+ * The stable session id for a per-model executor text agent (Phase-1 model
+ * selector). A node that pins a specific model id gets its OWN durable session
+ * so its turns never share a log with the default-model agent, and the session
+ * still outlives a plugin reload / host restart (reused/resumed by that id).
+ * @param model - the pinned model id (non-empty).
+ * @returns the branded session id for that model.
+ */
+function executorModelSession(model: string): SessionId {
+  return brandString<SessionId>(`movie-executor-text:${model}`)
+}
+
 /** Coerce one value to a display string. */
 function display(value: unknown): string {
   return typeof value === 'string' ? value : String(value ?? '')
@@ -199,7 +211,8 @@ function finalAssistantText(session: Session, firstSeq: number): string {
  * serialized text-generation and reviewer turns for the Leg B `/prompt` path.
  */
 export class LlmTextAgent {
-  private agent: Agent | undefined
+  /** Per-model agent cache keyed by model id ('' = the default-model agent). */
+  private readonly agents = new Map<string, Agent>()
   private queue: Promise<void> = Promise.resolve()
   private readonly deps: LlmTextDeps
   private closed = false
@@ -218,7 +231,11 @@ export class LlmTextAgent {
    * @returns the generated text.
    */
   text(classType: string, inputs: Record<string, unknown>): Promise<string> {
-    return this.enqueue((): Promise<string> => this.runTurn(buildTextPrompt(classType, inputs), `text:${classType}`))
+    // Phase-1 model selector: a node's `model` widget (forwarded through the
+    // adapter's resolved inputs) pins the LLM route for THIS turn. Empty = the
+    // executor's default-model agent (unchanged behavior).
+    const model = display(inputs['model']).trim()
+    return this.enqueue((): Promise<string> => this.runTurn(buildTextPrompt(classType, inputs), `text:${classType}`, model))
   }
 
   /**
@@ -260,12 +277,16 @@ export class LlmTextAgent {
     return run
   }
 
-  /** Get the shared executor agent, reusing/resuming/creating its stable session. */
-  private async ensureAgent(): Promise<Agent> {
-    if (this.agent !== undefined) return this.agent
-    const sessionId = executorSession()
+  /** Get the executor agent for one model id, reusing/resuming/creating its stable
+   *  session. `model === ''` selects the shared default-model agent. */
+  private async ensureAgent(model = ''): Promise<Agent> {
+    const cached = this.agents.get(model)
+    if (cached !== undefined) return cached
+    const sessionId = model === '' ? executorSession() : executorModelSession(model)
     const selection = this.deps.agentDefaultModel.currentSelection()
-    const agentOptions: AgentOptions = { ...selection }
+    // A pinned model overrides just the route's model id; the provider + any
+    // reasoning effort come from the default selection (same Bailian provider).
+    const agentOptions: AgentOptions = model === '' ? { ...selection } : { ...selection, model }
     const setup = (agentCtx: Context): void => {
       installModelSelection(agentCtx)
     }
@@ -277,7 +298,7 @@ export class LlmTextAgent {
     // and every text/review/intent turn fails.
     const live = this.deps.agents.get(sessionId)
     if (live !== undefined) {
-      this.agent = live
+      this.agents.set(model, live)
       return live
     }
     let agent: Agent
@@ -297,15 +318,15 @@ export class LlmTextAgent {
       agent = (await this.deps.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })).agent
     }
     await agent.whenIdle()
-    this.agent = agent
-    this.deps.logger.info('[movie-executor] shared text agent opened')
+    this.agents.set(model, agent)
+    this.deps.logger.info('[movie-executor] text agent opened (model: %s)', model === '' ? 'default' : model)
     return agent
   }
 
   /** Drive one turn to quiescence and return its final assistant text. */
-  private async runTurn(prompt: string, label: string): Promise<string> {
+  private async runTurn(prompt: string, label: string, model = ''): Promise<string> {
     if (this.closed) throw new Error('executor text agent disposed')
-    const agent = await this.ensureAgent()
+    const agent = await this.ensureAgent(model)
     const firstSeq = Number(agent.session.seq)
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: prompt }],
@@ -327,10 +348,10 @@ export class LlmTextAgent {
     return text
   }
 
-  /** Drop the live agent and reject further work (plugin disposal). */
+  /** Drop the live agents and reject further work (plugin disposal). */
   dispose(): void {
     this.closed = true
-    this.agent = undefined
+    this.agents.clear()
     this.queue = Promise.resolve()
   }
 }
