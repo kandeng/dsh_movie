@@ -229,7 +229,9 @@ function applyOne(graph: WorkflowGraph, op: CanvasOp, narration: string[]): stri
       const props = (payload.props !== undefined && typeof payload.props === 'object' && payload.props !== null
         ? payload.props
         : undefined) as Record<string, unknown> | undefined
-      const node = buildNode(schema, id, pos, props)
+      // A top-level `title` (bridge/template form) wins over a `props.title`.
+      const title = typeof payload.title === 'string' && payload.title !== '' ? payload.title : undefined
+      const node = buildNode(schema, id, pos, { ...(props ?? {}), ...(title === undefined ? {} : { title }) })
       graph.nodes = [...(graph.nodes ?? []), node]
       graph.last_node_id = Math.max(graph.last_node_id ?? 0, id)
       narration.push(`+ ${nodeLabel(schema, classType)} #${id}`)

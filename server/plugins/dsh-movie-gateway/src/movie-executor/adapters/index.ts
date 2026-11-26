@@ -99,7 +99,13 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
       // through unchanged (resolveValue is identity for non-links).
       const linked: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(ctx.inputs)) linked[key] = resolveValue(ctx, value)
-      const inputs: Record<string, unknown> = { ...linked, resolved: sections, prompt }
+      // An EMPTY prompt widget must not clobber a linked prompt slot. The media
+      // generators have no `prompt` widget at all (theirs are `mode`/`variant`),
+      // so `prompt` resolved to '' and overwrote the upstream text the link had
+      // just carried - the seam then saw only `resolved`, and a skill wired into
+      // the Image Generator never reached the image prompt. Omit the key instead
+      // of blanking it.
+      const inputs: Record<string, unknown> = { ...linked, resolved: sections, ...(prompt === '' ? {} : { prompt }) }
       if (schema.modality === 'text') {
         const artifact = ctx.text === undefined
           ? cannedText(schema.classType, `generated text from ${sections.length} linked section(s)`)

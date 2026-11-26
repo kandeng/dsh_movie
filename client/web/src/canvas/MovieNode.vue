@@ -11,9 +11,12 @@
  *
  * Running status is carried by the border color plus one corner dot (D13) —
  * no status word. The reviewer verdict line stays: a verdict is output data,
- * not status. Everything else the old card rendered (editable widgets, port
- * name/type lists, schema blurb, modality chip, family pill, step badge) is
- * gone: decoration without meaning, and editing moved to the editor card.
+ * not status. Everything else the old card rendered (editable widgets, the
+ * full port name/type lists, schema blurb, modality chip, family pill, step
+ * badge) is gone: decoration without meaning, and editing moved to the editor
+ * card. The ONE port residue that came back is each slot's NAME as a tiny
+ * label beside its dot — wiring a Text Input into `skill` (slot 2) instead of
+ * `prompt` (slot 0) was a blind guess with anonymous dots.
  *
  * This component never writes: it reads {@link MovieNodeData} produced by the
  * {@link graphMapper} and renders it. Handles stay because edges need them.
@@ -169,13 +172,16 @@ const mediaName = computed(() => {
         </div>
       </div>
 
-      <!-- vidsay nodeSkeleton handles: 18px circular glyphs at ±12px, distributed by index. -->
+      <!-- vidsay nodeSkeleton handles: 18px circular glyphs at ±12px, distributed by index.
+           Each dot carries its slot NAME on the canvas side so a port's role
+           (prompt / image / skill …) is readable without hovering a tooltip. -->
       <Handle
         v-for="(slot, i) in (data.inputs ?? [])" :key="`hin-${i}`"
         :id="`in-${i}`" type="target" :position="Position.Left"
         class="nodeHandle" :class="{ connected: connectedHandles.has(`in-${i}`) }"
         :style="{ top: `${((i + 1) / ((data.inputs ?? []).length + 1)) * 100}%` }"
         :title="`${slot.name || `in ${i}`} · ${slot.type}`">
+        <span class="portLabel portIn">{{ slot.name || `in ${i}` }}</span>
         <component :is="connectedHandles.has(`in-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>
       <Handle
@@ -184,6 +190,7 @@ const mediaName = computed(() => {
         class="nodeHandle" :class="{ connected: connectedHandles.has(`out-${i}`) }"
         :style="{ top: `${((i + 1) / ((data.outputs ?? []).length + 1)) * 100}%` }"
         :title="`${slot.name || `out ${i}`} · ${slot.type}`">
+        <span class="portLabel portOut">{{ slot.name || `out ${i}` }}</span>
         <component :is="connectedHandles.has(`out-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>
     </div>
@@ -272,6 +279,21 @@ const mediaName = computed(() => {
     &.connected .handleIcon { opacity: 1; }
     &:hover, &.connected { color: var(--el-color-primary); }
   }
+
+  // Port role labels: tiny slot names on the CANVAS side of each dot (never
+  // over the card content), so `prompt` vs `skill` vs `image` is readable at a
+  // glance and the connect tool's port chooser has a visible counterpart.
+  .portLabel {
+    position: absolute;
+    font-size: 10px;
+    line-height: 14px;
+    color: var(--el-text-color-secondary);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .portIn { right: calc(100% + 4px); }
+  .portOut { left: calc(100% + 4px); }
 }
 
 // D13: the whole status vocabulary on the card is this dot + the border color.

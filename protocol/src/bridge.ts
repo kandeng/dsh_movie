@@ -44,8 +44,18 @@ export interface BridgeCommandPayloads {
   'graph.load': { graph: WorkflowGraph }
   /** Ask the iframe to export the current graph (answered via `commandResult`). */
   'graph.export': Record<string, never>
-  /** Add a node of `nodeType` at `pos`; optional starting widget props/id. */
-  'node.add': { nodeType: string; pos: [number, number]; props?: Record<string, unknown>; id?: number }
+  /**
+   * Add a node of `nodeType` at `pos`; optional starting widget props/id, and an
+   * optional canvas `title` override (used when one template drops the same class
+   * type twice and the instances must be told apart, e.g. `Prompt` vs `Skill`).
+   */
+  'node.add': {
+    nodeType: string
+    pos: [number, number]
+    props?: Record<string, unknown>
+    id?: number
+    title?: string
+  }
   /** Remove a node by id. */
   'node.remove': { id: number }
   /** Move a node to an absolute canvas position. */

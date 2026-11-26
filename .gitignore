@@ -11,6 +11,7 @@ server/static/comfy/
 
 # Logs & scratch
 *.log
+logs/
 
 # Local env & secrets
 .env

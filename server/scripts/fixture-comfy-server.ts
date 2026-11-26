@@ -55,6 +55,12 @@ export interface FixtureControls {
   healthy: boolean
   /** Node types withheld from /object_info (template coverage probe). */
   missingNodes: string[]
+  /**
+   * Model filenames withheld from the published /object_info inventories, so a
+   * template that asks for one is reported as missing its weights (the pairing
+   * pre-flight). An empty list publishes the full H20 inventory.
+   */
+  missingFiles: string[]
   /** Milliseconds before a submitted job completes. */
   jobDelayMs: number
   /** When true, jobs never complete (timeout/interrupt tests). */
@@ -84,14 +90,46 @@ export interface FixtureComfy {
   stop(): Promise<void>
 }
 
-/** All node types the bundled image+video templates reference. */
+/**
+ * All node types the six bundled templates reference (H20 inventory: SDXL +
+ * InstantID images, Qwen-Image, Wan 2.2 t2v, Wan 2.1 VACE i2v, Stable Audio).
+ * Kept in step with the templates - a stale list here reads as a fake coverage
+ * failure, which is exactly what happened when the video graph moved off LTX.
+ */
 const TEMPLATE_NODE_TYPES = [
-  'CheckpointLoaderSimple', 'KSampler', 'EmptyLatentImage', 'CLIPTextEncode',
-  'VAEDecode', 'SaveImage', 'CLIPLoader', 'LTXVConditioning',
-  'EmptyLTXVLatentVideo', 'ModelSamplingLTXV', 'LTXVScheduler',
-  'SamplerCustomAdvanced', 'RandomNoise', 'CFGGuider', 'KSamplerSelect',
-  'CreateVideo', 'SaveVideo', 'LoadImage', 'VAEEncode',
+  'CheckpointLoaderSimple', 'KSampler', 'KSamplerAdvanced', 'EmptyLatentImage',
+  'EmptySD3LatentImage', 'CLIPTextEncode', 'CLIPLoader', 'VAEDecode', 'VAEEncode',
+  'VAELoader', 'SaveImage', 'LoadImage', 'UNETLoader', 'ModelSamplingAuraFlow',
+  'ModelSamplingSD3', 'EmptyHunyuanLatentVideo', 'CreateVideo', 'SaveVideo',
+  'TrimVideoLatent', 'WanVaceToVideo', 'ImageScale', 'ImageBatch', 'RepeatImageBatch',
+  'MaskToImage', 'ImageToMask', 'SolidMask', 'InstantIDModelLoader',
+  'InstantIDFaceAnalysis', 'ApplyInstantID', 'ControlNetLoader',
+  'EmptyLatentAudio', 'VAEDecodeAudio', 'SaveAudioAdvanced',
 ]
+
+/**
+ * The model-file inventories a real ComfyUI publishes per loader class + field
+ * (`input.required.<field>[0]`), matching the H20 install. Withholding one via
+ * `controls.missingFiles` is how the pairing pre-flight is exercised offline.
+ */
+const MODEL_FILE_INVENTORY: Record<string, Record<string, string[]>> = {
+  CheckpointLoaderSimple: { ckpt_name: ['sd_xl_base_1.0.safetensors', 'stable-audio-open-1.0.safetensors'] },
+  UNETLoader: {
+    unet_name: [
+      'qwen_image_fp8_e4m3fn.safetensors', 'wan2.1_vace_14B_fp8_e4m3fn.safetensors',
+      'wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors', 'wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors',
+    ],
+  },
+  VAELoader: { vae_name: ['qwen_image_vae.safetensors', 'wan_2.1_vae.safetensors'] },
+  CLIPLoader: {
+    clip_name: [
+      'qwen_2.5_vl_7b_fp8_scaled.safetensors', 't5-base.safetensors',
+      'umt5_xxl_fp8_e4m3fn_scaled.safetensors',
+    ],
+  },
+  InstantIDModelLoader: { instantid_file: ['ip-adapter.bin'] },
+  ControlNetLoader: { control_net_name: ['control_instantid_sdxl.safetensors'] },
+}
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject): void => {
@@ -116,6 +154,7 @@ export async function startFixtureComfy(overrides: Partial<FixtureControls> = {}
   const controls: FixtureControls = {
     healthy: true,
     missingNodes: [],
+    missingFiles: [],
     jobDelayMs: 120,
     hang: false,
     fail: false,
@@ -143,7 +182,13 @@ export async function startFixtureComfy(overrides: Partial<FixtureControls> = {}
       if (path === '/object_info') {
         const info: Record<string, unknown> = {}
         for (const type of TEMPLATE_NODE_TYPES) {
-          if (!controls.missingNodes.includes(type)) info[type] = { input: { required: {} }, output: [] }
+          if (controls.missingNodes.includes(type)) continue
+          const required: Record<string, unknown> = {}
+          for (const [field, files] of Object.entries(MODEL_FILE_INVENTORY[type] ?? {})) {
+            const kept = files.filter((name): boolean => !controls.missingFiles.includes(name))
+            if (kept.length > 0) required[field] = [kept]
+          }
+          info[type] = { input: { required }, output: [] }
         }
         return json(res, 200, info)
       }

@@ -55,15 +55,20 @@ const PLUGINS_METHODS: readonly LegCMethod[] = [
   'plugins/skills.profile',
   'plugins/skills.download',
   'plugins/skills.flag',
+  // Phase-7 D9a executable skills: run + the orange-level consent record.
+  'plugins/skills.run',
+  'plugins/skills.consent',
   'plugins/sources.status',
 ] as const
 
 for (const method of PLUGINS_METHODS) {
   check(`IMPLEMENTED_METHODS enumerates "${method}"`, IMPLEMENTED_METHODS.includes(method))
 }
+// Count is DERIVED from the list above so the label cannot rot when a method is added.
 check(
-  'IMPLEMENTED_METHODS has exactly ten plugins/* entries',
+  `IMPLEMENTED_METHODS has exactly ${PLUGINS_METHODS.length} plugins/* entries`,
   IMPLEMENTED_METHODS.filter((method): boolean => method.startsWith('plugins/')).length === PLUGINS_METHODS.length,
+  `got ${IMPLEMENTED_METHODS.filter((method): boolean => method.startsWith('plugins/')).length}`,
 )
 check(
   'the pre-phase-7 method list is untouched (22 entries)',

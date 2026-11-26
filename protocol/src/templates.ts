@@ -21,6 +21,13 @@ export interface TemplateNodeSpec {
   pos: [number, number]
   /** Widget values overriding the class defaults. */
   widgets?: Record<string, string | number | boolean>
+  /**
+   * Optional canvas title override for the instantiated node. Only needed when
+   * a template drops the SAME class type twice and the two must be told apart
+   * (e.g. `Prompt` vs `Skill` text inputs feeding one image generator); without
+   * it the node keeps its schema `displayName`. Persisted as `node.title`.
+   */
+  title?: string
 }
 
 /** One internal link of a template, between template-local node keys. */
@@ -79,17 +86,27 @@ export const STEP_TEMPLATES: readonly WorkflowTemplate[] = [
   {
     id: 'step-asset',
     displayName: 'Character / Scene Asset',
-    description: 'Text input → image generator: produce character, scene, or prop assets.',
+    description: 'Prompt + craft skill → image generator: produce character, scene, or prop assets.',
+    // Three labelled nodes: two Text Inputs of the SAME class type are told apart
+    // by `title`, so a dropped template reads as "Prompt / Skill" rather than two
+    // anonymous "Text Input" cards. The skill wires into ImageGenerator's input
+    // slot 2 (`skill`), which the provider folds into the prompt after the main
+    // text; the generator defaults to the Qwen-Image variant (the only image
+    // template whose model↔VAE pairing ships pre-validated).
     nodes: [
-      { key: 'in', classType: 'TextInput', pos: [0, 0] },
+      { key: 'in', classType: 'TextInput', pos: [0, 0], title: 'Prompt' },
+      { key: 'skill', classType: 'TextInput', pos: [0, 150], title: 'Skill' },
       {
         key: 'gen',
         classType: 'ImageGenerator',
-        pos: [260, 0],
-        widgets: { mode: 'text_to_image' },
+        pos: [260, 70],
+        widgets: { mode: 'text_to_image', variant: 'qwen' },
       },
     ],
-    links: [{ from: 'in', fromSlot: 0, to: 'gen', toSlot: 0 }],
+    links: [
+      { from: 'in', fromSlot: 0, to: 'gen', toSlot: 0 },
+      { from: 'skill', fromSlot: 0, to: 'gen', toSlot: 2 },
+    ],
   },
   {
     id: 'step-storyboard',
@@ -168,7 +185,7 @@ export const MOVIE_PIPELINE_TEMPLATE: WorkflowTemplate = {
       key: 'asset',
       classType: 'ImageGenerator',
       pos: [780, 0],
-      widgets: { mode: 'text_to_image' },
+      widgets: { mode: 'text_to_image', variant: 'qwen' },
     },
     {
       key: 'board',

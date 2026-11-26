@@ -9,7 +9,8 @@
     "seedNode": "8",
     "stepsNode": "8",
     "ckptNode": "1",
-    "vaeNode": "4"
+    "vaeNode": "4",
+    "vae": "qwen_image_vae.safetensors"
   },
   "prompt": {
     "1": {

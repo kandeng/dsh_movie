@@ -8,7 +8,8 @@
     "saveNode": "12",
     "seedNode": "7",
     "stepsNode": "7",
-    "ckptNode": "1"
+    "ckptNode": "1",
+    "vae": "wan_2.1_vae.safetensors"
   },
   "prompt": {
     "1": {

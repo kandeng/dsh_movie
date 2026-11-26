@@ -25,11 +25,18 @@ import { randomUUID } from 'node:crypto'
 import { WebSocket } from 'ws'
 import type { MediaGeneration, MediaHooks, MediaProvider } from './media-provider.ts'
 import {
+  describeMissingFiles,
   instantiate,
+  keyOf,
+  missingModelFiles,
   missingNodeTypes,
   templateFor,
+  TEMPLATE_KEYS,
   type ComfyNode,
   type ComfyTemplates,
+  type ModelBundle,
+  type ModelOverrides,
+  type TemplateKey,
   type TemplateParams,
 } from './comfy-templates.ts'
 import { resolveZerotierBaseUrl, zerotierRefFromEnv } from './comfy-zerotier.ts'
@@ -70,6 +77,88 @@ export interface ComfyReadiness {
   image: boolean
   video: boolean
   audio: boolean
+}
+
+/**
+ * Why one model variant cannot run on one endpoint.
+ *
+ * Readiness above is per MODALITY, but a modality is served by several variants
+ * (image = SDXL / Qwen-Image / InstantID) and each needs its own node set *and*
+ * its own weight files. Collapsing that to one boolean is how a backend that
+ * answers `/system_stats` and publishes `CheckpointLoaderSimple` still failed
+ * mid-run: the variant actually requested was not installed. The gap record
+ * keeps the per-variant reason so a submit can skip the endpoint with a precise
+ * message instead of surfacing a ComfyUI exception.
+ */
+interface VariantGap {
+  /** Node classes the backend does not expose. */
+  nodes: string[]
+  /** Weight files absent from the backend's inventory (already described). */
+  files: string
+}
+
+/** Coverage of every template against one endpoint's `/object_info`. */
+interface EndpointCoverage {
+  /** When the `/object_info` payload was read (0 = never verified). */
+  at: number
+  /** Per-modality roll-up: ready when ANY variant of that modality is covered. */
+  result: ComfyReadiness
+  /** Per-variant gaps; absent key = that variant is fully runnable here. */
+  gaps: Map<TemplateKey, VariantGap>
+}
+
+/** The modality each template key serves. */
+const MODALITY_OF_KEY: Record<TemplateKey, keyof ComfyReadiness> = {
+  image: 'image',
+  imageQwen: 'image',
+  instantid: 'image',
+  video: 'video',
+  videoI2v: 'video',
+  audio: 'audio',
+}
+
+/** Human-readable reason one variant cannot run on an endpoint. */
+function describeGap(gap: VariantGap): string {
+  const parts: string[] = []
+  if (gap.nodes.length > 0) parts.push(`missing nodes ${gap.nodes.join(', ')}`)
+  if (gap.files !== '') parts.push(`missing weights ${gap.files}`)
+  return parts.length === 0 ? 'unknown' : parts.join('; ')
+}
+
+/**
+ * Score all six templates against one `/object_info` payload: a variant is
+ * runnable only when it has every node type AND every weight file the backend
+ * advertises. Node coverage alone is not enough - a renamed checkpoint still
+ * publishes its loader class.
+ */
+function coverageOf(
+  templates: ComfyTemplates,
+  objectInfo: Record<string, unknown>,
+): EndpointCoverage {
+  const gaps = new Map<TemplateKey, VariantGap>()
+  const result: ComfyReadiness = { image: false, video: false, audio: false }
+  for (const key of TEMPLATE_KEYS) {
+    const template = templates[key]
+    if (template === undefined) {
+      gaps.set(key, { nodes: [], files: 'template not bundled' })
+      continue
+    }
+    const nodes = missingNodeTypes(template, objectInfo)
+    const files = describeMissingFiles(missingModelFiles(template, objectInfo))
+    if (nodes.length === 0 && files === '') {
+      result[MODALITY_OF_KEY[key]] = true
+      continue
+    }
+    gaps.set(key, { nodes, files })
+  }
+  return { at: Date.now(), result, gaps }
+}
+
+/** Coverage for an endpoint that could not be probed: nothing verified. */
+function unverifiedCoverage(reason: string): EndpointCoverage {
+  const gaps = new Map<TemplateKey, VariantGap>()
+  for (const key of TEMPLATE_KEYS) gaps.set(key, { nodes: [], files: reason })
+  return { at: 0, result: { image: false, video: false, audio: false }, gaps }
 }
 
 /** The ComfyUI provider: the media seam plus probe/readiness for the gate. */
@@ -162,12 +251,37 @@ function num(value: unknown): number | undefined {
   return undefined
 }
 
-/** Coerce a `models` override payload to a node-id → filename map. */
-function modelsOf(value: unknown): Record<string, string> | undefined {
+/** `ModelBundle` field names, for coercing an untrusted override payload. */
+const BUNDLE_FIELDS = ['ckpt', 'unet', 'vae', 'clip', 'instantid', 'controlNet'] as const
+
+/**
+ * Coerce one override entry to a {@link ModelBundle}, dropping empty fields.
+ * A bundle is how a split-model weight swap stays honest: the paired VAE and
+ * text encoder travel with the checkpoint/UNET, so the graph cannot end up
+ * decoding latents through the previous model's VAE.
+ */
+function bundleOf(value: unknown): ModelBundle | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const out: Record<string, string> = {}
+  const raw = value as Record<string, unknown>
+  const bundle: ModelBundle = {}
+  for (const field of BUNDLE_FIELDS) {
+    const entry = raw[field]
+    if (typeof entry === 'string' && entry.trim() !== '') bundle[field] = entry.trim()
+  }
+  return Object.keys(bundle).length > 0 ? bundle : undefined
+}
+
+/** Coerce a `models` override payload to a node-id → filename-or-bundle map. */
+function modelsOf(value: unknown): ModelOverrides | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const out: ModelOverrides = {}
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof entry === 'string' && entry.trim() !== '') out[key] = entry.trim()
+    if (typeof entry === 'string') {
+      if (entry.trim() !== '') out[key] = entry.trim()
+      continue
+    }
+    const bundle = bundleOf(entry)
+    if (bundle !== undefined) out[key] = bundle
   }
   return Object.keys(out).length > 0 ? out : undefined
 }
@@ -178,13 +292,30 @@ function wanFrames(seconds: number): number {
   return 4 * Math.round((raw - 1) / 4) + 1
 }
 
-/** Build the generation prompt from a generator node's resolved inputs. */
+/**
+ * Build the generation prompt from a generator node's resolved inputs.
+ *
+ * Composition order: the node's own `prompt`, then a craft skill WIRED IN from
+ * an upstream Text Input (`skill` slot), then the runner-injected `skills`
+ * section for skills IMPORTED onto the node (Phase-7 D12). Before this the media
+ * path read only `resolved`, so an imported or linked skill changed a text
+ * generator's output but had literally no effect on an image - the same words
+ * never reached the text encoder.
+ *
+ * `resolved` (every linked slot, in declared order) stays as the fallback when
+ * nothing above is present, so a generator fed only by upstream links still gets
+ * a real prompt; `'a cinematic scene'` is the empty default.
+ */
 function promptOf(inputs: Record<string, unknown>): string {
   const parts: string[] = []
-  const resolved = text(inputs['resolved'])
-  if (resolved !== undefined) parts.push(resolved)
-  const prompt = text(inputs['prompt'])
-  if (prompt !== undefined) parts.push(prompt)
+  for (const key of ['prompt', 'skill', 'skills']) {
+    const value = text(inputs[key])
+    if (value !== undefined) parts.push(value)
+  }
+  if (parts.length === 0) {
+    const resolved = text(inputs['resolved'])
+    if (resolved !== undefined) parts.push(resolved)
+  }
   const joined = parts.join('\n\n').trim()
   return joined === '' ? 'a cinematic scene' : joined
 }
@@ -361,7 +492,7 @@ export function createComfyProvider(
   let lastProbe: { at: number; result: ComfyReadiness } | undefined
   const NOT_READY: ComfyReadiness = { image: false, video: false, audio: false }
   /** Per-endpoint /object_info coverage, cached (static unless nodes change). */
-  const capabilityCache = new Map<string, { at: number; result: ComfyReadiness }>()
+  const capabilityCache = new Map<string, EndpointCoverage>()
 
   /** Cheap reachability ping: true when /system_stats answers 2xx quickly. */
   async function probeLiveness(endpoint: string): Promise<boolean> {
@@ -377,32 +508,58 @@ export function createComfyProvider(
   }
 
   /**
-   * Template node coverage from /object_info, cached per endpoint. `force`
+   * Template + weight coverage from /object_info, cached per endpoint. `force`
    * refreshes (used at activation); otherwise a fresh cache skips the 2.4 MB
    * fetch, and a transient fetch failure keeps the last known coverage.
+   *
+   * All six templates are scored here, not just one per modality: the health
+   * gate used to look at `image`/`video`/`audio` only, so a backend missing
+   * `qwen_image_fp8_e4m3fn` passed pre-flight and then failed at submit.
    */
-  async function probeCapability(endpoint: string, force: boolean): Promise<ComfyReadiness> {
+  async function probeCapability(endpoint: string, force: boolean): Promise<EndpointCoverage> {
     const cached = capabilityCache.get(endpoint)
-    if (!force && cached !== undefined && Date.now() - cached.at < CAPABILITY_TTL_MS) return cached.result
+    if (!force && cached !== undefined && Date.now() - cached.at < CAPABILITY_TTL_MS) return cached
     try {
       const infoResponse = await fetch(`${endpoint}/object_info`, {
         headers: authHeaders(),
         signal: AbortSignal.timeout(config.probeTimeoutMs ?? PROBE_TIMEOUT_MS_DEFAULT),
       })
-      if (!infoResponse.ok) return cached?.result ?? NOT_READY
+      if (!infoResponse.ok) return cached ?? unverifiedCoverage(`/object_info HTTP ${infoResponse.status}`)
       const objectInfo = (await infoResponse.json()) as Record<string, unknown>
-      const result: ComfyReadiness = {
-        image: missingNodeTypes(templates.image, objectInfo).length === 0,
-        video: missingNodeTypes(templates.video, objectInfo).length === 0,
-        audio: templates.audio !== undefined && missingNodeTypes(templates.audio, objectInfo).length === 0,
+      const coverage = coverageOf(templates, objectInfo)
+      if (coverage.gaps.size > 0) {
+        logger.info(
+          '[movie-executor] comfy %s: %d/%d model variant(s) not runnable - %s',
+          endpoint,
+          coverage.gaps.size,
+          TEMPLATE_KEYS.length,
+          [...coverage.gaps.entries()]
+            .map(([key, gap]): string => `${key} (${describeGap(gap)})`)
+            .join(' | '),
+        )
       }
-      capabilityCache.set(endpoint, { at: Date.now(), result })
-      return result
+      capabilityCache.set(endpoint, coverage)
+      return coverage
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logger.warn('[movie-executor] comfy capability probe failed (%s): %s', endpoint, message)
-      return cached?.result ?? NOT_READY
+      return cached ?? unverifiedCoverage(message)
     }
+  }
+
+  /**
+   * Submit-time variant gate: why the template this job resolved to cannot run
+   * on one endpoint, or `undefined` when it can. Reads the cached coverage only
+   * (no extra fetch); an endpoint that has never been probed is not blocked
+   * here, since capability is cached lazily and a genuinely broken submit is
+   * then reported by ComfyUI itself.
+   */
+  function variantGap(endpoint: string, key: TemplateKey | undefined): string | undefined {
+    if (key === undefined) return undefined
+    const cached = capabilityCache.get(endpoint)
+    if (cached === undefined) return undefined
+    const gap = cached.gaps.get(key)
+    return gap === undefined ? undefined : describeGap(gap)
   }
 
   async function probe(force = false): Promise<ComfyReadiness> {
@@ -418,12 +575,12 @@ export function createComfyProvider(
     // Cheap liveness across the pool; only a LIVE endpoint pays for (cached)
     // capability, so a dead one never triggers a 2.4 MB fetch.
     const live = await Promise.all(endpoints.map((endpoint): Promise<boolean> => probeLiveness(endpoint)))
-    const caps = await Promise.all(endpoints.map((endpoint, index): Promise<ComfyReadiness> =>
-      live[index] === true ? probeCapability(endpoint, force) : Promise.resolve(NOT_READY)))
+    const caps = await Promise.all(endpoints.map((endpoint, index): Promise<EndpointCoverage> =>
+      live[index] === true ? probeCapability(endpoint, force) : Promise.resolve(unverifiedCoverage('endpoint not live'))))
     const result: ComfyReadiness = {
-      image: caps.some((entry): boolean => entry.image),
-      video: caps.some((entry): boolean => entry.video),
-      audio: caps.some((entry): boolean => entry.audio),
+      image: caps.some((entry): boolean => entry.result.image),
+      video: caps.some((entry): boolean => entry.result.video),
+      audio: caps.some((entry): boolean => entry.result.audio),
     }
     const anyLive = live.some((entry): boolean => entry)
     const ready = result.image || result.video || result.audio
@@ -549,6 +706,7 @@ export function createComfyProvider(
       }
       const template = templateFor(classType, templates, hint)
       if (template === undefined) throw new Error(`comfy provider: unsupported step ${classType}`)
+      const templateKey = keyOf(templates, template)
       await acquire(hooks?.signal)
       try {
         const params: TemplateParams = { prompt: promptOf(inputs) }
@@ -585,6 +743,15 @@ export function createComfyProvider(
         // Submit with failover across the pool (P8-M5).
         let submitError = ''
         for (const candidate of endpointOrder()) {
+          // Variant gate: skip a card that provably cannot run THIS template
+          // (node set or weight files missing) instead of paying an upload +
+          // submit round trip for a rejection we already know the answer to.
+          const gap = variantGap(candidate, templateKey)
+          if (gap !== undefined) {
+            submitError = `variant ${templateKey ?? classType} not runnable on ${candidate}: ${gap}`
+            logger.warn('[movie-executor] comfy submit skipped on %s: %s', candidate, submitError)
+            continue
+          }
           try {
             if (imageRef !== undefined && (imageRef.startsWith('data:') || /^https?:/i.test(imageRef))) {
               const bytes = await inputImageBytes(imageRef)
@@ -622,7 +789,19 @@ export function createComfyProvider(
           }
         }
         if (promptId === '') throw new Error(`comfy prompt submit failed: ${submitError}`)
-        logger.info('[movie-executor] %s comfy job %s submitted to %s', classType, promptId, endpoint)
+        // One line carrying everything needed to verify a run from the log: which
+        // model variant was selected, which VAE it is paired with, and whether a
+        // skill section actually reached the prompt (Task 2/3/4/6 verification).
+        logger.info(
+          '[movie-executor] %s comfy job %s submitted to %s (variant %s, vae %s, prompt %d chars, skill %s)',
+          classType,
+          promptId,
+          endpoint,
+          templateKey ?? 'default',
+          template.meta.vae,
+          params.prompt.length,
+          text(inputs['skill']) === undefined && text(inputs['skills']) === undefined ? 'none' : 'folded in',
+        )
 
         // Track progress over /ws; /history polling remains the source of truth.
         let wsError = ''

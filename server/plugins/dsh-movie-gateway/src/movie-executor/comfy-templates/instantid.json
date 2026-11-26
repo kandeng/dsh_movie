@@ -9,7 +9,7 @@
     "seedNode": "10",
     "stepsNode": "10",
     "ckptNode": "1",
-    "vaeNode": "11",
+    "vae": "bundled",
     "imageNode": "8"
   },
   "prompt": {
@@ -95,17 +95,11 @@
         "latent_image": ["4", 0]
       }
     },
-    "11": {
-      "class_type": "VAELoader",
-      "inputs": {
-        "vae_name": "sd-vae-ft-mse.safetensors"
-      }
-    },
     "12": {
       "class_type": "VAEDecode",
       "inputs": {
         "samples": ["10", 0],
-        "vae": ["11", 0]
+        "vae": ["1", 2]
       }
     },
     "13": {

@@ -342,11 +342,16 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
       case "node.add": {
         const p = payload as BridgeCommandPayloads["node.add"];
         const id = p.id ?? nextNodeId(flow.getNodes.value as MovieFlowNode[], baseGraph);
+        const data = buildNodeData(p.nodeType, flow.getNodes.value.length, p.props);
+        // An explicit title overrides the schema `displayName` (set inside
+        // `buildNodeData`), so a template that drops the same class type twice can
+        // label the instances ("Prompt" vs "Skill"). Persisted via `flowToWorkflow`.
+        if (p.title !== undefined && p.title !== "") data.title = p.title;
         const node: MovieFlowNode = {
           id: String(id),
           type: p.nodeType,
           position: { x: p.pos[0], y: p.pos[1] },
-          data: buildNodeData(p.nodeType, flow.getNodes.value.length, p.props),
+          data,
           style: { width: `${DEFAULT_SIZE[0]}px` },
         } as MovieFlowNode;
         flow.addNodes(node);

@@ -823,6 +823,37 @@ async function attemptChipRun(skill: ImportedSkillRef, roomId: string): Promise<
 }
 
 /**
+ * Splice a downloaded skill body into the open draft's target widget and append
+ * its additive `importedSkills` ref. This is the ONE paste path, used by the
+ * cross-route pick-mode return ({@link consumeReturnedImport}).
+ * Mutates the DRAFT only: Save stays the single canonical mutation (D6).
+ * @param body - the sanitized SKILL.md body to paste.
+ * @param skillRef - the version-pinned ref recorded under `properties.importedSkills`.
+ * @param widgetName - the target text widget ("" skips the paste, still records the ref).
+ * @param insertionPoint - character offset to splice at; `-1` appends to the end.
+ * @returns `true` when a draft was open and the ref was recorded.
+ */
+function applySkillToDraft(
+  body: string,
+  skillRef: ImportedSkillRef,
+  widgetName: string,
+  insertionPoint: number,
+): boolean {
+  const draft = editorDraft.value;
+  if (draft === null) return false;
+  if (widgetName !== "") {
+    const widget = draft.widgets.find((candidate) => candidate.name === widgetName);
+    if (widget !== undefined) {
+      const current = asString(widget.value);
+      const point = insertionPoint < 0 ? current.length : Math.min(insertionPoint, current.length);
+      widget.value = `${current.slice(0, point)}${body}${current.slice(point)}`;
+    }
+  }
+  draft.importedSkills = [...(draft.importedSkills ?? []), skillRef];
+  return true;
+}
+
+/**
  * Consume a completed pick-mode download exactly once (called after hydrate so the
  * target node exists): re-open its editor, splice the body into the target widget
  * and append the additive ref — as a DIRTY DRAFT, not an auto-commit. Save stays
@@ -839,20 +870,7 @@ function consumeReturnedImport(): void {
   const nodeId = Number(taken.nodeId);
   if (!Number.isFinite(nodeId) || bridge.flow.findNode(taken.nodeId) === undefined) return;
   openEditor(nodeId);
-  const draft = editorDraft.value;
-  if (draft === null) return;
-  if (taken.widgetName !== "") {
-    const index = draft.widgets.findIndex((widget) => widget.name === taken.widgetName);
-    if (index >= 0) {
-      const widget = draft.widgets[index];
-      if (widget !== undefined) {
-        const current = asString(widget.value);
-        const point = taken.insertionPoint < 0 ? current.length : Math.min(taken.insertionPoint, current.length);
-        widget.value = `${current.slice(0, point)}${taken.body}${current.slice(point)}`;
-      }
-    }
-  }
-  draft.importedSkills = [...(draft.importedSkills ?? []), taken.ref];
+  if (!applySkillToDraft(taken.body, taken.ref, taken.widgetName, taken.insertionPoint)) return;
   ElMessage.success(translate("技能已导入编辑器，点击保存生效"));
 }
 
@@ -1150,6 +1168,52 @@ function setToolMode(mode: CanvasToolMode) {
   toolMode.value = mode;
 }
 
+/** One type-compatible (source output → target input) slot pair. */
+interface ConnectPair {
+  fromSlot: number;
+  toSlot: number;
+  name: string;
+  type: string;
+}
+
+/** Slot types connect when equal, or when either side is the `*` wildcard. */
+function slotTypesMatch(outType: string, inType: string): boolean {
+  return outType === "*" || inType === "*" || outType === inType;
+}
+
+/**
+ * Every type-compatible slot pair between two nodes, one per input slot (the
+ * first matching output wins). Roles come from the schema slot NAMES, so a
+ * Text Input → Image Generator pick offers `prompt` and `skill` explicitly
+ * instead of silently hard-coding slot 0 — wiring by anonymous dot index was
+ * the error-prone path this replaces.
+ */
+function compatiblePairs(fromId: number, toId: number): ConnectPair[] {
+  const fromData = bridge.flow.findNode(String(fromId))?.data as MovieNodeData | undefined;
+  const toData = bridge.flow.findNode(String(toId))?.data as MovieNodeData | undefined;
+  const outputs = fromData?.outputs ?? [];
+  const pairs: ConnectPair[] = [];
+  (toData?.inputs ?? []).forEach((inSlot, toSlot) => {
+    const fromSlot = outputs.findIndex((outSlot) => slotTypesMatch(outSlot.type ?? "*", inSlot.type ?? "*"));
+    if (fromSlot >= 0) {
+      pairs.push({ fromSlot, toSlot, name: inSlot.name ?? `in ${toSlot}`, type: inSlot.type ?? "*" });
+    }
+  });
+  return pairs;
+}
+
+function addConnectEdge(fromId: number, toId: number, pair: ConnectPair): void {
+  void bridge
+    .request("edge.add", { fromId, fromSlot: pair.fromSlot, toId, toSlot: pair.toSlot })
+    .catch(() => {
+      ElMessage.error(translate("添加连线失败"));
+    });
+}
+
+/** Port-chooser state: raised when a picked pair admits several compatible inputs. */
+const connectChooserVisible = ref(false);
+const connectChoice = ref<{ fromId: number; toId: number; pairs: ConnectPair[] } | null>(null);
+
 function onConnectPick(payload: { source: number; target: number }) {
   if (editingNodeId.value !== null) return;
   // Defer the return-to-cursor out of this click's synchronous phase: the bridge's
@@ -1159,32 +1223,38 @@ function onConnectPick(payload: { source: number; target: number }) {
     toolMode.value = "cursor";
   });
   if (!roomRole.isHost.value) return;
-  // Orient the picked pair by feasibility, never by click order alone: prefer
-  // first.out → second.in; if the first node has no output handle or the second
-  // no input handle, flip to second.out → first.in when that direction exists.
-  // Neither direction viable → refuse instead of drawing an edge into a missing
-  // handle (vue-flow would dangle the end at the node's top-left corner).
-  const ends = (id: number) => {
-    const data = bridge.flow.findNode(String(id))?.data as MovieNodeData | undefined;
-    return { out: (data?.outputs ?? []).length > 0, in: (data?.inputs ?? []).length > 0 };
-  };
-  const first = ends(payload.source);
-  const second = ends(payload.target);
+  // Orient the picked pair by type feasibility, never by click order alone:
+  // prefer first.out → second.in; flip when only the reverse direction has a
+  // compatible slot pair; neither → refuse instead of drawing a dangling edge.
   let fromId = payload.source;
   let toId = payload.target;
-  if (!(first.out && second.in)) {
-    if (!(second.out && first.in)) {
+  let pairs = compatiblePairs(fromId, toId);
+  if (pairs.length === 0) {
+    const reversed = compatiblePairs(payload.target, payload.source);
+    if (reversed.length === 0) {
       ElMessage.error(translate("无法在这两个节点间建立连线"));
       return;
     }
     fromId = payload.target;
     toId = payload.source;
+    pairs = reversed;
   }
-  void bridge
-    .request("edge.add", { fromId, fromSlot: 0, toId, toSlot: 0 })
-    .catch(() => {
-      ElMessage.error(translate("添加连线失败"));
-    });
+  const only = pairs[0];
+  if (pairs.length === 1 && only !== undefined) {
+    addConnectEdge(fromId, toId, only);
+    return;
+  }
+  // Several roles fit (e.g. `prompt` vs `skill`): the human picks the port by name.
+  connectChoice.value = { fromId, toId, pairs };
+  connectChooserVisible.value = true;
+}
+
+/** Chooser row pick: draw the edge into the chosen input slot, then close. */
+function onChoosePort(pair: ConnectPair): void {
+  const choice = connectChoice.value;
+  connectChooserVisible.value = false;
+  connectChoice.value = null;
+  if (choice !== null) addConnectEdge(choice.fromId, choice.toId, pair);
 }
 
 function onDeleteNode(id: number) {
@@ -1780,9 +1850,10 @@ function goLogin() {
           </div>
 
           <!-- Row 4c: imported craft skills (Phase-7 D7). Shown for any node whose
-               schema opts into skill imports — the Import button stashes the pick
-               context and routes to the Plugins page; downloaded skills appear as
-               removable chips (the pasted body snapshot lives in the text widget). -->
+               schema opts into skill imports — “Search skill” retrieves in place
+               (Task 6), while “Import” stashes the pick context and routes to the
+               Plugins page; downloaded skills appear as removable chips (the pasted
+               body snapshot lives in the text widget). -->
           <div v-if="editorCanImport" class="fieldGroup">
             <div class="outputLabel">
               {{ translate("技能") }}
@@ -2226,6 +2297,31 @@ function goLogin() {
         </ul>
         <p v-else class="transferEmpty">{{ translate("没有可用的聊天消息") }}</p>
       </el-dialog>
+
+      <!-- Connect tool: when a picked node pair admits several type-compatible
+           input slots (Text Input → Image Generator can mean `prompt` OR
+           `skill`), the human picks the target port by name instead of
+           guessing anonymous dots; a single compatible slot connects directly. -->
+      <el-dialog
+        v-model="connectChooserVisible"
+        :title="translate('选择输入端口')"
+        width="360px"
+        append-to-body
+        destroy-on-close>
+        <p class="contentHint">{{ translate("有多个类型匹配的输入端口，选择要连接的一个。") }}</p>
+        <ul class="portChoiceList">
+          <li v-for="pair in connectChoice?.pairs ?? []" :key="pair.toSlot">
+            <button type="button" class="portChoice" @click="onChoosePort(pair)">
+              <span class="portChoiceName">{{ pair.name }}</span>
+              <span class="portChoiceType">{{ pair.type }}</span>
+            </button>
+          </li>
+        </ul>
+        <template #footer>
+          <el-button size="small" @click="connectChooserVisible = false">{{ translate("取消") }}</el-button>
+        </template>
+      </el-dialog>
+
     </template>
 
     <!-- 媒体查看器：视频 / 图片 / 只读文本预览。 -->
@@ -2980,6 +3076,45 @@ function goLogin() {
   max-height: 56vh;
   overflow: auto;
   list-style: none;
+}
+
+// Connect-tool port chooser: one row per type-compatible input slot, naming the
+// role the edge would land in (`prompt` / `skill` / …) plus its slot type.
+.portChoiceList {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.portChoice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--ui-radius, 8px);
+  background: var(--el-fill-color-light);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--el-color-primary);
+    color: var(--el-color-primary);
+  }
+}
+
+.portChoiceName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.portChoiceType {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
 }
 
 .pickItem {

@@ -3508,6 +3508,8 @@
   "上传本地文件": "Upload local file",
   "上传中…": "Uploading…",
   "选择聊天消息": "Pick a chat message",
+  "选择输入端口": "Choose input port",
+  "有多个类型匹配的输入端口，选择要连接的一个。": "Several type-compatible input ports match; pick the one to connect.",
   "即将推出": "Coming soon",
   "浏览市场（即将推出）": "Browse market (coming soon)",
   "也可直接把聊天里复制的图片粘贴到此处": "You can also paste an image copied from chat here",

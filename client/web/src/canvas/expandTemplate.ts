@@ -34,9 +34,10 @@ export interface ExpandTemplateResult {
  * Expand a template at a canvas origin into fresh nodes + internal links.
  *
  * Each template node is added via `node.add` (which allocates the next free
- * numeric id and applies `widgetOverrides` through `props`); the returned ids
- * are keyed by the template-local node key so the internal links can be wired
- * with `edge.add`. Links referencing an unknown key are skipped defensively.
+ * numeric id, applies `widgetOverrides` through `props`, and applies an optional
+ * `title` override); the returned ids are keyed by the template-local node key so
+ * the internal links can be wired with `edge.add`. Links referencing an unknown
+ * key are skipped defensively.
  * @param bridge - the canvas bridge driving the shared Vue Flow store.
  * @param template - the workflow template to instantiate.
  * @param origin - the canvas `[x, y]` the template's `[0, 0]` maps onto.
@@ -56,6 +57,7 @@ export async function expandTemplate(
       nodeType: spec.classType,
       pos,
       ...(spec.widgets === undefined ? {} : { props: spec.widgets }),
+      ...(spec.title === undefined ? {} : { title: spec.title }),
     })) as { id?: number } | null;
     const id = Number(result?.id);
     if (!Number.isFinite(id)) continue;

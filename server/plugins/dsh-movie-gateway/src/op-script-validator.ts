@@ -42,6 +42,7 @@ const payloadSchemas: Record<CanvasOpType, Schemastery> = {
     pos: z.array(z.number()).required(),
     props: z.dict(z.any()),
     id: z.number(),
+    title: z.string(),
   }),
   'node.remove': z.object({
     id: z.number().required(),

@@ -126,8 +126,15 @@ check('object_info advertises all 21 class types', Object.keys(info).length === 
 check('object_info flags exactly the six legacy nodes deprecated', Object.entries(info).filter(([, entry]): boolean => entry.deprecated).length === 6)
 check(
   'object_info routes optional inputs to input.optional',
-  Object.keys(info['ImageGenerator']!.input.optional).sort().join(',') === 'image,prompt'
-    && Object.keys(info['ImageGenerator']!.input.required).join(',') === 'mode',
+  // ImageGenerator carries the model selector (`variant`, a COMBO widget →
+  // input.required) plus the appended `skill` input slot (→ input.optional).
+  Object.keys(info['ImageGenerator']!.input.optional).sort().join(',') === 'image,prompt,skill'
+    && Object.keys(info['ImageGenerator']!.input.required).sort().join(',') === 'mode,variant',
+)
+check(
+  'object_info advertises the variant COMBO with its options and qwen default',
+  JSON.stringify(info['ImageGenerator']!.input.required['variant'])
+    === JSON.stringify([['sdxl', 'qwen', 'instantid'], { default: 'qwen' }]),
 )
 check(
   'object_info keeps required inputs in input.required',
@@ -184,6 +191,41 @@ if (pipeline !== undefined) {
   check(
     'movie-pipeline has a fork (script feeds shot + asset)',
     pipeline.links.filter((link): boolean => link.from === 'script').length === 2,
+  )
+}
+
+// ── 6. step-asset: the three-node titled asset template (Task 5) ──
+// Two Text Inputs of the SAME class type must be told apart on the canvas, so the
+// template carries `title` overrides; the skill wires into the generator's input
+// slot 2 (`skill`) and the generator defaults to the qwen variant.
+const asset = templateById('step-asset')
+check('step-asset exists', asset !== undefined)
+if (asset !== undefined) {
+  check('step-asset drops three nodes', asset.nodes.length === 3, `got ${asset.nodes.length}`)
+  const titled = asset.nodes.map((node): string => node.title ?? '(untitled)')
+  check(
+    'step-asset labels its two Text Inputs Prompt / Skill and leaves the generator untitled',
+    titled.join(',') === 'Prompt,Skill,(untitled)',
+    titled.join(','),
+  )
+  const assetGen = asset.nodes.find((node): boolean => node.key === 'gen')
+  check(
+    'step-asset generator defaults to the qwen variant',
+    assetGen?.widgets?.variant === 'qwen',
+    String(assetGen?.widgets?.variant),
+  )
+  const genInputs = assetGen === undefined ? [] : (byClassType.get(assetGen.classType)?.inputs ?? [])
+  const skillLink = asset.links.find((link): boolean => link.toSlot === 2)
+  check(
+    'step-asset wires the Skill input into generator slot 2 (`skill`)',
+    skillLink?.from === 'skill' && genInputs[2]?.name === 'skill',
+    `${skillLink?.from ?? '?'} -> slot 2 (${genInputs[2]?.name ?? '?'})`,
+  )
+  const promptLink = asset.links.find((link): boolean => link.toSlot === 0)
+  check(
+    'step-asset wires the Prompt input into generator slot 0 (`prompt`)',
+    promptLink?.from === 'in' && genInputs[0]?.name === 'prompt',
+    `${promptLink?.from ?? '?'} -> slot 0 (${genInputs[0]?.name ?? '?'})`,
   )
 }
 

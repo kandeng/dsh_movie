@@ -252,10 +252,22 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     inputs: [
       { name: 'prompt', type: 'TEXT', optional: true },
       { name: 'image', type: 'IMAGE', optional: true },
+      // A craft skill wired in from an upstream Text Input (as opposed to one
+      // imported onto the node, which the runner injects as `inputs.skills`).
+      // APPENDED at index 2 so slot 0 (`prompt`) and slot 1 (`image`) keep their
+      // meaning in every saved graph.
+      { name: 'skill', type: 'TEXT', optional: true },
     ],
     outputs: [{ name: 'image', type: 'IMAGE' }],
     widgets: [
       { name: 'mode', type: 'COMBO', options: ['text_to_image', 'image_to_image'], default: 'text_to_image' },
+      // Which installed image model runs the step. Each option is a whole
+      // validated model bundle (weights + its paired VAE), never a raw
+      // checkpoint name - see `comfy-templates.ts` `meta.vae`. `qwen` is the
+      // default: Qwen-Image 20B is the strongest installed image model (and
+      // handles typography/posters), while `sdxl` is the fast fallback and
+      // `instantid` locks a face to a reference portrait.
+      { name: 'variant', type: 'COMBO', options: ['sdxl', 'qwen', 'instantid'], default: 'qwen' },
     ],
   },
   {

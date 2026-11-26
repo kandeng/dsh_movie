@@ -22,6 +22,22 @@ export interface ComfyTemplateMeta {
   seedNode: string;
   stepsNode: string;
   ckptNode: string;
+  /**
+   * The VAE that decodes this template's latents - the model/VAE pairing record.
+   *
+   * `'bundled'` means the checkpoint file carries its own VAE, so decode reads
+   * it from the checkpoint loader's third output (`[ckptNode, 2]`) and the graph
+   * holds no `VAELoader` at all. Any other value is the filename of a standalone
+   * VAE that MUST belong to the same family as the diffusion model
+   * (Qwen-Image -> `qwen_image_vae`, Wan 2.1/2.2 -> `wan_2.1_vae`).
+   *
+   * This exists because a mismatched VAE is invisible to every other check: the
+   * old SDXL graphs decoded SDXL latents through the SD1.5 `sd-vae-ft-mse`, which
+   * produced a structurally perfect PNG of chroma noise. Declaring the pairing
+   * here makes it reviewable in one line and verifiable against the backend's
+   * own inventory ({@link missingModelFiles}).
+   */
+  vae: string;
   /** Optional standalone VAELoader node; img2img encodes through it when present. */
   vaeNode?: string;
   /** Optional LoadImage node fed with the uploaded reference (i2v / face lock). */
@@ -64,8 +80,13 @@ export interface TemplateParams {
   steps?: number;
   /** Audio duration in seconds (EmptyLatentAudio). */
   seconds?: number;
-  /** Model filename overrides keyed by node id (sourced from /model_catalog). */
-  models?: Record<string, string>;
+  /**
+   * Model overrides keyed by the id of the weight node being replaced. A bare
+   * filename is fine for a leaf weight (VAE/CLIP/InstantID/ControlNet) or for a
+   * checkpoint that bundles its VAE; replacing a *split* model's ckpt/unet
+   * requires a {@link ModelBundle} so the paired VAE travels with it.
+   */
+  models?: ModelOverrides;
 }
 
 let cached: ComfyTemplates | undefined;
@@ -75,6 +96,9 @@ function loadTemplate(file: string): ComfyTemplate {
   const parsed = JSON.parse(raw) as ComfyTemplate;
   if (!parsed.meta || !parsed.prompt) {
     throw new Error(`comfy template malformed: ${file}`);
+  }
+  if (typeof parsed.meta.vae !== 'string' || parsed.meta.vae === '') {
+    throw new Error(`comfy template ${file} does not declare meta.vae (its model/VAE pairing)`);
   }
   return parsed;
 }
@@ -132,6 +156,103 @@ export function missingNodeTypes(
   return [...missing];
 }
 
+/** Input fields whose value is a model filename drawn from the backend's inventory. */
+export const MODEL_FILE_FIELDS = [
+  'ckpt_name', 'unet_name', 'vae_name', 'clip_name', 'instantid_file', 'control_net_name',
+] as const;
+
+/** One model file a template asks for that the target backend does not have. */
+export interface MissingModelFile {
+  /** Graph node id holding the reference. */
+  node: string;
+  /** ComfyUI node class, e.g. `VAELoader`. */
+  classType: string;
+  /** The field naming the file, e.g. `vae_name`. */
+  field: string;
+  /** The filename the template asks for. */
+  value: string;
+}
+
+function baseName(path: string): string {
+  const tail = path.split('/').pop();
+  return tail === undefined || tail === '' ? path : tail;
+}
+
+/**
+ * The filename inventory a real ComfyUI publishes for one node class + field,
+ * or `undefined` when it publishes none (mock fixtures, older builds, numeric
+ * option lists). Comparing basenames keeps subfolder-prefixed listings
+ * (`vae/qwen_image_vae.safetensors`) matching bare template values.
+ */
+function publishedFiles(
+  objectInfo: Record<string, unknown>,
+  classType: string,
+  field: string,
+): Set<string> | undefined {
+  const entry = objectInfo[classType] as
+    | { input?: { required?: Record<string, unknown>; optional?: Record<string, unknown> } }
+    | undefined;
+  if (entry === undefined || entry === null || typeof entry !== 'object') return undefined;
+  const spec = entry.input?.required?.[field] ?? entry.input?.optional?.[field];
+  if (!Array.isArray(spec)) return undefined;
+  const options = spec[0];
+  if (!Array.isArray(options) || options.length === 0) return undefined;
+  const names = options.filter((option): option is string => typeof option === 'string');
+  return names.length === options.length ? new Set(names.map(baseName)) : undefined;
+}
+
+/**
+ * Model files a template references that the target ComfyUI instance does not
+ * list in its `/object_info` inventory. Empty array = every weight is present.
+ *
+ * Fails OPEN when the backend publishes no inventory for a field (an
+ * unverifiable pairing is not a proven-broken one, and the mock fixture used by
+ * `verify-comfy` advertises node types only), and CLOSED when it does publish
+ * one and our file is missing from it - which is how a renamed or uninstalled
+ * checkpoint/VAE is caught at pre-flight instead of surfacing as a ComfyUI
+ * exception mid-run.
+ */
+export function missingModelFiles(
+  template: ComfyTemplate,
+  objectInfo: Record<string, unknown>,
+): MissingModelFile[] {
+  const missing: MissingModelFile[] = [];
+  for (const [node, entry] of Object.entries(template.prompt)) {
+    for (const field of MODEL_FILE_FIELDS) {
+      const value = entry.inputs[field];
+      if (typeof value !== 'string' || value === '') continue;
+      const published = publishedFiles(objectInfo, entry.class_type, field);
+      if (published === undefined) continue;
+      if (!published.has(baseName(value))) {
+        missing.push({ node, classType: entry.class_type, field, value });
+      }
+    }
+  }
+  return missing;
+}
+
+/** Catalog keys of the bundled templates, i.e. the addressable model variants. */
+export const TEMPLATE_KEYS = ['image', 'imageQwen', 'instantid', 'video', 'videoI2v', 'audio'] as const;
+
+/** One addressable model variant (a template plus its validated pairing). */
+export type TemplateKey = (typeof TEMPLATE_KEYS)[number];
+
+/** The catalog key of an already-selected template (identity lookup). */
+export function keyOf(
+  templates: ComfyTemplates,
+  template: ComfyTemplate,
+): TemplateKey | undefined {
+  for (const key of TEMPLATE_KEYS) {
+    if (templates[key] === template) return key;
+  }
+  return undefined;
+}
+
+/** Human-readable form of {@link missingModelFiles} for logs and errors. */
+export function describeMissingFiles(missing: MissingModelFile[]): string {
+  return missing.map((entry): string => `${entry.classType}.${entry.field}=${entry.value}`).join(', ');
+}
+
 function setIfPresent(
   node: ComfyNode | undefined,
   key: string,
@@ -178,17 +299,13 @@ export function instantiate(
     setIfPresent(latent, 'seconds', params.seconds);
   }
 
-  // Model filename overrides (the driver sources exact names from /model_catalog).
+  // Model overrides. A weight swap is a BUNDLE swap: the paired VAE and text
+  // encoder must travel with the checkpoint/UNET, because a graph that decodes
+  // latents through a mismatched VAE still produces a valid PNG - of chroma
+  // noise. See applyModelOverride for the pairing rules.
   if (params.models !== undefined) {
-    for (const [nodeId, filename] of Object.entries(params.models)) {
-      const target = graph[nodeId];
-      if (target === undefined) continue;
-      for (const key of ['ckpt_name', 'unet_name', 'vae_name', 'clip_name', 'instantid_file', 'control_net_name']) {
-        if (key in target.inputs) {
-          target.inputs[key] = filename;
-          break;
-        }
-      }
+    for (const [nodeId, override] of Object.entries(params.models)) {
+      applyModelOverride(graph, template, nodeId, override);
     }
   }
 
@@ -213,4 +330,123 @@ export function instantiate(
     }
   }
   return graph;
+}
+
+/**
+ * A model bundle: the weight files that must travel together.
+ *
+ * Overriding one without the others is precisely how a mismatched VAE ships, so
+ * a replacement is expressed as one value instead of a set of unrelated
+ * per-node filenames. `vae: 'bundled'` means the new checkpoint carries its own
+ * VAE (SD-family); a filename means a standalone `VAELoader` file that matches
+ * the new model's family.
+ */
+export interface ModelBundle {
+  /** `CheckpointLoaderSimple.ckpt_name` - a checkpoint bundles its own VAE. */
+  ckpt?: string;
+  /** `UNETLoader.unet_name` - a split diffusion model carries no VAE. */
+  unet?: string;
+  /** The paired VAE: `'bundled'` or a standalone `VAELoader` filename. */
+  vae?: string;
+  /** The paired text encoder (`CLIPLoader.clip_name`). */
+  clip?: string;
+  /** Identity-lock weights (`InstantIDModelLoader.instantid_file`). */
+  instantid?: string;
+  /** Identity-lock ControlNet (`ControlNetLoader.control_net_name`). */
+  controlNet?: string;
+}
+
+/**
+ * Model overrides keyed by the id of the weight node being replaced: either a
+ * bare filename (leaf weights, or a VAE-bundling checkpoint) or a full
+ * {@link ModelBundle}.
+ */
+export type ModelOverrides = Record<string, string | ModelBundle>;
+
+function findNodeByClass(graph: Record<string, ComfyNode>, classType: string): string | undefined {
+  for (const [id, node] of Object.entries(graph)) {
+    if (node.class_type === classType) return id;
+  }
+  return undefined;
+}
+
+function setFieldEverywhere(graph: Record<string, ComfyNode>, field: string, value: string): void {
+  for (const node of Object.values(graph)) {
+    if (field in node.inputs) node.inputs[field] = value;
+  }
+}
+
+/**
+ * Point every VAE consumer at the right source for a chosen pairing.
+ *
+ * `'bundled'` rewires each `vae` input that read the standalone loader to the
+ * checkpoint's own VAE output and drops the now-unused loader - the graph shape
+ * the SDXL and audio templates ship with. A filename rewrites that loader
+ * instead; without one there is nowhere to attach it, so that is an error
+ * rather than a silently ignored override.
+ */
+function applyVaeChoice(graph: Record<string, ComfyNode>, template: ComfyTemplate, vae: string): void {
+  const loaderId = template.meta.vaeNode ?? findNodeByClass(graph, 'VAELoader');
+  if (vae === 'bundled') {
+    if (loaderId !== undefined) {
+      for (const node of Object.values(graph)) {
+        const ref = node.inputs.vae;
+        if (Array.isArray(ref) && String(ref[0]) === loaderId) {
+          node.inputs.vae = [template.meta.ckptNode, 2];
+        }
+      }
+      delete graph[loaderId];
+    }
+    return;
+  }
+  const loader = loaderId === undefined ? undefined : graph[loaderId];
+  if (loader === undefined) {
+    throw new Error(
+      `model override: cannot attach standalone VAE '${vae}' - this template pairs its VAE ` +
+      `inline ('${template.meta.vae}') and has no VAELoader node to retarget`,
+    );
+  }
+  loader.inputs.vae_name = vae;
+}
+
+/**
+ * Apply one model override while keeping the model/VAE pairing intact.
+ *
+ * A bare filename may replace a leaf weight (VAE, CLIP, InstantID, ControlNet)
+ * or a checkpoint that bundles its VAE - in both cases no pairing can break.
+ * Replacing a *split* model's checkpoint/UNET with a bare filename is refused,
+ * because the VAE that goes with the new weights is then unknowable and the
+ * latents would decode through the old model's VAE (chroma noise, valid PNG).
+ */
+function applyModelOverride(
+  graph: Record<string, ComfyNode>,
+  template: ComfyTemplate,
+  nodeId: string,
+  override: string | ModelBundle,
+): void {
+  const target = graph[nodeId];
+  if (target === undefined) return;
+
+  if (typeof override === 'string') {
+    const field = MODEL_FILE_FIELDS.find((key): boolean => key in target.inputs);
+    if (field === undefined) return;
+    const isWeightSwap = field === 'ckpt_name' || field === 'unet_name';
+    if (isWeightSwap && template.meta.vae !== 'bundled') {
+      throw new Error(
+        `model override for node ${nodeId} (${target.class_type}.${field}) replaces a split-model weight ` +
+        `while this template pairs it with VAE '${template.meta.vae}'; pass a bundle ` +
+        `{ ${field === 'unet_name' ? 'unet' : 'ckpt'}, vae, clip } so the pairing travels with the weights`,
+      );
+    }
+    target.inputs[field] = override;
+    return;
+  }
+
+  if (override.ckpt !== undefined && 'ckpt_name' in target.inputs) target.inputs.ckpt_name = override.ckpt;
+  if (override.unet !== undefined && 'unet_name' in target.inputs) target.inputs.unet_name = override.unet;
+  if (override.instantid !== undefined) setFieldEverywhere(graph, 'instantid_file', override.instantid);
+  if (override.controlNet !== undefined) setFieldEverywhere(graph, 'control_net_name', override.controlNet);
+  if (override.clip !== undefined) setFieldEverywhere(graph, 'clip_name', override.clip);
+  // VAE last: it may delete the loader node the other fields were found on.
+  if (override.vae !== undefined) applyVaeChoice(graph, template, override.vae);
 }

@@ -9,6 +9,7 @@
     "seedNode": "17",
     "stepsNode": "17",
     "ckptNode": "13",
+    "vae": "wan_2.1_vae.safetensors",
     "imageNode": "1"
   },
   "prompt": {

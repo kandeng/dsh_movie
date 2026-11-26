@@ -8,7 +8,8 @@
     "saveNode": "8",
     "seedNode": "6",
     "stepsNode": "6",
-    "ckptNode": "1"
+    "ckptNode": "1",
+    "vae": "bundled"
   },
   "prompt": {
     "1": {

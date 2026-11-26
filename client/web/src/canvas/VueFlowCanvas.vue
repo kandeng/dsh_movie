@@ -18,6 +18,7 @@ import {
   ConnectionMode,
   PanOnScrollMode,
   SelectionMode,
+  type Connection,
   type NodeTypesObject,
   type EdgeMouseEvent,
   type NodeMouseEvent,
@@ -27,6 +28,7 @@ import { FUNCTIONAL_NODES, MOVIE_NODES, type WorkflowGroup } from "@dsh-movie/pr
 import MovieNode from "@/canvas/MovieNode.vue";
 import canvasEmpty from "@/canvas/canvasEmpty.vue";
 import { boundingFromDrag, groupColor } from "@/canvas/groupOverlay";
+import type { MovieNodeData } from "@/canvas/graphMapper";
 import { CANVAS_TOOL_KEY, type CanvasToolMode } from "@/canvas/toolContext";
 
 import "@vue-flow/core/dist/style.css";
@@ -181,6 +183,26 @@ function onPaneClick(): void {
   edgeDisconnect.value = undefined;
   connectSourceId.value = undefined;
 }
+
+/** Slot index out of a handle id (`in-2` / `out-0`); -1 when unparseable. */
+function handleSlot(handle?: string | null): number {
+  const index = Number(handle?.split("-")[1]);
+  return Number.isFinite(index) ? index : -1;
+}
+
+/**
+ * Drag-connect type gate: a TEXT output must not land on an IMAGE input. Roles
+ * are schema slot types read off the two endpoint nodes; the click-click
+ * connect tool applies the same rule through its compatible-pair search, so
+ * both wiring gestures refuse the same nonsense edges.
+ */
+function isValidConnection(connection: Connection): boolean {
+  const source = nodes.value.find((node) => node.id === connection.source)?.data as MovieNodeData | undefined;
+  const target = nodes.value.find((node) => node.id === connection.target)?.data as MovieNodeData | undefined;
+  const outType = source?.outputs?.[handleSlot(connection.sourceHandle)]?.type ?? "*";
+  const inType = target?.inputs?.[handleSlot(connection.targetHandle)]?.type ?? "*";
+  return outType === "*" || inType === "*" || outType === inType;
+}
 function disconnect(edgeId: string) {
   removeEdges(edgeId);
   edgeDisconnect.value = undefined;
@@ -263,6 +285,7 @@ function onMoveEnd(payload: { event?: unknown }): void {
       :nodes-draggable="true"
       :nodes-connectable="true"
       :connection-mode="ConnectionMode.Strict"
+      :is-valid-connection="isValidConnection"
       :nodes-focusable="false"
       :edges-focusable="false"
       :edges-updatable="false"
