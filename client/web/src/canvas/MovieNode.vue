@@ -25,7 +25,7 @@ import { computed, inject } from "vue";
 import { Handle, Position, useVueFlow, type NodeProps } from "@vue-flow/core";
 import { IconCircleDashed, IconCircleDot, IconVolume2 } from "@tabler/icons-vue";
 import { translate } from "@dsh-movie/i18n/vue";
-import { schemaFor, type MovieNodeData } from "@/canvas/graphMapper";
+import { mergesInputs, schemaFor, type MovieNodeData } from "@/canvas/graphMapper";
 import { nodeSkin } from "@/canvas/nodeSkin";
 import { CANVAS_TOOL_KEY } from "@/canvas/toolContext";
 
@@ -82,6 +82,20 @@ const connectedHandles = computed(() => {
   }
   return set;
 });
+
+/**
+ * Merged-input rendering (schema `mergeInputs`): the node's several input slots
+ * collapse to ONE visible drop handle. Slot 0 is the visible dot; slots 1..n are
+ * invisible same-position anchors so a type-routed edge (e.g. an image into slot
+ * 1) still has a handle to attach to. Storage/execution keep the real slots.
+ */
+const mergedInputs = computed(() => mergesInputs(data.value.classType));
+/** Any input slot connected — drives the single merged dot's filled state. */
+const anyInputConnected = computed(() =>
+  (data.value.inputs ?? []).some((_, i) => connectedHandles.value.has(`in-${i}`)));
+/** Hover tooltip for the merged handle: every role the one drop zone accepts. */
+const mergedTitle = computed(() =>
+  (data.value.inputs ?? []).map((slot) => `${slot.name || "in"} · ${slot.type}`).join("  |  "));
 
 function asText(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -178,11 +192,17 @@ const mediaName = computed(() => {
       <Handle
         v-for="(slot, i) in (data.inputs ?? [])" :key="`hin-${i}`"
         :id="`in-${i}`" type="target" :position="Position.Left"
-        class="nodeHandle" :class="{ connected: connectedHandles.has(`in-${i}`) }"
-        :style="{ top: `${((i + 1) / ((data.inputs ?? []).length + 1)) * 100}%` }"
-        :title="`${slot.name || `in ${i}`} · ${slot.type}`">
-        <span class="portLabel portIn">{{ slot.name || `in ${i}` }}</span>
-        <component :is="connectedHandles.has(`in-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
+        class="nodeHandle"
+        :class="mergedInputs
+          ? { mergedAnchor: i > 0, connected: i === 0 && anyInputConnected }
+          : { connected: connectedHandles.has(`in-${i}`) }"
+        :style="{ top: mergedInputs ? '50%' : `${((i + 1) / ((data.inputs ?? []).length + 1)) * 100}%` }"
+        :title="mergedInputs ? (i === 0 ? mergedTitle : '') : `${slot.name || `in ${i}`} · ${slot.type}`">
+        <span v-if="!mergedInputs" class="portLabel portIn">{{ slot.name || `in ${i}` }}</span>
+        <component
+          v-if="!mergedInputs || i === 0"
+          :is="(mergedInputs ? anyInputConnected : connectedHandles.has(`in-${i}`)) ? IconCircleDot : IconCircleDashed"
+          class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>
       <Handle
         v-for="(slot, i) in (data.outputs ?? [])" :key="`hout-${i}`"
@@ -278,6 +298,14 @@ const mediaName = computed(() => {
 
     &.connected .handleIcon { opacity: 1; }
     &:hover, &.connected { color: var(--el-color-primary); }
+  }
+
+  // A merged node shows ONE drop handle (slot 0); the other input slots render
+  // as invisible same-position anchors so type-routed edges still attach. They
+  // must never intercept the drop (pointer-events: none) nor show a glyph.
+  .mergedAnchor {
+    opacity: 0;
+    pointer-events: none;
   }
 
   // Port role labels: tiny slot names on the CANVAS side of each dot (never

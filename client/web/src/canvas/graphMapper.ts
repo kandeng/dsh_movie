@@ -27,6 +27,7 @@ import {
   FUNCTIONAL_NODES,
   MOVIE_NODES,
   SUBTYPE_OF,
+  slotCompatible,
   type ImportedSkillRef,
   type MovieNodeSchema,
   type PromptGraph,
@@ -222,6 +223,28 @@ export function schemaFor(classType: string): MovieNodeSchema | undefined {
   return SCHEMA_BY_TYPE.get(classType);
 }
 
+/**
+ * True when a class type presents its several input slots as ONE visible drop
+ * handle (schema `mergeInputs`). The slots stay distinct in storage/execution;
+ * only the canvas rendering merges them and connect auto-routes by type.
+ */
+export function mergesInputs(classType: string): boolean {
+  const schema = SCHEMA_BY_TYPE.get(classType);
+  return schema?.mergeInputs === true && (schema.inputs?.length ?? 0) > 1;
+}
+
+/**
+ * Route a source output type to the canonical input slot of a node: the FIRST
+ * slot whose declared type is compatible (equal, a subtype, or the `*`
+ * wildcard). For a merged Image Generator a TEXT source lands on `prompt`
+ * (slot 0) and an IMAGE source on `image` (slot 1), so a single drop handle
+ * still wires each edge into its correct role. Returns -1 when nothing matches.
+ */
+export function routeInputSlotByType(classType: string, sourceOutType: string): number {
+  const inputs = SCHEMA_BY_TYPE.get(classType)?.inputs ?? [];
+  return inputs.findIndex((slot): boolean => slotCompatible(sourceOutType, slot.type));
+}
+
 /** Zip positional widget values with a type's widget schema. */
 function widgetsFromValues(classType: string, values: unknown[]): NodeWidgetView[] {
   const schema = schemaFor(classType);
@@ -331,10 +354,16 @@ export function vueFlowToWorkflow(
 ): WorkflowGraph {
   let lastLinkId = base?.last_link_id ?? 0;
   const linkTuples: WorkflowLinkTuple[] = [];
-  // `${nodeId}:in:${slot}` -> link id (an input takes a single link).
+  // `${nodeId}:in:${slot}` -> link id (a single-link input takes the LAST edge;
+  // a variadic input keeps the FIRST - link-creation order is composition order).
   const inputLink = new Map<string, number>();
   // `${nodeId}:out:${slot}` -> link ids (an output may fan out).
   const outputLinks = new Map<string, number[]>();
+  const classTypeById = new Map<number, string>();
+  for (const node of nodes) {
+    const nodeId = Number(node.id);
+    if (Number.isFinite(nodeId)) classTypeById.set(nodeId, node.data?.classType ?? node.type ?? "");
+  }
 
   for (const edge of edges) {
     const fromNode = Number(edge.source);
@@ -349,7 +378,9 @@ export function vueFlowToWorkflow(
       lastLinkId = Math.max(lastLinkId, linkId);
     }
     linkTuples.push([linkId, fromNode, fromSlot, toNode, toSlot]);
-    inputLink.set(`${toNode}:in:${toSlot}`, linkId);
+    const inKey = `${toNode}:in:${toSlot}`;
+    const variadic = schemaFor(classTypeById.get(toNode) ?? "")?.inputs?.[toSlot]?.variadic === true;
+    if (!variadic || !inputLink.has(inKey)) inputLink.set(inKey, linkId);
     const outKey = `${fromNode}:out:${fromSlot}`;
     const existing = outputLinks.get(outKey);
     if (existing === undefined) outputLinks.set(outKey, [linkId]);
@@ -453,11 +484,15 @@ export function nextNodeId(nodes: MovieFlowNode[], base?: WorkflowGraph): number
  * @returns the flattened prompt graph to `POST /comfy/api/prompt`.
  */
 export function workflowToPrompt(graph: WorkflowGraph): PromptGraph {
-  // `${toNode}:in:${toSlot}` -> `[sourceNodeId, sourceSlotIndex]`.
-  const linkInputs = new Map<string, [string, number]>();
+  // `${toNode}:in:${toSlot}` -> ordered `[sourceNodeId, sourceSlotIndex]` list
+  // (graph.links order = link-creation order = composition order).
+  const linkInputs = new Map<string, [string, number][]>();
   for (const tuple of graph.links ?? []) {
     const [, fromNode, fromSlot, toNode, toSlot] = tuple as WorkflowLinkTuple;
-    linkInputs.set(`${toNode}:in:${toSlot}`, [String(fromNode), Number(fromSlot)]);
+    const key = `${toNode}:in:${toSlot}`;
+    const list = linkInputs.get(key);
+    if (list === undefined) linkInputs.set(key, [[String(fromNode), Number(fromSlot)]]);
+    else list.push([String(fromNode), Number(fromSlot)]);
   }
 
   const prompt: PromptGraph = {};
@@ -470,8 +505,13 @@ export function workflowToPrompt(graph: WorkflowGraph): PromptGraph {
     const inputDefs: readonly { name: string }[] =
       schema?.inputs ?? (node.inputs ?? []).map((slot): { name: string } => ({ name: slot.name ?? "" }));
     inputDefs.forEach((slot, index) => {
-      const link = linkInputs.get(`${node.id}:in:${index}`);
-      if (link !== undefined && slot.name !== "") inputs[slot.name] = link;
+      const list = linkInputs.get(`${node.id}:in:${index}`);
+      if (list === undefined || list.length === 0 || slot.name === "") return;
+      // A variadic slot carries the ORDERED link list so the executor composes
+      // every linked value in link-creation order; a single edge stays the
+      // classic single tuple; a legacy non-variadic duplicate keeps last-wins.
+      const variadic = schema?.inputs?.[index]?.variadic === true;
+      inputs[slot.name] = list.length === 1 ? list[0] : variadic ? list : list[list.length - 1];
     });
 
     // Widget values zipped positionally with the widget schema (a widget is never

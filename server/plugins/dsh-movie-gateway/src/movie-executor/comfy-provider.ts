@@ -241,6 +241,22 @@ function text(value: unknown): string | undefined {
   return undefined
 }
 
+/**
+ * Ordered image references from a (possibly variadic) `image` input. A variadic
+ * IMAGE slot resolves to an ARRAY of refs; a single link/literal is one string.
+ * Kept separate from {@link text} on purpose: `text` JOINS an array with `\n`,
+ * which would fuse several URLs into one unusable reference.
+ */
+function imageRefs(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry): string => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry): boolean => entry !== '')
+  }
+  const single = text(value)
+  return single === undefined ? [] : [single]
+}
+
 /** Coerce one resolved input value to a finite number, or `undefined`. */
 function num(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -736,9 +752,22 @@ export function createComfyProvider(
         let endpoint = ''
         let promptId = ''
 
-        // Optional reference image: img2img on the SDXL graph, or the template's
-        // LoadImage node (VACE first frame / InstantID face reference).
-        const imageRef = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? text(inputs['image']) : undefined
+        // Optional reference image(s): img2img on the SDXL graph, or the
+        // template's LoadImage node (VACE first frame / InstantID face reference).
+        // A variadic `image` slot carries an ORDERED list; the bundled templates
+        // each consume ONE reference, so the first is the active one and any
+        // extras are accepted-and-logged (not silently dropped, not stringified
+        // into the prompt).
+        const imageRefList = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? imageRefs(inputs['image']) : []
+        const imageRef = imageRefList[0]
+        if (imageRefList.length > 1) {
+          logger.info(
+            '[movie-executor] %s received %d reference images; variant %s uses the first (the bundled templates take one reference)',
+            classType,
+            imageRefList.length,
+            templateKey ?? 'default',
+          )
+        }
 
         // Submit with failover across the pool (P8-M5).
         let submitError = ''
