@@ -55,6 +55,11 @@ const pickRoomId = computed(() => pending.value?.roomId ?? activeRoomId.value ??
 // 由 query.category 区分两种往返；pendingModel 非空 = 正在为某节点挑选模型。
 const pendingModel = computed(() => modelPickStore.pending);
 const modelPickMode = computed(() => pickMode.value && pendingModel.value !== null);
+// ACT: pick-mode 的目标模态由发起节点类型决定：ImageGenerator 挑图像模型，
+// 文本节点（TextGenerator）挑文本模型；候选过滤与顶部条文案共用该值。
+const pickModality = computed<"text" | "image">(() =>
+  pendingModel.value?.classType === "ImageGenerator" ? "image" : "text",
+);
 
 // ACT: 左栏分类（Phase-9 §4 顺序：模型→工具→技能→资产）；初值来自路由 query.category
 // （编辑器 Import 跳转时带 category=skills，模型选择器跳转时带 category=models）；
@@ -479,7 +484,7 @@ watch(supplyOptions, (options) => {
 // 未返回卡片（未配 API Key）而模型实际挂在 ComfyUI 供应下时把挑选页滤空。
 const visibleModels = computed(() =>
   registry.cardsOf("models").filter((row) =>
-    (!modelPickMode.value || (row.card.modality === "text" && row.card.status === "ready")) &&
+    (!modelPickMode.value || (row.card.modality === pickModality.value && row.card.status === "ready")) &&
     (modelModality.value === "all" || row.card.modality === modelModality.value) &&
     (modelSupply.value === "all" || row.provider.id === modelSupply.value) &&
     matchesQuery(row, modelQuery.value)),
@@ -656,7 +661,7 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
       <!-- ACT: pick-mode 顶部条：说明正在为哪个节点挑选技能/模型，并提供取消返回。 -->
       <div v-if="pickMode" class="pickBar">
         <icon-download :size="16" aria-hidden="true" />
-        <span>{{ translate(modelPickMode ? "选择一个模型供文本生成节点使用" : "选择一个技能导入到编辑器") }}</span>
+        <span>{{ translate(modelPickMode ? (pickModality === "image" ? "选择一个图像生成模型供图像生成节点使用" : "选择一个模型供文本生成节点使用") : "选择一个技能导入到编辑器") }}</span>
         <el-button size="small" text @click="cancelPick">{{ translate("取消") }}</el-button>
       </div>
 

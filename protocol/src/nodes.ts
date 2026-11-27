@@ -310,6 +310,15 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
       // handles typography/posters), while `sdxl` is the fast fallback and
       // `instantid` locks a face to a reference portrait.
       { name: 'variant', type: 'COMBO', options: ['sdxl', 'qwen', 'instantid'], default: 'qwen' },
+      // Phase-3 image model selector: the pinned model id (a Plugins-catalog
+      // checkpoint filename, e.g. `qwen_image_20B_*.safetensors`) picked via the
+      // Studio editor's Select button. The executor maps it onto the bundled
+      // template whose primary weight it is (`templateByModelFile`), so the
+      // paired VAE travels with it; empty = the `variant` widget's bundle.
+      // The editor hides `mode` (auto-derived from the linked reference) and
+      // `variant` (superseded by this selector). APPENDED last so saved graphs'
+      // positional `widgets_values` keep their meaning.
+      { name: 'model', type: 'STRING', default: '' },
     ],
   },
   {

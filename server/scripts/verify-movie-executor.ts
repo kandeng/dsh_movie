@@ -62,6 +62,11 @@ import {
   type ModelAvailability,
 } from '../plugins/dsh-movie-gateway/src/movie-executor/model-catalog.ts'
 import { createRoomNotifier, type RoomPoster } from '../plugins/dsh-movie-gateway/src/movie-executor/room-notifier.ts'
+import {
+  loadComfyTemplates,
+  templateByModelFile,
+  type ComfyTemplate,
+} from '../plugins/dsh-movie-gateway/src/movie-executor/comfy-templates.ts'
 
 const gatewayUrl = process.env.GATEWAY_URL ?? 'http://127.0.0.1:8788'
 const wsBase = gatewayUrl.replace(/^http/, 'ws')
@@ -396,6 +401,47 @@ async function availabilityChecks(): Promise<void> {
     JSON.stringify(visionResolved ?? null),
   )
   check('vision: the text generator returns the seam artifact with images linked', visionOut?.artifact === 'vision-ok', visionOut?.artifact ?? 'none')
+
+  // Phase-3 image model selector: a pinned Plugins-catalog checkpoint filename
+  // resolves to the bundled template whose PRIMARY weight it is (so the paired
+  // VAE travels with it); an unknown pin resolves to nothing, and the provider
+  // then keeps the variant widget's bundle.
+  const pinnedTemplates = loadComfyTemplates()
+  const primaryWeight = (template: ComfyTemplate | undefined): string => {
+    if (template === undefined) return ''
+    const node = template.prompt[template.meta.ckptNode]
+    for (const field of ['ckpt_name', 'unet_name']) {
+      const value = node?.inputs[field]
+      if (typeof value === 'string' && value !== '') return value
+    }
+    return ''
+  }
+  const qwenWeight = primaryWeight(pinnedTemplates.imageQwen)
+  const sdxlWeight = primaryWeight(pinnedTemplates.image)
+  const videoWeight = primaryWeight(pinnedTemplates.video)
+  check(
+    'image model pin: the qwen bundle primary weight maps back to the qwen template',
+    qwenWeight !== '' && templateByModelFile(pinnedTemplates, qwenWeight) === pinnedTemplates.imageQwen,
+    qwenWeight,
+  )
+  check(
+    'image model pin: the sdxl bundle primary weight maps back to the sdxl template',
+    sdxlWeight !== '' && templateByModelFile(pinnedTemplates, sdxlWeight) === pinnedTemplates.image,
+    sdxlWeight,
+  )
+  check(
+    'image model pin: a subfolder-prefixed inventory listing still matches (basename compare)',
+    sdxlWeight !== '' && templateByModelFile(pinnedTemplates, `checkpoints/${sdxlWeight}`) === pinnedTemplates.image,
+  )
+  check(
+    'image model pin: an unknown checkpoint matches no bundled template (variant fallback)',
+    templateByModelFile(pinnedTemplates, 'not_a_model.safetensors') === undefined,
+  )
+  check(
+    'image model pin: a video weight never captures the image selector',
+    videoWeight === '' || templateByModelFile(pinnedTemplates, videoWeight) === undefined,
+    videoWeight,
+  )
 
   // The reviewer seam: verdict (output 0) + passthrough of the reviewed artifact.
   const reviewOut = await handlerFor('TextReviewer')?.run(handlerCtx(bailianOnly, {

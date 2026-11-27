@@ -30,6 +30,7 @@ import {
   keyOf,
   missingModelFiles,
   missingNodeTypes,
+  templateByModelFile,
   templateFor,
   TEMPLATE_KEYS,
   type ComfyNode,
@@ -712,15 +713,42 @@ export function createComfyProvider(
     },
 
     async generate(classType: string, inputs: Record<string, unknown>, hooks?: MediaHooks): Promise<MediaGeneration> {
-      // Template variant: explicit `variant` wins; else the widget mode maps
-      // VideoGenerator image_to_video → the VACE i2v graph.
-      const mode = text(inputs['mode'])
+      // Reference images are parsed BEFORE template selection: the Image
+      // Generator's mode is auto-derived from them (the `mode` widget no longer
+      // decides it — the editor hides the selector), and VideoGenerator maps
+      // its mode widget onto the i2v/t2v template hint.
+      const refImages = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? imageRefs(inputs['image']) : []
+      let mode = text(inputs['mode'])
+      if (classType === 'ImageGenerator') {
+        mode = refImages.length > 0 ? 'image_to_image' : 'text_to_image'
+        logger.info(
+          '[movie-executor] ImageGenerator mode auto-derived: %s (%d linked reference image(s))',
+          mode,
+          refImages.length,
+        )
+      }
       let hint = text(inputs['variant'])
       if (hint === undefined && classType === 'VideoGenerator') {
         if (mode === 'image_to_video') hint = 'i2v'
         else if (mode === 'text_to_video') hint = 't2v'
       }
-      const template = templateFor(classType, templates, hint)
+      let template = templateFor(classType, templates, hint)
+      // Phase-3 image model selector: a pinned `model` id (a Plugins-catalog
+      // checkpoint filename) selects the bundled template whose PRIMARY weight
+      // it is, so the paired VAE travels with it; a pin that matches no bundled
+      // template keeps the variant widget's bundle (and says so in the log).
+      const pinned = classType === 'ImageGenerator' ? text(inputs['model']) : undefined
+      if (pinned !== undefined && template !== undefined) {
+        const byModel = templateByModelFile(templates, pinned)
+        if (byModel !== undefined) template = byModel
+        else {
+          logger.warn(
+            '[movie-executor] pinned image model %s matches no bundled template; keeping variant %s',
+            pinned,
+            hint ?? 'default',
+          )
+        }
+      }
       if (template === undefined) throw new Error(`comfy provider: unsupported step ${classType}`)
       const templateKey = keyOf(templates, template)
       await acquire(hooks?.signal)
@@ -758,7 +786,7 @@ export function createComfyProvider(
         // each consume ONE reference, so the first is the active one and any
         // extras are accepted-and-logged (not silently dropped, not stringified
         // into the prompt).
-        const imageRefList = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? imageRefs(inputs['image']) : []
+        const imageRefList = refImages
         const imageRef = imageRefList[0]
         if (imageRefList.length > 1) {
           logger.info(

@@ -839,16 +839,27 @@ const editorModelLabel = computed<string>(() => {
   return modelDisplayNames.value[id] ?? id;
 });
 
+/** Widgets the editor hides per class type: the Image Generator's `mode` is
+ *  auto-derived at run time from the linked reference (image linked ⇒
+ *  image_to_image), and its `variant` is superseded by the model selector row
+ *  (the pinned checkpoint picks the validated bundle). Both stay in the schema
+ *  so saved graphs keep their positional widget values. */
+const HIDDEN_PARAM_WIDGETS: Record<string, readonly string[]> = {
+  ImageGenerator: ["mode", "variant"],
+};
+
 /**
  * The generic Row-4b parameter widgets, EXCLUDING the `model` widget (rendered
- * separately as the top selector). Each entry keeps its ORIGINAL draft index so
- * {@link setDraftWidget} still writes to the correct slot.
+ * separately as the top selector) and any class-hidden widget (above). Each
+ * entry keeps its ORIGINAL draft index so {@link setDraftWidget} still writes
+ * to the correct slot.
  */
-const editorParamWidgets = computed<Array<{ widget: NodeWidgetView; index: number }>>(() =>
-  (editorDraft.value?.widgets ?? [])
+const editorParamWidgets = computed<Array<{ widget: NodeWidgetView; index: number }>>(() => {
+  const hidden = HIDDEN_PARAM_WIDGETS[editorClassType.value] ?? [];
+  return (editorDraft.value?.widgets ?? [])
     .map((widget, index) => ({ widget, index }))
-    .filter((entry) => entry.widget.name !== "model"),
-);
+    .filter((entry) => entry.widget.name !== "model" && !hidden.includes(entry.widget.name));
+});
 
 /** Model selector: stash the pick context and route to /plugins Models pick-mode. */
 function startModelPick(): void {

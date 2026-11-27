@@ -342,6 +342,7 @@
   "模型已选择，点击保存生效": "Model selected; click Save to apply",
   "默认模型": "Default model",
   "选择一个模型供文本生成节点使用": "Select a model for the text generator node",
+  "选择一个图像生成模型供图像生成节点使用": "Select an image generation model for the image generator node",
   "尚未导入技能": "No skills imported yet",
   "社区内容未经审计": "Community content is unaudited",
   "审阅": "Review",

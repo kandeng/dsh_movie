@@ -141,6 +141,43 @@ export function templateFor(
   return undefined;
 }
 
+/** Primary weight fields: a pinned model id identifies a template by THESE (the
+ *  checkpoint / UNET that carries the diffusion model), never by its paired VAE
+ *  or text encoder, which several families share. */
+const PRIMARY_WEIGHT_FIELDS = ['ckpt_name', 'unet_name'] as const;
+
+/**
+ * Resolve a pinned model id (a Plugins-catalog checkpoint filename, written by
+ * the Studio's image-model selector into the `model` widget) to the bundled
+ * template whose PRIMARY weight it is, so the whole validated bundle (weights +
+ * paired VAE, `meta.vae`) runs instead of a raw filename swap.
+ *
+ * Only image-modality templates are candidates (the selector serves the Image
+ * Generator); basename comparison keeps subfolder-prefixed inventories matching
+ * bare template values, exactly like {@link missingModelFiles}.
+ *
+ * @returns the matching template, or `undefined` when no bundled template owns
+ *   that weight (the caller then falls back to the `variant` widget).
+ */
+export function templateByModelFile(
+  templates: ComfyTemplates,
+  file: string,
+): ComfyTemplate | undefined {
+  const target = baseName(file.trim());
+  if (target === '') return undefined;
+  for (const key of TEMPLATE_KEYS) {
+    const template = templates[key];
+    if (template === undefined || template.meta.modality !== 'image') continue;
+    for (const node of Object.values(template.prompt)) {
+      for (const field of PRIMARY_WEIGHT_FIELDS) {
+        const value = node.inputs[field];
+        if (typeof value === 'string' && baseName(value) === target) return template;
+      }
+    }
+  }
+  return undefined;
+}
+
 /**
  * Node types a template needs that the target ComfyUI instance does not
  * expose (from GET /object_info). Empty array = template is runnable.
