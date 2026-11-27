@@ -56,10 +56,11 @@ const pickRoomId = computed(() => pending.value?.roomId ?? activeRoomId.value ??
 const pendingModel = computed(() => modelPickStore.pending);
 const modelPickMode = computed(() => pickMode.value && pendingModel.value !== null);
 // ACT: pick-mode 的目标模态由发起节点类型决定：ImageGenerator 挑图像模型，
-// VideoGenerator 挑视频模型，文本节点（TextGenerator）挑文本模型；候选过滤与顶部条文案共用该值。
-const pickModality = computed<"text" | "image" | "video">(() =>
+// VideoGenerator 挑视频模型，AudioGenerator 挑音频模型，文本节点（TextGenerator）挑文本模型；候选过滤与顶部条文案共用该值。
+const pickModality = computed<"text" | "image" | "video" | "audio">(() =>
   pendingModel.value?.classType === "ImageGenerator" ? "image"
   : pendingModel.value?.classType === "VideoGenerator" ? "video"
+  : pendingModel.value?.classType === "AudioGenerator" ? "audio"
   : "text",
 );
 
@@ -663,7 +664,7 @@ async function downloadAsset(row: CardFeedRow): Promise<void> {
       <!-- ACT: pick-mode 顶部条：说明正在为哪个节点挑选技能/模型，并提供取消返回。 -->
       <div v-if="pickMode" class="pickBar">
         <icon-download :size="16" aria-hidden="true" />
-        <span>{{ translate(modelPickMode ? (pickModality === "video" ? "选择一个视频生成模型供视频生成节点使用" : pickModality === "image" ? "选择一个图像生成模型供图像生成节点使用" : "选择一个模型供文本生成节点使用") : "选择一个技能导入到编辑器") }}</span>
+        <span>{{ translate(modelPickMode ? (pickModality === "audio" ? "选择一个音频生成模型供音频生成节点使用" : pickModality === "video" ? "选择一个视频生成模型供视频生成节点使用" : pickModality === "image" ? "选择一个图像生成模型供图像生成节点使用" : "选择一个模型供文本生成节点使用") : "选择一个技能导入到编辑器") }}</span>
         <el-button size="small" text @click="cancelPick">{{ translate("取消") }}</el-button>
       </div>
 

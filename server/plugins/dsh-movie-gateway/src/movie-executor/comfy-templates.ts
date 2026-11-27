@@ -153,9 +153,9 @@ const PRIMARY_WEIGHT_FIELDS = ['ckpt_name', 'unet_name'] as const;
  * VAE, `meta.vae`) runs instead of a raw filename swap.
  *
  * Only templates of the requested modality are candidates (the image selector
- * serves the Image Generator, the video one the Video Generator); basename
- * comparison keeps subfolder-prefixed inventories matching bare template
- * values, exactly like {@link missingModelFiles}.
+ * serves the Image Generator, the video one the Video Generator, the audio one
+ * the Audio Generator); basename comparison keeps subfolder-prefixed
+ * inventories matching bare template values, exactly like {@link missingModelFiles}.
  *
  * @param modality - which family of bundled templates may capture the pin.
  * @returns the matching template, or `undefined` when no bundled template owns
@@ -164,7 +164,7 @@ const PRIMARY_WEIGHT_FIELDS = ['ckpt_name', 'unet_name'] as const;
 export function templateByModelFile(
   templates: ComfyTemplates,
   file: string,
-  modality: 'image' | 'video' = 'image',
+  modality: 'image' | 'video' | 'audio' = 'image',
 ): ComfyTemplate | undefined {
   const target = baseName(file.trim());
   if (target === '') return undefined;

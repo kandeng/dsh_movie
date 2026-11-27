@@ -705,7 +705,7 @@ function setDraftDescription(value: string): void {
  *  chip/empty-hint panel below it): the generators' craft comes from their
  *  linked references + pinned model, not imported craft skills. Already-imported
  *  refs stay in `properties.importedSkills` and keep applying at run time. */
-const SKILL_IMPORT_HIDDEN: readonly string[] = ["ImageGenerator", "TextGenerator", "VideoGenerator"];
+const SKILL_IMPORT_HIDDEN: readonly string[] = ["ImageGenerator", "TextGenerator", "VideoGenerator", "AudioGenerator"];
 
 /** True when the edited node's schema opts into skill imports (D7/D11). */
 const editorCanImport = computed(() =>
@@ -863,6 +863,10 @@ const HIDDEN_PARAM_WIDGETS: Record<string, readonly string[]> = {
   // The clip mode follows the linked storyboard frame (the provider derives
   // i2v/t2v from it), so an editor COMBO would be a second, competing source.
   VideoGenerator: ["mode"],
+  // The sound/music flavor follows the pinned model + the prompt, so the COMBO
+  // would only compete with them (the widget stays in the schema, so saved
+  // graphs keep their positional value and it still applies at run time).
+  AudioGenerator: ["kind"],
 };
 
 /**

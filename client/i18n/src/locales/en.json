@@ -344,6 +344,7 @@
   "选择一个模型供文本生成节点使用": "Select a model for the text generator node",
   "选择一个图像生成模型供图像生成节点使用": "Select an image generation model for the image generator node",
   "选择一个视频生成模型供视频生成节点使用": "Select a video generation model for the video generator node",
+  "选择一个音频生成模型供音频生成节点使用": "Select an audio generation model for the audio generator node",
   "时长": "Duration",
   "尚未导入技能": "No skills imported yet",
   "社区内容未经审计": "Community content is unaudited",

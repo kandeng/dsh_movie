@@ -751,13 +751,17 @@ export function createComfyProvider(
       // mode owns exactly one bundled template today, so a VACE pin on a
       // reference-less run cannot drag it into the i2v graph (whose LoadImage
       // would have nothing to load), and vice versa.
-      const pinned = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? text(inputs['model']) : undefined
+      const pinned =
+        classType === 'ImageGenerator' || classType === 'VideoGenerator' || classType === 'AudioGenerator'
+          ? text(inputs['model'])
+          : undefined
       if (pinned !== undefined && template !== undefined) {
-        const byModel = templateByModelFile(templates, pinned, classType === 'VideoGenerator' ? 'video' : 'image')
+        const pinModality = classType === 'VideoGenerator' ? 'video' : classType === 'AudioGenerator' ? 'audio' : 'image'
+        const byModel = templateByModelFile(templates, pinned, pinModality)
         if (byModel === undefined) {
           logger.warn(
             '[movie-executor] pinned %s model %s matches no bundled template; keeping %s',
-            classType === 'VideoGenerator' ? 'video' : 'image',
+            pinModality,
             pinned,
             hint ?? 'default',
           )

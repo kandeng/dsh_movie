@@ -370,9 +370,23 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     family: 'generator',
     modality: 'audio',
     supportsSkillImport: true,
+    // Merged rendering (one centered dot, no port-name label) so the Audio
+    // Generator matches the other generators' single drop-zone look.
+    mergeInputs: true,
     inputs: [{ name: 'prompt', type: 'TEXT', optional: true, variadic: true }],
     outputs: [{ name: 'audio', type: 'AUDIO' }],
-    widgets: [{ name: 'kind', type: 'COMBO', options: ['sound', 'music'], default: 'sound' }],
+    widgets: [
+      // Kept in the schema (saved graphs' positional `widgets_values` keep their
+      // meaning) but hidden from the editor: the sound/music flavor follows the
+      // pinned model and the prompt, so a selector would only compete with them.
+      { name: 'kind', type: 'COMBO', options: ['sound', 'music'], default: 'sound' },
+      // Model selector (parity with the other generators): the pinned
+      // Plugins-catalog weight filename picked via the Studio editor's Select
+      // button; the executor maps it onto the bundled Stable Audio template
+      // whose primary weight it is. APPENDED last so saved graphs' positional
+      // `widgets_values` keep their meaning.
+      { name: 'model', type: 'STRING', default: '' },
+    ],
   },
   // ── reviewers: one required reviewed input, verdict + forwarded artifact out ──
   {
