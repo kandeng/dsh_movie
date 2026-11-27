@@ -138,12 +138,14 @@ export const STEP_TEMPLATES: readonly WorkflowTemplate[] = [
         key: 'gen',
         classType: 'VideoGenerator',
         pos: [260, 70],
-        widgets: { mode: 'image_to_video', duration: 4 },
+        widgets: { mode: 'image_to_video', duration: 6 },
       },
     ],
     links: [
+      // Both wires land on the Video Generator's unified REF slot (0): the
+      // adapter splits shot text vs. storyboard image by source output type.
       { from: 'shot', fromSlot: 0, to: 'gen', toSlot: 0 },
-      { from: 'board', fromSlot: 0, to: 'gen', toSlot: 1 },
+      { from: 'board', fromSlot: 0, to: 'gen', toSlot: 0 },
     ],
   },
   {
@@ -197,7 +199,7 @@ export const MOVIE_PIPELINE_TEMPLATE: WorkflowTemplate = {
       key: 'clip',
       classType: 'VideoGenerator',
       pos: [1300, 70],
-      widgets: { mode: 'image_to_video', duration: 4 },
+      widgets: { mode: 'image_to_video', duration: 6 },
     },
     { key: 'montage', classType: 'MediaConcat', pos: [1560, 70] },
     { key: 'save', classType: 'SaveOutput', pos: [1820, 70] },
@@ -209,7 +211,7 @@ export const MOVIE_PIPELINE_TEMPLATE: WorkflowTemplate = {
     { from: 'shot', fromSlot: 0, to: 'board', toSlot: 0 },
     { from: 'asset', fromSlot: 0, to: 'board', toSlot: 1 },
     { from: 'shot', fromSlot: 0, to: 'clip', toSlot: 0 },
-    { from: 'board', fromSlot: 0, to: 'clip', toSlot: 1 },
+    { from: 'board', fromSlot: 0, to: 'clip', toSlot: 0 },
     { from: 'clip', fromSlot: 0, to: 'montage', toSlot: 0 },
     { from: 'montage', fromSlot: 0, to: 'save', toSlot: 0 },
   ],

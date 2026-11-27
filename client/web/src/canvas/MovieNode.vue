@@ -105,8 +105,13 @@ const renderedInputs = computed(() => {
 /** Any input slot connected — drives the single merged dot's filled state. */
 const anyInputConnected = computed(() =>
   renderedInputs.value.some((_, i) => connectedHandles.value.has(`in-${i}`)));
-/** Hover tooltip for the merged handle: every role the one drop zone accepts. */
-const mergedTitle = computed(() =>
+/**
+ * Accessibility label for the merged handle (every role the one drop zone
+ * accepts). Deliberately NOT a hover `title`: the raw `name · TYPE` dump read
+ * as schema jargon next to the visible port labels, so hover tags were dropped
+ * from handles — the info survives here for screen readers only.
+ */
+const mergedAriaLabel = computed(() =>
   renderedInputs.value.map((slot) => `${slot.name || "in"} · ${slot.type}`).join("  |  "));
 
 function asText(value: unknown): string {
@@ -209,7 +214,7 @@ const mediaName = computed(() => {
           ? { mergedAnchor: i > 0, connected: i === 0 && anyInputConnected }
           : { connected: connectedHandles.has(`in-${i}`) }"
         :style="{ top: mergedInputs ? '50%' : `${((i + 1) / (renderedInputs.length + 1)) * 100}%` }"
-        :title="mergedInputs ? (i === 0 ? mergedTitle : '') : `${slot.name || `in ${i}`} · ${slot.type}`">
+        :aria-label="mergedInputs ? (i === 0 ? mergedAriaLabel : undefined) : `${slot.name || `in ${i}`} · ${slot.type}`">
         <span v-if="!mergedInputs" class="portLabel portIn">{{ slot.name || `in ${i}` }}</span>
         <component
           v-if="!mergedInputs || i === 0"
@@ -221,7 +226,7 @@ const mediaName = computed(() => {
         :id="`out-${i}`" type="source" :position="Position.Right"
         class="nodeHandle" :class="{ connected: connectedHandles.has(`out-${i}`) }"
         :style="{ top: `${((i + 1) / ((data.outputs ?? []).length + 1)) * 100}%` }"
-        :title="`${slot.name || `out ${i}`} · ${slot.type}`">
+        :aria-label="`${slot.name || `out ${i}`} · ${slot.type}`">
         <span class="portLabel portOut">{{ slot.name || `out ${i}` }}</span>
         <component :is="connectedHandles.has(`out-${i}`) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
       </Handle>

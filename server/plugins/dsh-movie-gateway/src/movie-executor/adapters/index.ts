@@ -34,7 +34,7 @@
  * @module dsh-movie-gateway/movie-executor/adapters
  */
 
-import { FUNCTIONAL_NODES, MEDIA_SLOT_TYPES, type MovieNodeSchema } from '@dsh-movie/protocol'
+import { FUNCTIONAL_NODES, MEDIA_SLOT_TYPES, REF_SLOT_TYPE, slotCompatible, type MovieNodeSchema } from '@dsh-movie/protocol'
 import { ModelUnavailableError } from '../errors.ts'
 import {
   registerNodeHandlers,
@@ -102,10 +102,13 @@ function resolveSlotText(ctx: NodeHandlerContext, value: unknown): string {
 /** Assemble display strings for every resolved TEXTUAL input, in declared slot
  *  order. Media slots (IMAGE/VIDEO/AUDIO — e.g. TextGenerator's Phase-2 vision
  *  slot) are excluded: their refs travel to the seam as an ordered array under
- *  their own key and must never be stringified into the prompt body. */
+ *  their own key and must never be stringified into the prompt body. The
+ *  unified REF slot is excluded too: its internal adapter (below) already
+ *  splits it into `prompt` / `image`, and stringifying it whole would leak
+ *  reference URLs into the composed sections. */
 function resolvedInputsBySlot(schema: MovieNodeSchema, ctx: NodeHandlerContext): string[] {
   return schema.inputs
-    .filter((slot): boolean => !MEDIA_SLOT_TYPES.includes(slot.type))
+    .filter((slot): boolean => !MEDIA_SLOT_TYPES.includes(slot.type) && slot.type !== REF_SLOT_TYPE)
     .map((slot): string => resolveSlotText(ctx, ctx.inputs[slot.name]))
     .filter((text): boolean => text !== '')
 }
@@ -158,6 +161,34 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
       // through unchanged (resolveValue is identity for non-links).
       const linked: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(ctx.inputs)) {
+        const slotType = schema.inputs.find((slot): boolean => slot.name === key)?.type
+        // The unified REF slot (the Video Generator's single mixed-modality
+        // port) carries an INTERNAL ADAPTER: each link is routed by its
+        // SOURCE's declared output type — TEXT-family elements join into the
+        // `prompt` key, IMAGE-family elements collect into the ordered
+        // `image` array. Those are exactly the two keys promptOf() and
+        // imageRefs() consume, so the providers (and the t2v/i2v mode
+        // derivation) stay unaware the slots were ever unified. A literal
+        // (non-link) value degrades to prompt text.
+        if (slotType === REF_SLOT_TYPE) {
+          const single = asLink(value)
+          const list = asLinkList(value) ?? (single === undefined ? [] : [single])
+          const texts: string[] = []
+          const refs: unknown[] = []
+          for (const link of list) {
+            const sourceType = ctx.linkSourceType?.(link[0], link[1])
+            const resolved = ctx.resolve(link[0], link[1])
+            if (sourceType !== undefined && slotCompatible(sourceType, 'IMAGE')) refs.push(resolved)
+            else texts.push(display(resolved))
+          }
+          if (list.length === 0 && value !== undefined && value !== null) {
+            const literal = display(value)
+            if (literal !== '') texts.push(literal)
+          }
+          if (texts.length > 0) linked['prompt'] = texts.join('\n\n')
+          if (refs.length > 0) linked['image'] = refs
+          continue
+        }
         const list = asLinkList(value)
         if (list === undefined) {
           // A single link tuple or a widget literal resolves exactly as before.
@@ -171,8 +202,7 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
         //  - a MEDIA slot (IMAGE/VIDEO/AUDIO) stays an ORDERED ARRAY of refs, so
         //    the provider consumes each reference by role and never stringifies a
         //    URL into the prompt (e.g. an Image Generator's several input images).
-        const slotType = schema.inputs.find((slot): boolean => slot.name === key)?.type ?? 'TEXT'
-        const textual = slotType === 'TEXT' || slotType === 'SCRIPT' || slotType === '*'
+        const textual = slotType === 'TEXT' || slotType === 'SCRIPT' || slotType === '*' || slotType === undefined
         linked[key] = textual ? resolveSlotText(ctx, value) : resolveSlotValues(ctx, value)
       }
       // An EMPTY prompt widget must not clobber a linked prompt slot. The media

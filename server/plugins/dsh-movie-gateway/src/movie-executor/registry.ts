@@ -136,6 +136,13 @@ export interface NodeHandlerContext {
   inputs: Record<string, unknown>
   /** Resolves link tuples to upstream artifacts (topo order guarantees presence). */
   resolve: UpstreamResolver
+  /**
+   * Declared output-slot type of a link's source (e.g. `TEXT`, `STORYBOARD`),
+   * or `undefined` when the source class or slot is not protocol-declared.
+   * The unified `REF` slot adapter routes each incoming link by modality
+   * through this seam (text elements → prompt, image elements → references).
+   */
+  linkSourceType?: ((sourceId: string, slotIndex: number) => string | undefined) | undefined
   /** The D15 model-availability gate consulted before any model call. */
   availability: ModelAvailability
   /** Real LLM text seam (generalizes the legacy `StepTextGenerator`). */

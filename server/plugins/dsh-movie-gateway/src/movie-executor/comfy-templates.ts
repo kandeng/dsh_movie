@@ -148,26 +148,29 @@ const PRIMARY_WEIGHT_FIELDS = ['ckpt_name', 'unet_name'] as const;
 
 /**
  * Resolve a pinned model id (a Plugins-catalog checkpoint filename, written by
- * the Studio's image-model selector into the `model` widget) to the bundled
- * template whose PRIMARY weight it is, so the whole validated bundle (weights +
- * paired VAE, `meta.vae`) runs instead of a raw filename swap.
+ * the Studio's model selector into the `model` widget) to the bundled template
+ * whose PRIMARY weight it is, so the whole validated bundle (weights + paired
+ * VAE, `meta.vae`) runs instead of a raw filename swap.
  *
- * Only image-modality templates are candidates (the selector serves the Image
- * Generator); basename comparison keeps subfolder-prefixed inventories matching
- * bare template values, exactly like {@link missingModelFiles}.
+ * Only templates of the requested modality are candidates (the image selector
+ * serves the Image Generator, the video one the Video Generator); basename
+ * comparison keeps subfolder-prefixed inventories matching bare template
+ * values, exactly like {@link missingModelFiles}.
  *
+ * @param modality - which family of bundled templates may capture the pin.
  * @returns the matching template, or `undefined` when no bundled template owns
- *   that weight (the caller then falls back to the `variant` widget).
+ *   that weight (the caller then falls back to the derived bundle).
  */
 export function templateByModelFile(
   templates: ComfyTemplates,
   file: string,
+  modality: 'image' | 'video' = 'image',
 ): ComfyTemplate | undefined {
   const target = baseName(file.trim());
   if (target === '') return undefined;
   for (const key of TEMPLATE_KEYS) {
     const template = templates[key];
-    if (template === undefined || template.meta.modality !== 'image') continue;
+    if (template === undefined || template.meta.modality !== modality) continue;
     for (const node of Object.values(template.prompt)) {
       for (const field of PRIMARY_WEIGHT_FIELDS) {
         const value = node.inputs[field];

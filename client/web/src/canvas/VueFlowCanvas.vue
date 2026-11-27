@@ -24,7 +24,7 @@ import {
   type NodeMouseEvent,
 } from "@vue-flow/core";
 import { IconUnlink } from "@tabler/icons-vue";
-import { FUNCTIONAL_NODES, MOVIE_NODES, type WorkflowGroup } from "@dsh-movie/protocol";
+import { FUNCTIONAL_NODES, MOVIE_NODES, slotCompatible, type WorkflowGroup } from "@dsh-movie/protocol";
 import MovieNode from "@/canvas/MovieNode.vue";
 import canvasEmpty from "@/canvas/canvasEmpty.vue";
 import { boundingFromDrag, groupColor } from "@/canvas/groupOverlay";
@@ -192,9 +192,12 @@ function handleSlot(handle?: string | null): number {
 
 /**
  * Drag-connect type gate: a TEXT output must not land on an IMAGE input. Roles
- * are schema slot types read off the two endpoint nodes; the click-click
- * connect tool applies the same rule through its compatible-pair search, so
- * both wiring gestures refuse the same nonsense edges.
+ * are schema slot types read off the two endpoint nodes, judged by the
+ * protocol's `slotCompatible` (subtypes flow up, the wildcard `*` matches
+ * anything, and the mixed-modality `REF` supertype accepts the TEXT and IMAGE
+ * families); the click-click connect tool applies the same rule through its
+ * compatible-pair search, so both wiring gestures refuse the same nonsense
+ * edges.
  */
 function isValidConnection(connection: Connection): boolean {
   const source = nodes.value.find((node) => node.id === connection.source)?.data as MovieNodeData | undefined;
@@ -205,13 +208,10 @@ function isValidConnection(connection: Connection): boolean {
   // edge to the matching role on connect). Without this an IMAGE dragged onto
   // the merged handle would be rejected by slot 0's TEXT type.
   if (mergesInputs(target?.classType ?? "")) {
-    return (target?.inputs ?? []).some((slot) => {
-      const inType = slot.type ?? "*";
-      return outType === "*" || inType === "*" || outType === inType;
-    });
+    return (target?.inputs ?? []).some((slot) => slotCompatible(outType, slot.type ?? "*"));
   }
   const inType = target?.inputs?.[handleSlot(connection.targetHandle)]?.type ?? "*";
-  return outType === "*" || inType === "*" || outType === inType;
+  return slotCompatible(outType, inType);
 }
 function disconnect(edgeId: string) {
   removeEdges(edgeId);

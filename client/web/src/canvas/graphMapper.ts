@@ -164,7 +164,8 @@ const SCHEMA_BY_TYPE = new Map<string, MovieNodeSchema>(
 
 /**
  * Modality color table for slot handles / badges (Phase-5 §6). Keyed by the
- * four base media types; a legacy subtype (SCRIPT, CLIP, …) resolves to its
+ * four base media types plus the mixed-modality `REF` supertype (a combined
+ * prompt + reference port); a legacy subtype (SCRIPT, CLIP, …) resolves to its
  * base color via {@link SUBTYPE_OF}, and the wildcard `*` gets a neutral hue.
  */
 const BASE_SLOT_COLORS: Readonly<Record<string, string>> = {
@@ -172,6 +173,9 @@ const BASE_SLOT_COLORS: Readonly<Record<string, string>> = {
   IMAGE: "#52c41a",
   VIDEO: "#9254de",
   AUDIO: "#faad14",
+  // REF accepts TEXT- and IMAGE-family links; teal keeps it distinct from
+  // both blues and greens at a glance.
+  REF: "#13c2c2",
 };
 /** Neutral color for the wildcard (`*`) and any unknown slot type. */
 const ANY_SLOT_COLOR = "#909399";
@@ -224,13 +228,16 @@ export function schemaFor(classType: string): MovieNodeSchema | undefined {
 }
 
 /**
- * True when a class type presents its several input slots as ONE visible drop
+ * True when a class type presents its input slots as ONE visible drop
  * handle (schema `mergeInputs`). The slots stay distinct in storage/execution;
  * only the canvas rendering merges them and connect auto-routes by type.
+ * A single-input class may opt in too (the Video Generator's unified REF
+ * slot): the merged render drops the per-port name label, matching the other
+ * generators' clean one-dot look.
  */
 export function mergesInputs(classType: string): boolean {
   const schema = SCHEMA_BY_TYPE.get(classType);
-  return schema?.mergeInputs === true && (schema.inputs?.length ?? 0) > 1;
+  return schema?.mergeInputs === true && (schema.inputs?.length ?? 0) >= 1;
 }
 
 /**

@@ -14,13 +14,16 @@
  *  - MOVIE_NODES: the six legacy step nodes keep step 1..6, are all
  *    `deprecated: true`, and carry no family/modality;
  *  - slot system: SUBTYPE_OF is acyclic with base values in MEDIA_SLOT_TYPES,
- *    and slotCompatible honours subtyping, wildcard, and direction rules;
+ *    and slotCompatible honours subtyping, wildcard, direction rules, and the
+ *    mixed-modality REF supertype;
  *  - buildObjectInfo over the merged registry advertises all 21 class types,
  *    routes optional inputs to `input.optional`, and flags deprecated nodes;
  *  - templates: every class type is known, link endpoints exist, slot indices
  *    are in range, widget overrides match schema widgets, every link is
  *    type-compatible, movie-pipeline ends in SaveOutput, and the last step
- *    template is named Montage (D10).
+ *    template is named Montage (D10);
+ *  - migrateGraph: legacy VideoGenerator graphs (two input slots) converge
+ *    onto the unified REF slot, idempotently and without touching other nodes.
  *
  * Run from the `server/` directory:
  *   node scripts/verify-node-registry.ts
@@ -31,12 +34,15 @@ import {
   FUNCTIONAL_NODES,
   MEDIA_SLOT_TYPES,
   MOVIE_NODES,
+  REF_SLOT_TYPE,
   SUBTYPE_OF,
   WORKFLOW_TEMPLATES,
   buildObjectInfo,
+  migrateGraph,
   slotCompatible,
   templateById,
   type MovieNodeSchema,
+  type WorkflowGraph,
 } from '../../protocol/src/index.ts'
 
 let failures = 0
@@ -118,6 +124,12 @@ check('slotCompatible: AUDIO → TEXT rejected (cross-modality)', !slotCompatibl
 check(`slotCompatible: wildcard source ${ANY_SLOT_TYPE} → TEXT`, slotCompatible(ANY_SLOT_TYPE, 'TEXT'))
 check(`slotCompatible: IMAGE → wildcard target ${ANY_SLOT_TYPE}`, slotCompatible('IMAGE', ANY_SLOT_TYPE))
 check('slotCompatible: identity TEXT → TEXT', slotCompatible('TEXT', 'TEXT'))
+check(`slotCompatible: TEXT → ${REF_SLOT_TYPE} (supertype widens to the text family)`, slotCompatible('TEXT', REF_SLOT_TYPE))
+check(`slotCompatible: SHOT_PLAN → ${REF_SLOT_TYPE} (subtypes flow up transitively)`, slotCompatible('SHOT_PLAN', REF_SLOT_TYPE))
+check(`slotCompatible: STORYBOARD → ${REF_SLOT_TYPE} (image family)`, slotCompatible('STORYBOARD', REF_SLOT_TYPE))
+check(`slotCompatible: VIDEO → ${REF_SLOT_TYPE} rejected (a clip is never a generator input)`, !slotCompatible('VIDEO', REF_SLOT_TYPE))
+check(`slotCompatible: ${REF_SLOT_TYPE} → TEXT rejected (no narrowing from the supertype)`, !slotCompatible(REF_SLOT_TYPE, 'TEXT'))
+check(`slotCompatible: wildcard source ${ANY_SLOT_TYPE} → ${REF_SLOT_TYPE}`, slotCompatible(ANY_SLOT_TYPE, REF_SLOT_TYPE))
 
 // ── 4. object_info projection (D1/D2) ──
 
@@ -126,10 +138,16 @@ check('object_info advertises all 21 class types', Object.keys(info).length === 
 check('object_info flags exactly the six legacy nodes deprecated', Object.entries(info).filter(([, entry]): boolean => entry.deprecated).length === 6)
 check(
   'object_info routes optional inputs to input.optional',
-  // ImageGenerator carries the model selector (`variant`, a COMBO widget →
-  // input.required) plus the appended `skill` input slot (→ input.optional).
+  // ImageGenerator carries the model-selector widgets (`variant` COMBO plus
+  // the appended STRING `model`, both → input.required) and its optional
+  // input slots (→ input.optional).
   Object.keys(info['ImageGenerator']!.input.optional).sort().join(',') === 'image,prompt,skill'
-    && Object.keys(info['ImageGenerator']!.input.required).sort().join(',') === 'mode,variant',
+    && Object.keys(info['ImageGenerator']!.input.required).sort().join(',') === 'mode,model,variant',
+)
+check(
+  'object_info: VideoGenerator advertises the unified REF slot and requires mode, duration and the appended model widget',
+  Object.keys(info['VideoGenerator']!.input.optional).sort().join(',') === 'in'
+    && Object.keys(info['VideoGenerator']!.input.required).sort().join(',') === 'duration,mode,model',
 )
 check(
   'object_info advertises the variant COMBO with its options and qwen default',
@@ -228,6 +246,63 @@ if (asset !== undefined) {
     `${promptLink?.from ?? '?'} -> slot 0 (${genInputs[0]?.name ?? '?'})`,
   )
 }
+
+// ── 7. unified REF slot + legacy-graph migration ──
+
+const video = byClassType.get('VideoGenerator')
+check(
+  'VideoGenerator declares exactly one variadic REF input named `in`',
+  video?.inputs.length === 1
+    && video.inputs[0]!.name === 'in'
+    && video.inputs[0]!.type === REF_SLOT_TYPE
+    && video.inputs[0]!.variadic === true,
+  (video?.inputs ?? []).map((slot): string => `${slot.name}:${slot.type}`).join(','),
+)
+
+const legacyGraph: WorkflowGraph = {
+  last_node_id: 3,
+  last_link_id: 2,
+  nodes: [
+    { id: 1, type: 'TextInput', pos: [0, 0], size: [230, 130], flags: 0, order: 0, mode: 0, outputs: [{ name: 'text', type: 'TEXT', link: 1, links: [1], slot_index: 0 }] },
+    { id: 2, type: 'ImageGenerator', pos: [0, 150], size: [230, 130], flags: 0, order: 1, mode: 0, outputs: [{ name: 'image', type: 'IMAGE', link: 2, links: [2], slot_index: 0 }] },
+    {
+      id: 3,
+      type: 'VideoGenerator',
+      pos: [260, 70],
+      size: [230, 130],
+      flags: 0,
+      order: 2,
+      mode: 0,
+      inputs: [
+        { name: 'prompt', type: 'TEXT', link: 1 },
+        { name: 'image', type: 'IMAGE', link: 2 },
+      ],
+      outputs: [{ name: 'clip', type: 'VIDEO', link: null }],
+    },
+  ],
+  links: [
+    [1, 1, 0, 3, 0],
+    [2, 2, 0, 3, 1],
+  ],
+}
+const migrated = migrateGraph(legacyGraph)
+check(
+  'migrateGraph folds legacy VideoGenerator slot-1 links onto the unified slot 0',
+  migrated.links?.length === 2 && migrated.links.every((tuple): boolean => Number(tuple[4]) === 0),
+  JSON.stringify(migrated.links),
+)
+const migratedVideo = migrated.nodes.find((node): boolean => node.type === 'VideoGenerator')
+check(
+  'migrateGraph rewrites the stored inputs to one REF slot whose primary link is the oldest',
+  migratedVideo?.inputs?.length === 1
+    && migratedVideo.inputs[0]!.name === 'in'
+    && migratedVideo.inputs[0]!.type === REF_SLOT_TYPE
+    && migratedVideo.inputs[0]!.link === 1,
+  JSON.stringify(migratedVideo?.inputs),
+)
+check('migrateGraph is idempotent (re-running returns the same object)', migrateGraph(migrated) === migrated)
+const untouched: WorkflowGraph = { nodes: [{ id: 1, type: 'TextInput', pos: [0, 0], size: [230, 130], flags: 0, order: 0, mode: 0 }], links: [] }
+check('migrateGraph passes graphs without unified classes through unchanged', migrateGraph(untouched) === untouched)
 
 process.stdout.write(failures === 0 ? '\nAll node-registry checks passed.\n' : `\n${failures} check(s) FAILED.\n`)
 process.exit(failures === 0 ? 0 : 1)

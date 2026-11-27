@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { translate } from "@dsh-movie/i18n/vue";
 import type { NodeRunStatus, WorkflowGraph, WorkflowGroup, MovieStepResult, MovieStepStatus, MovieStepId, ImportedSkillRef, SkillTarget } from "@dsh-movie/protocol";
-import { FUNCTIONAL_NODES, MOVIE_NODES, templateById } from "@dsh-movie/protocol";
+import { FUNCTIONAL_NODES, MOVIE_NODES, slotCompatible, templateById } from "@dsh-movie/protocol";
 import groupChat from "@/components/groupChat.vue";
 import modeSwitcher from "@/components/modeSwitcher.vue";
 import { useAuthStore } from "@/stores/auth";
@@ -705,7 +705,7 @@ function setDraftDescription(value: string): void {
  *  chip/empty-hint panel below it): the generators' craft comes from their
  *  linked references + pinned model, not imported craft skills. Already-imported
  *  refs stay in `properties.importedSkills` and keep applying at run time. */
-const SKILL_IMPORT_HIDDEN: readonly string[] = ["ImageGenerator", "TextGenerator"];
+const SKILL_IMPORT_HIDDEN: readonly string[] = ["ImageGenerator", "TextGenerator", "VideoGenerator"];
 
 /** True when the edited node's schema opts into skill imports (D7/D11). */
 const editorCanImport = computed(() =>
@@ -860,6 +860,9 @@ const editorModelLabel = computed<string>(() => {
 const HIDDEN_PARAM_WIDGETS: Record<string, readonly string[]> = {
   ImageGenerator: ["mode", "variant"],
   TextGenerator: ["prompt"],
+  // The clip mode follows the linked storyboard frame (the provider derives
+  // i2v/t2v from it), so an editor COMBO would be a second, competing source.
+  VideoGenerator: ["mode"],
 };
 
 /**
@@ -874,6 +877,18 @@ const editorParamWidgets = computed<Array<{ widget: NodeWidgetView; index: numbe
     .map((widget, index) => ({ widget, index }))
     .filter((entry) => entry.widget.name !== "model" && !hidden.includes(entry.widget.name));
 });
+
+/** Row-4b group title: the Video Generator's only visible parameter is the
+ *  clip length, so the generic "Content" title is noise there — the group is
+ *  named after its single widget instead ("Duration"). */
+const editorParamGroupLabel = computed<string>(() =>
+  editorClassType.value === "VideoGenerator" ? translate("时长") : translate("内容"),
+);
+
+/** True when a widget's raw name would only repeat the group title above it. */
+function widgetLabelRedundant(name: string): boolean {
+  return editorClassType.value === "VideoGenerator" && name === "duration";
+}
 
 /** Model selector: stash the pick context and route to /plugins Models pick-mode. */
 function startModelPick(): void {
@@ -1222,9 +1237,16 @@ interface ConnectPair {
   type: string;
 }
 
-/** Slot types connect when equal, or when either side is the `*` wildcard. */
+/**
+ * Slot types connect per the protocol's `slotCompatible`: equal types, subtypes
+ * flowing up (SCRIPT → TEXT, STORYBOARD → IMAGE, …), the `*` wildcard either
+ * side, and the mixed-modality `REF` supertype accepting the TEXT and IMAGE
+ * families (the Video Generator's unified port). Same rule as the drag-connect
+ * gate and the gateway validator, so no gesture can draw an edge another
+ * would reject.
+ */
 function slotTypesMatch(outType: string, inType: string): boolean {
-  return outType === "*" || inType === "*" || outType === inType;
+  return slotCompatible(outType, inType);
 }
 
 /**
@@ -1947,7 +1969,7 @@ function goLogin() {
                A text source additionally offers the full-height focus editor (D2). -->
           <div v-else-if="editorParamWidgets.length > 0" class="fieldGroup">
             <div class="outputLabel">
-              {{ translate("内容") }}
+              {{ editorParamGroupLabel }}
               <el-button
                 v-if="editorIsSource"
                 class="openButton"
@@ -1973,7 +1995,7 @@ function goLogin() {
               accept=".md,.markdown,.txt,text/plain,text/markdown"
               @change="onTextFile" />
             <div v-for="{ widget, index } in editorParamWidgets" :key="widget.name" class="fieldRow">
-              <label class="fieldLabel">{{ widget.name }}</label>
+              <label v-if="!widgetLabelRedundant(widget.name)" class="fieldLabel">{{ widget.name }}</label>
               <el-input
                 v-if="widget.type === 'STRING' && widget.multiline === true"
                 class="nowheel"
@@ -3234,8 +3256,12 @@ function goLogin() {
   // (primary-light-5) and blue text at the small-tag font size; the fill is
   // forced transparent so the chip reads as an outline, exactly like the
   // model chip above it. The rounder corner radius from the previous pass stays.
+  // The full-strength primary text/border read too shining next to the model
+  // chip's soft green, so both drop to lighter tints (light-3 text, light-7 ring).
   --el-tag-border-radius: var(--ui-radius-large);
   --el-tag-bg-color: transparent;
+  --el-tag-border-color: var(--el-color-primary-light-7);
+  --el-tag-text-color: var(--el-color-primary-light-3);
   --el-tag-font-size: var(--el-font-size-extra-small);
 }
 

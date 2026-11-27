@@ -29,6 +29,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join, resolve, sep } from 'node:path'
 import type { MatrixUserId, WorkflowGraph, WorkflowRecord } from '@dsh-movie/protocol'
 import type { CommitMeta, DraftState } from '@dsh-movie/protocol'
+// Schema migrations run at EVERY graph read/write boundary below: rooms saved
+// before a catalog slot change (e.g. the Video Generator's unified REF slot)
+// converge onto the live schema in-flight, while immutable history files on
+// disk are never rewritten.
+import { migrateGraph } from '@dsh-movie/protocol'
 
 /** The outcome of a direct graph write (`workflow/put`). */
 export type WorkspacePutResult =
@@ -153,7 +158,8 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
   }
 
   function readHead(roomId: string): WorkflowRecord | null {
-    return readJson<WorkflowRecord>(join(roomDir(roomId), 'head.json'))
+    const record = readJson<WorkflowRecord>(join(roomDir(roomId), 'head.json'))
+    return record === null ? null : { ...record, graph: migrateGraph(record.graph) }
   }
 
   function readCommits(roomId: string): CommitMeta[] {
@@ -165,7 +171,8 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
   }
 
   function readDraftGraph(roomId: string): WorkflowGraph | null {
-    return readJson<WorkflowGraph>(join(roomDir(roomId), 'draft.json'))
+    const graph = readJson<WorkflowGraph>(join(roomDir(roomId), 'draft.json'))
+    return graph === null ? null : migrateGraph(graph)
   }
 
   /** Append one full snapshot to history + the commits index; update HEAD. */
@@ -234,7 +241,8 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
   }
 
   function readSnapshot(roomId: string, name: string): WorkflowGraph | null {
-    return readJson<WorkflowGraph>(join(snapshotDir(roomId), name))
+    const graph = readJson<WorkflowGraph>(join(snapshotDir(roomId), name))
+    return graph === null ? null : migrateGraph(graph)
   }
 
   function dropSnapshot(roomId: string, name: string): void {
@@ -268,7 +276,7 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
       if (baseRev !== undefined && head !== null && baseRev !== head.rev) {
         return { ok: false, reason: 'conflict', current: head }
       }
-      const record = appendCommit(roomId, graph, author, message)
+      const record = appendCommit(roomId, migrateGraph(graph), author, message)
       return { ok: true, record }
     },
 
@@ -284,7 +292,7 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
       const snapshot = readJson<WorkflowGraph>(join(historyDir(roomId), `${rev}.json`))
       if (snapshot === null) return null
       const text = message !== '' ? message : `Revert to r${rev}`
-      return appendCommit(roomId, snapshot, author, text)
+      return appendCommit(roomId, migrateGraph(snapshot), author, text)
     },
 
     listCommits(roomId: string): CommitMeta[] {
@@ -296,7 +304,7 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
       if (commit === undefined) return null
       const graph = readJson<WorkflowGraph>(join(historyDir(roomId), `${rev}.json`))
       if (graph === null) return null
-      return { commit, graph }
+      return { commit, graph: migrateGraph(graph) }
     },
 
     readDraft(roomId: string): DraftState {
@@ -316,7 +324,7 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
       for (const name of index.redo) dropSnapshot(roomId, name)
       index.redo = []
       persistDraftIndex(roomId, index)
-      writeJson(join(roomDir(roomId), 'draft.json'), graph)
+      writeJson(join(roomDir(roomId), 'draft.json'), migrateGraph(graph))
       return buildDraftState(roomId)
     },
 

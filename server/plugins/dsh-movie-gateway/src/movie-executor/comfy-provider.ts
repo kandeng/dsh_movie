@@ -303,9 +303,9 @@ function modelsOf(value: unknown): ModelOverrides | undefined {
   return Object.keys(out).length > 0 ? out : undefined
 }
 
-/** Wan frame count for a duration in seconds (16 fps, 4n+1 frames). */
+/** Wan frame count for a duration in seconds (16 fps, 4n+1 frames, 15 s cap). */
 function wanFrames(seconds: number): number {
-  const raw = Math.min(Math.max(Math.round(seconds * 16), 9), 129)
+  const raw = Math.min(Math.max(Math.round(seconds * 16), 9), 241)
   return 4 * Math.round((raw - 1) / 4) + 1
 }
 
@@ -713,16 +713,26 @@ export function createComfyProvider(
     },
 
     async generate(classType: string, inputs: Record<string, unknown>, hooks?: MediaHooks): Promise<MediaGeneration> {
-      // Reference images are parsed BEFORE template selection: the Image
-      // Generator's mode is auto-derived from them (the `mode` widget no longer
+      // Reference images are parsed BEFORE template selection: both media
+      // generators derive their mode from them (the `mode` widget no longer
       // decides it — the editor hides the selector), and VideoGenerator maps
-      // its mode widget onto the i2v/t2v template hint.
+      // the derived mode onto the i2v/t2v template hint.
       const refImages = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? imageRefs(inputs['image']) : []
       let mode = text(inputs['mode'])
       if (classType === 'ImageGenerator') {
         mode = refImages.length > 0 ? 'image_to_image' : 'text_to_image'
         logger.info(
           '[movie-executor] ImageGenerator mode auto-derived: %s (%d linked reference image(s))',
+          mode,
+          refImages.length,
+        )
+      } else if (classType === 'VideoGenerator') {
+        // Same rule as the Image Generator: a linked storyboard frame means
+        // i2v, otherwise t2v. The stored widget value only backs legacy graphs
+        // whose editor still showed the COMBO before it was hidden.
+        mode = refImages.length > 0 ? 'image_to_video' : 'text_to_video'
+        logger.info(
+          '[movie-executor] VideoGenerator mode auto-derived: %s (%d linked reference image(s))',
           mode,
           refImages.length,
         )
@@ -733,20 +743,33 @@ export function createComfyProvider(
         else if (mode === 'text_to_video') hint = 't2v'
       }
       let template = templateFor(classType, templates, hint)
-      // Phase-3 image model selector: a pinned `model` id (a Plugins-catalog
-      // checkpoint filename) selects the bundled template whose PRIMARY weight
-      // it is, so the paired VAE travels with it; a pin that matches no bundled
-      // template keeps the variant widget's bundle (and says so in the log).
-      const pinned = classType === 'ImageGenerator' ? text(inputs['model']) : undefined
+      // Phase-3 model selector: a pinned `model` id (a Plugins-catalog weight
+      // filename) selects the bundled template whose PRIMARY weight it is, so
+      // the paired VAE travels with it; a pin that matches no bundled template
+      // keeps the derived bundle (and says so in the log). For the Video
+      // Generator the pin must AGREE with the auto-derived mode — each video
+      // mode owns exactly one bundled template today, so a VACE pin on a
+      // reference-less run cannot drag it into the i2v graph (whose LoadImage
+      // would have nothing to load), and vice versa.
+      const pinned = classType === 'ImageGenerator' || classType === 'VideoGenerator' ? text(inputs['model']) : undefined
       if (pinned !== undefined && template !== undefined) {
-        const byModel = templateByModelFile(templates, pinned)
-        if (byModel !== undefined) template = byModel
-        else {
+        const byModel = templateByModelFile(templates, pinned, classType === 'VideoGenerator' ? 'video' : 'image')
+        if (byModel === undefined) {
           logger.warn(
-            '[movie-executor] pinned image model %s matches no bundled template; keeping variant %s',
+            '[movie-executor] pinned %s model %s matches no bundled template; keeping %s',
+            classType === 'VideoGenerator' ? 'video' : 'image',
             pinned,
             hint ?? 'default',
           )
+        } else if (classType === 'VideoGenerator' && byModel !== template) {
+          logger.warn(
+            '[movie-executor] pinned video model %s implies template %s but the linked references derive %s; running the derived bundle',
+            pinned,
+            keyOf(templates, byModel) ?? '?',
+            keyOf(templates, template) ?? '?',
+          )
+        } else {
+          template = byModel
         }
       }
       if (template === undefined) throw new Error(`comfy provider: unsupported step ${classType}`)

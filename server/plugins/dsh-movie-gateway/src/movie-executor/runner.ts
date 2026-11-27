@@ -24,7 +24,7 @@
 import type { ExecMessage, PromptGraph, PromptGraphNode } from '@dsh-movie/protocol'
 import type { JobHooks, JobId, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MediaProvider } from './media-provider.ts'
-import { handlerFor, modalityOf, type NodeHandler, type NodeHandlerContext } from './registry.ts'
+import { handlerFor, modalityOf, outputSlotSchema, type NodeHandler, type NodeHandlerContext } from './registry.ts'
 import { isModelUnavailable } from './errors.ts'
 import type { ModelAvailability } from './model-catalog.ts'
 import type { ReviewFn } from './llm-text.ts'
@@ -225,6 +225,13 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
               const ctx: NodeHandlerContext = {
                 inputs: currentInputs,
                 resolve: (sourceId: string, slotIndex: number): unknown => outputsByNode.get(sourceId)?.[slotIndex],
+                // Declared source-slot type for the unified REF slot adapter:
+                // the prompt graph carries only ids, so look the producer's
+                // class up and ask the registry for its output slot schema.
+                linkSourceType: (sourceId: string, slotIndex: number): string | undefined => {
+                  const sourceType = graph[sourceId]?.class_type
+                  return sourceType === undefined ? undefined : outputSlotSchema(sourceType, slotIndex)?.type
+                },
                 availability: deps.availability,
                 ...(deps.stepText === undefined ? {} : { text: deps.stepText }),
                 ...(deps.review === undefined ? {} : { review: deps.review }),

@@ -365,6 +365,35 @@ async function availabilityChecks(): Promise<void> {
     videoOut?.artifact ?? 'none',
   )
 
+  // The unified REF slot: ONE variadic `in` port carries mixed-modality links;
+  // the adapter's internal split routes each link by its SOURCE output type —
+  // TEXT-family elements join into `prompt`, IMAGE-family elements collect
+  // into the ordered `image` array (the keys promptOf/imageRefs consume).
+  let capturedInputs: Record<string, unknown> = {}
+  const captureMedia = {
+    async generate(_classType: string, inputs: Record<string, unknown>): Promise<{ artifact?: string; media?: string }> {
+      capturedInputs = inputs
+      return { artifact: 'rendered:VideoGenerator', media: 'video' }
+    },
+  }
+  const refOut = await handlerFor('VideoGenerator')?.run(handlerCtx(withVideo, {
+    inputs: { in: [['1', 0], ['2', 0], ['3', 0]], mode: 'image_to_video', duration: 6 },
+    resolve: (id: string): unknown =>
+      id === '1' ? 'shot text' : id === '2' ? 'https://img/frame-a.png' : 'https://img/frame-b.png',
+    linkSourceType: (id: string): string | undefined =>
+      id === '1' ? 'SHOT_PLAN' : id === '2' || id === '3' ? 'STORYBOARD' : undefined,
+    media: captureMedia,
+  }))
+  check(
+    'REF adapter: text links join into `prompt`, image links collect into `image` in link order',
+    capturedInputs['prompt'] === 'shot text'
+      && Array.isArray(capturedInputs['image'])
+      && (capturedInputs['image'] as unknown[]).join(',') === 'https://img/frame-a.png,https://img/frame-b.png'
+      && capturedInputs['in'] === undefined
+      && refOut?.artifact === 'rendered:VideoGenerator',
+    JSON.stringify({ prompt: capturedInputs['prompt'], image: capturedInputs['image'], in: capturedInputs['in'] }),
+  )
+
   // The text generator seam (real LLM) and its honest canned fallback.
   const textHandler = handlerFor('TextGenerator')
   const textLlm = await textHandler?.run(handlerCtx(bailianOnly, { inputs: { prompt: 'write a logline' }, text: async (classType: string): Promise<string> => `llm:${classType}` }))

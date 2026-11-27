@@ -90,7 +90,9 @@ export interface MovieNodeSchema {
    * storage, and executor; only the rendering merges them. On connect the bridge
    * auto-routes each edge to the first input slot whose type is compatible with
    * the source output (TEXT -> `prompt`, IMAGE -> `image`, ...), so the user never
-   * picks a port by hand. Meaningless for a node with fewer than two inputs.
+   * picks a port by hand. Also honored on a SINGLE-input node (the Video
+   * Generator's unified REF slot): the merged render hides the per-port name
+   * label, keeping the generator family's one-dot look consistent.
    */
   mergeInputs?: boolean
   /** Connection inputs. */
@@ -329,14 +331,35 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     family: 'generator',
     modality: 'video',
     supportsSkillImport: true,
+    // Merged rendering (one centered dot, no port-name label) so the Video
+    // Generator matches the other generators' single drop-zone look; the REF
+    // slot accepts TEXT- and IMAGE-family links and routes by source type.
+    mergeInputs: true,
     inputs: [
-      { name: 'prompt', type: 'TEXT', optional: true, variadic: true },
-      { name: 'image', type: 'IMAGE', optional: true },
+      // ONE mixed-modality reference slot: accepts any TEXT-family or
+      // IMAGE-family link (supertype `REF`, special-cased in slotCompatible).
+      // The gateway adapter routes each resolved link by its SOURCE output
+      // type — text elements join into the `prompt` key, image elements
+      // collect into the `image` key (exactly what the media providers
+      // consume), so clip mode (t2v/i2v) still follows the wired storyboard
+      // frame just like the old two-slot (`prompt` + `image`) layout.
+      { name: 'in', type: 'REF', optional: true, variadic: true },
     ],
     outputs: [{ name: 'clip', type: 'VIDEO' }],
     widgets: [
       { name: 'mode', type: 'COMBO', options: ['text_to_video', 'image_to_video'], default: 'image_to_video' },
-      { name: 'duration', type: 'FLOAT', default: 4, min: 0.5, max: 60 },
+      // Clip length in seconds: 6 s default, 15 s ceiling. The ceiling is the
+      // Wan frame budget (16 fps, 4n+1): 15 s = 241 frames, which the bundled
+      // 832x480 Wan templates render frame-accurately on the H20 pool; the
+      // Bailian video seam sends no duration at all (model-decided length).
+      { name: 'duration', type: 'FLOAT', default: 6, min: 0.5, max: 15 },
+      // Model selector (parity with the Image Generator): the pinned
+      // Plugins-catalog weight filename picked via the Studio editor's Select
+      // button. The executor maps it onto the bundled video template whose
+      // primary weight it is, provided it agrees with the auto-derived mode
+      // (the editor hides `mode`: a linked storyboard frame means i2v).
+      // APPENDED last so saved graphs' positional `widgets_values` keep meaning.
+      { name: 'model', type: 'STRING', default: '' },
     ],
   },
   {
@@ -458,6 +481,19 @@ export const MEDIA_SLOT_TYPES: readonly string[] = ['TEXT', 'IMAGE', 'VIDEO', 'A
 export const ANY_SLOT_TYPE = '*'
 
 /**
+ * Mixed-modality reference supertype: a slot declaring `REF` accepts any
+ * TEXT-family or IMAGE-family link (subtypes flow up: SCRIPT, SHOT_PLAN,
+ * VERDICT, ASSET, STORYBOARD), letting ONE variadic input serve as a combined
+ * prompt + reference-image port (the Video Generator's unified `in` slot).
+ * Deliberately NOT an entry in {@link SUBTYPE_OF}: that table is
+ * single-parent, and re-parenting TEXT/IMAGE under REF would reroute
+ * `baseSlotType` (and with it slot coloring / modality inference) for every
+ * text and image slot in the catalog. {@link slotCompatible} special-cases
+ * the supertype instead.
+ */
+export const REF_SLOT_TYPE = 'REF'
+
+/**
  * Subtype assignability table (Phase-5 D2): legacy step artifact types (and the
  * reviewer verdict) are subtypes of their base media type. A link is compatible
  * when the source type equals the target type or is a subtype of it (never the
@@ -482,6 +518,11 @@ export const SUBTYPE_OF: Readonly<Record<string, string>> = {
  */
 export function slotCompatible(sourceType: string, targetType: string): boolean {
   if (sourceType === ANY_SLOT_TYPE || targetType === ANY_SLOT_TYPE) return true
+  if (targetType === REF_SLOT_TYPE) {
+    // The REF supertype widens to the TEXT and IMAGE families only; a VIDEO or
+    // AUDIO source is rejected (a clip is a product, never a generator input).
+    return sourceType === REF_SLOT_TYPE || slotCompatible(sourceType, 'TEXT') || slotCompatible(sourceType, 'IMAGE')
+  }
   let current: string | undefined = sourceType
   while (current !== undefined) {
     if (current === targetType) return true
