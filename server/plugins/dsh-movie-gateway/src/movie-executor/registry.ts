@@ -2,7 +2,7 @@
  * Leg B executor node registry (Phase-3 P3-M4 §6, Phase-5 D1/D4).
  *
  * Builds the ComfyUI `/object_info` catalog the executor validates and schedules
- * prompts against: the six deprecated movie step nodes plus the eleven
+ * prompts against: the six deprecated movie step nodes plus the twelve
  * functional nodes from the shared protocol registry (via {@link buildObjectInfo}),
  * merged over the small canned demo nodes from `fixtures.ts`
  * (`MovieTextToImage`, `MovieImageToVideo`, `MovieSaveOutput`) so the existing
@@ -28,6 +28,8 @@ import {
   type ObjectInfoEntry,
 } from '@dsh-movie/protocol'
 import { CANNED_OBJECT_INFO } from '../fixtures.ts'
+import type { CacheArrival } from '../workspace-store.ts'
+import type { CacheCard } from '@dsh-movie/protocol'
 import type { MediaProvider } from './media-provider.ts'
 import type { ModelAvailability } from './model-catalog.ts'
 
@@ -35,7 +37,7 @@ import type { ModelAvailability } from './model-catalog.ts'
 type ObjectInfoMap = Record<string, unknown>
 
 /**
- * Build the merged `/object_info` map: the six legacy step nodes + the eleven
+ * Build the merged `/object_info` map: the six legacy step nodes + the twelve
  * functional nodes plus the canned bridge demo nodes. Protocol nodes win on any
  * class_type collision.
  * @returns a `class_type -> object_info entry` record.
@@ -97,6 +99,16 @@ export function modalityOf(classType: string): NodeModality | undefined {
 }
 
 /**
+ * The catalog display name of a `class_type` (the Cache node's card naming
+ * falls back to it when a source node carries no custom canvas title).
+ * @param classType - the node class to look up.
+ * @returns the display name, or `undefined` for an unknown class.
+ */
+export function displayNameOf(classType: string): string | undefined {
+  return SCHEMA_BY_TYPE.get(classType)?.displayName
+}
+
+/**
  * The declared input slot schema for one input key of a protocol node.
  * @param classType - the consumer node class.
  * @param inputKey - the input slot name (e.g. `image`).
@@ -153,6 +165,24 @@ export interface NodeHandlerContext {
   progress?: ((percent: number) => void) | undefined
   /** Phase 8 P8-M4: aborts when the run is interrupted/cancelled. */
   signal?: AbortSignal | undefined
+  /**
+   * Cache-node card persistence, bound by the runner to this run's room AND
+   * this node's id (absent when the run has no room or no store — offline
+   * verification). `append` records this run's arrivals and returns the full
+   * card list (including cards stored by previous runs) in card order.
+   */
+  cache?: {
+    /** The node's stored cards, in card order (empty when none). */
+    read(): CacheCard[]
+    /** Append this run's arrivals; returns the full card list after the append. */
+    append(arrivals: CacheArrival[]): CacheCard[]
+  } | undefined
+  /**
+   * Resolves a prompt-graph node id to its human name for card labels: the
+   * node's custom canvas title (`_meta.title`), else its class display name,
+   * else the raw id.
+   */
+  nodeTitle?: ((sourceId: string) => string) | undefined
 }
 
 /** One node execution result: the ordered output slot artifacts. */

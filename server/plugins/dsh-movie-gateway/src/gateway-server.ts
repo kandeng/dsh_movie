@@ -1239,6 +1239,68 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
         sendApi(res, ok(payload))
         return
       }
+      case 'cache/get': {
+        // Cache cards: any room seat (host|member) may read; a non-member is
+        // refused fail-closed, mirroring the workflow/get policy.
+        const roomId = stringParam(params, 'roomId')
+        const nodeId = stringParam(params, 'nodeId')
+        if (roomId === undefined || nodeId === undefined) {
+          sendApi(res, err('bad-request', 'roomId and nodeId are required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role === 'none') {
+          sendApi(res, err('forbidden', 'role "none" may not read the cache; room membership required'))
+          return
+        }
+        const payload: LegCResponse<'cache/get'> = { cards: workflowStore.getCacheCards(roomId, nodeId) }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'cache/reorder': {
+        // Mutations are host-only, mirroring workflow/put.
+        const roomId = stringParam(params, 'roomId')
+        const nodeId = stringParam(params, 'nodeId')
+        if (roomId === undefined || nodeId === undefined) {
+          sendApi(res, err('bad-request', 'roomId and nodeId are required'))
+          return
+        }
+        const rawOrder = params['order']
+        if (!Array.isArray(rawOrder) || rawOrder.some((entry): boolean => typeof entry !== 'number' || !Number.isFinite(entry))) {
+          sendApi(res, err('bad-request', 'order must be an array of seq numbers'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not reorder the cache; host seat required`))
+          return
+        }
+        const order = rawOrder as number[]
+        const payload: LegCResponse<'cache/reorder'> = { cards: workflowStore.reorderCacheCards(roomId, nodeId, order) }
+        sendApi(res, ok(payload))
+        return
+      }
+      case 'cache/delete': {
+        const roomId = stringParam(params, 'roomId')
+        const nodeId = stringParam(params, 'nodeId')
+        if (roomId === undefined || nodeId === undefined) {
+          sendApi(res, err('bad-request', 'roomId and nodeId are required'))
+          return
+        }
+        const rawSeq = params['seq']
+        if (typeof rawSeq !== 'number' || !Number.isFinite(rawSeq)) {
+          sendApi(res, err('bad-request', 'seq is required'))
+          return
+        }
+        const role = await identity.roomRole(roomId, principal.userId)
+        if (role !== 'host') {
+          sendApi(res, err('forbidden', `role "${role}" may not delete from the cache; host seat required`))
+          return
+        }
+        const payload: LegCResponse<'cache/delete'> = { cards: workflowStore.deleteCacheCard(roomId, nodeId, rawSeq) }
+        sendApi(res, ok(payload))
+        return
+      }
       case 'workspace/draft.get': {
         const roomId = stringParam(params, 'roomId')
         if (roomId === undefined) {
@@ -1728,6 +1790,7 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           ...(executeSkills === undefined ? {} : { executeSkills }),
           availability: executorAvailability,
           ...(roomId === '' ? {} : { roomId }),
+          cache: workflowStore,
           notifier,
           logger,
           promptId,

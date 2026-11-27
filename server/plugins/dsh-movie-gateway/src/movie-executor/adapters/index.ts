@@ -22,7 +22,10 @@
  *                  fallback remains only as an offline/dev affordance.
  *  - `combiner`  → pure functions, no model call: `TextMerge` concatenates in
  *                  slot order, `MediaConcat` forwards slot-ordered references,
- *                  `SaveOutput` passes the media through as the run output.
+ *                  `SaveOutput` passes the media through as the run output, and
+ *                  `Cache` records every arrival as a persistent card (via the
+ *                  runner-bound `ctx.cache` store) and replays all cards, in
+ *                  card order, through its variadic `media` output slot.
  *
  * Real Bailian-backed text/video implementations are wired in P5-M2 behind these
  * same seams; nothing here changes the per-node lifecycle broadcast.
@@ -30,7 +33,8 @@
  * @module dsh-movie-gateway/movie-executor/adapters
  */
 
-import { FUNCTIONAL_NODES, MEDIA_SLOT_TYPES, REF_SLOT_TYPE, slotCompatible, type MovieNodeSchema } from '@dsh-movie/protocol'
+import { FUNCTIONAL_NODES, MEDIA_SLOT_TYPES, REF_SLOT_TYPE, slotCompatible, type CacheCard, type CachePiece, type MovieNodeSchema } from '@dsh-movie/protocol'
+import type { CacheArrival } from '../../workspace-store.ts'
 import { ModelUnavailableError } from '../errors.ts'
 import {
   registerNodeHandlers,
@@ -78,13 +82,19 @@ function asLinkList(value: unknown): Array<[string, number]> | undefined {
 /**
  * Resolve one input slot to its ordered artifact list: a variadic link list
  * resolves element-wise IN LINK ORDER, a single link tuple resolves alone, and
- * a widget literal passes through as the single element.
+ * a widget literal passes through as the single element. A resolved value that
+ * is itself an ARRAY (a variadic OUTPUT slot — the Cache node's card replay)
+ * SPLICES into the list, so one edge can deliver many artifacts in card order.
  */
 function resolveSlotValues(ctx: NodeHandlerContext, value: unknown): unknown[] {
   const list = asLinkList(value)
-  if (list !== undefined) return list.map((link): unknown => ctx.resolve(link[0], link[1]))
-  const link = asLink(value)
-  return link === undefined ? [value] : [ctx.resolve(link[0], link[1])]
+  let resolved: unknown[]
+  if (list !== undefined) resolved = list.map((link): unknown => ctx.resolve(link[0], link[1]))
+  else {
+    const link = asLink(value)
+    resolved = link === undefined ? [value] : [ctx.resolve(link[0], link[1])]
+  }
+  return resolved.flatMap((entry): unknown[] => (Array.isArray(entry) ? entry : [entry]))
 }
 
 /** Resolve one input slot to a single text: ordered artifacts joined with `\n\n`. */
@@ -174,8 +184,13 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
           for (const link of list) {
             const sourceType = ctx.linkSourceType?.(link[0], link[1])
             const resolved = ctx.resolve(link[0], link[1])
-            if (sourceType !== undefined && slotCompatible(sourceType, 'IMAGE')) refs.push(resolved)
-            else texts.push(display(resolved))
+            // A variadic-output source (Cache) delivers an ordered ARRAY through
+            // one link; route each element exactly like the whole value would be.
+            const elements = Array.isArray(resolved) ? resolved : [resolved]
+            for (const element of elements) {
+              if (sourceType !== undefined && slotCompatible(sourceType, 'IMAGE')) refs.push(element)
+              else texts.push(display(element))
+            }
           }
           if (list.length === 0 && value !== undefined && value !== null) {
             const literal = display(value)
@@ -245,7 +260,10 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
 function combinerHandler(schema: MovieNodeSchema): NodeHandler {
   return {
     async run(ctx: NodeHandlerContext): Promise<NodeHandlerOutput> {
-      const parts = schema.inputs.map((slot): unknown => resolveValue(ctx, ctx.inputs[slot.name]))
+      if (schema.classType === 'Cache') return runCache(ctx)
+      // One flat parts list: single-link slots resolve alone, and an array
+      // artifact from a variadic-output source (Cache) splices into the list.
+      const parts = schema.inputs.flatMap((slot): unknown[] => resolveSlotValues(ctx, ctx.inputs[slot.name]))
       if (schema.classType === 'TextMerge') {
         const merged = parts.map((part): string => display(part)).filter((text): boolean => text !== '').join('\n\n')
         return { outputs: [merged], artifact: merged }
@@ -262,6 +280,43 @@ function combinerHandler(schema: MovieNodeSchema): NodeHandler {
   }
 }
 
+/**
+ * The Cache node: record every arriving upstream artifact as a persistent
+ * card, then replay ALL stored cards downstream through the variadic `media`
+ * output slot, in card order (the order the editor's shuffle-drag maintains).
+ *
+ * One arrival from one upstream node = ONE card; the card holds every piece
+ * that arrival delivered (a Cache-to-Cache edge arrives with the upstream's
+ * whole replay list as a multi-piece card). Cards accumulate across runs in
+ * the runner-bound `ctx.cache` store; without a store (offline verification)
+ * this run's arrivals degrade into ephemeral cards numbered from 1.
+ */
+function runCache(ctx: NodeHandlerContext): NodeHandlerOutput {
+  const single = asLink(ctx.inputs['in'])
+  const links = asLinkList(ctx.inputs['in']) ?? (single === undefined ? [] : [single])
+  const arrivals: CacheArrival[] = []
+  for (const link of links) {
+    const resolved = ctx.resolve(link[0], link[1])
+    const elements = (Array.isArray(resolved) ? resolved : [resolved])
+      .map((entry): string => display(entry))
+      .filter((text): boolean => text !== '')
+    if (elements.length === 0) continue
+    const sourceType = ctx.linkSourceType?.(link[0], link[1])
+    arrivals.push({
+      sourceName: ctx.nodeTitle?.(link[0]) ?? link[0],
+      pieces: elements.map((artifact): CachePiece => (sourceType === undefined ? { artifact } : { artifact, sourceType })),
+    })
+  }
+  const cards: CacheCard[] = ctx.cache === undefined
+    ? arrivals.map((arrival, index): CacheCard => ({ seq: index + 1, sourceName: arrival.sourceName, arrivedAt: Date.now(), pieces: arrival.pieces }))
+    : ctx.cache.append(arrivals)
+  // The variadic output slot's artifact IS the ordered replay list; downstream
+  // resolveSlotValues splices it into the consumer's ordered value list.
+  const replay = cards.flatMap((card): string[] => card.pieces.map((piece): string => piece.artifact))
+  const artifact = `[cache ${String(cards.length)} card(s), ${String(replay.length)} item(s)]`
+  return { outputs: [replay], artifact, media: 'canned' }
+}
+
 /** Build the handler for one functional class by family dispatch (D4). */
 function handlerForSchema(schema: MovieNodeSchema): NodeHandler {
   switch (schema.family) {
@@ -272,7 +327,7 @@ function handlerForSchema(schema: MovieNodeSchema): NodeHandler {
   }
 }
 
-/** The built-in handlers for all eleven functional class types. */
+/** The built-in handlers for all twelve functional class types. */
 export const BUILTIN_NODE_HANDLERS: Readonly<Record<string, NodeHandler>> = Object.fromEntries(
   FUNCTIONAL_NODES.map((schema): [string, NodeHandler] => [schema.classType, handlerForSchema(schema)]),
 )

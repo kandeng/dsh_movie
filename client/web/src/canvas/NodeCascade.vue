@@ -38,6 +38,8 @@ interface ClassEntry {
   classType: string;
   displayName: string;
   description: string;
+  /** Reserved-but-unimplemented leaves render dimmed and ignore clicks. */
+  disabled?: boolean;
 }
 /** One level-2 template entry. */
 interface TemplateEntry {
@@ -57,8 +59,15 @@ const FAMILY_ORDER: NodeFamily[] = ["source", "generator", "combiner"];
 const FAMILY_LABEL: Record<NodeFamily, string> = {
   source: "输入源",
   generator: "生成器",
-  combiner: "组合器",
+  combiner: "实用工具",
 };
+
+/**
+ * Placeholder leaves that appear in the cascade but cannot be picked yet.
+ * Kept as an extension point for future reserved-but-unimplemented nodes; the
+ * `disabled` leaf mechanism below stays in place even while the list is empty.
+ */
+const PLACEHOLDER_LEAVES: Partial<Record<NodeFamily, { classType: string; labelKey: string }[]>> = {};
 
 /**
  * Class types hidden from the add-node cascade. `TextMerge` is functionally
@@ -69,6 +78,19 @@ const FAMILY_LABEL: Record<NodeFamily, string> = {
  * existing saved graphs containing a TextMerge still validate and execute.
  */
 const HIDDEN_FROM_PALETTE: ReadonlySet<string> = new Set(["TextMerge"]);
+
+/**
+ * Utilities (combiner) submenu display order: Cache always on top, Effect
+ * second, Save Output always at the bottom; anything else sits in between in
+ * catalog order. This is a PALETTE-level presentation order only — the protocol
+ * catalog order (and therefore persisted graphs / object_info) is untouched.
+ */
+function combinerDisplayRank(classType: string): number {
+  if (classType === "Cache") return 0;
+  if (classType === "MediaConcat") return 1;
+  if (classType === "SaveOutput") return 3;
+  return 2;
+}
 
 const branches = computed<Branch[]>(() => {
   const familyBranches = FAMILY_ORDER.map((family): Branch => ({
@@ -85,6 +107,22 @@ const branches = computed<Branch[]>(() => {
     })),
     templates: [],
   }));
+  // Append the not-yet-clickable placeholders to their family branch.
+  for (const branch of familyBranches) {
+    for (const leaf of PLACEHOLDER_LEAVES[branch.key as NodeFamily] ?? []) {
+      branch.classes.push({
+        classType: leaf.classType,
+        displayName: translate(leaf.labelKey),
+        description: "",
+        disabled: true,
+      });
+    }
+  }
+  // Utilities submenu: enforce the fixed Cache / Effect / … / Save Output order.
+  for (const branch of familyBranches) {
+    if (branch.key !== "combiner") continue;
+    branch.classes.sort((a, b): number => combinerDisplayRank(a.classType) - combinerDisplayRank(b.classType));
+  }
   const templateBranch: Branch = {
     key: "templates",
     label: translate("模板"),
@@ -127,7 +165,12 @@ function pickTemplate(templateId: string): void {
     </ul>
     <ul class="cascadeLeaves">
       <li v-for="entry in activeBranch.classes" :key="entry.classType">
-        <button type="button" class="leafItem" :title="entry.description" @click="pickClass(entry.classType)">
+        <button
+          type="button"
+          class="leafItem"
+          :title="entry.description"
+          :disabled="entry.disabled"
+          @click="pickClass(entry.classType)">
           <span class="leafName">{{ entry.displayName }}</span>
         </button>
       </li>
@@ -220,6 +263,14 @@ function pickTemplate(templateId: string): void {
     cursor: pointer;
 
     &:hover { background: var(--el-fill-color-light); }
+
+    // Reserved placeholders (e.g. Cache): visible but not clickable yet.
+    &:disabled {
+      color: var(--el-text-color-placeholder);
+      cursor: not-allowed;
+
+      &:hover { background: transparent; }
+    }
 
     .leafName { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   }

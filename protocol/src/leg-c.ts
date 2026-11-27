@@ -206,6 +206,50 @@ export interface WorkflowNamespace {
 }
 
 /**
+ * One artifact inside a Cache node card. The Cache node records every arriving
+ * upstream artifact; a single arrival from one upstream node is ONE card that
+ * may hold several pieces (e.g. another Cache replaying its whole card list).
+ */
+export interface CachePiece {
+  /** The artifact as produced by the source: literal text, http(s)/data URL, or `mxc://` URI. */
+  artifact: string
+  /**
+   * The source's declared output slot type at arrival time (`TEXT`, `IMAGE`,
+   * `CLIP`, `*`, …) — the client's media-renderer hint; `undefined` when the
+   * source class is not protocol-declared.
+   */
+  sourceType?: string | undefined
+}
+
+/** One recorded arrival in a Cache node's persistent card list. */
+export interface CacheCard {
+  /** Per-node monotonic arrival number (never reused after deletes); the card is displayed as «sourceName» «seq». */
+  seq: number
+  /** The source node's canvas title at arrival time (`_meta.title`, else its class display name). */
+  sourceName: string
+  /** Arrival timestamp (epoch ms). */
+  arrivedAt: number
+  /** The artifact(s) delivered by that arrival, in delivery order. */
+  pieces: CachePiece[]
+}
+
+/**
+ * `cache.*` - the room-scoped Cache-node card store. Reads are open to any
+ * room seat (mirroring `workflow/get`); the reorder/delete mutations are
+ * host-only (mirroring `workflow/put`). Cards are APPENDED by the executor at
+ * run time (each connected upstream delivery = one card) and persist with the
+ * room across runs and reloads.
+ */
+export interface CacheNamespace {
+  'cache/get': Method<{ roomId: MatrixRoomId; nodeId: string }, { cards: CacheCard[] }>
+  'cache/reorder': Method<
+    { roomId: MatrixRoomId; nodeId: string; order: number[] },
+    { cards: CacheCard[] }
+  >
+  'cache/delete': Method<{ roomId: MatrixRoomId; nodeId: string; seq: number }, { cards: CacheCard[] }>
+}
+
+/**
  * `workspace.*` - the host-owned per-room workspace (Phase-3 P3-M5): an
  * uncommitted `draft` with a server-side undo/redo snapshot stack, plus an
  * append-only committed history of full-fledged graph snapshots (GitHub-style).
@@ -537,7 +581,7 @@ export interface PluginsNamespace {
 }
 
 /** Every Leg C namespace method map, keyed by namespace. */
-export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, WorkspaceNamespace, RoomNamespace, CanvasNamespace, MovieNamespace, AgentNamespace, QuotaNamespace, PluginsNamespace {}
+export interface LegCNamespaces extends AuthNamespace, RegistryNamespace, AssetsNamespace, WorkflowNamespace, CacheNamespace, WorkspaceNamespace, RoomNamespace, CanvasNamespace, MovieNamespace, AgentNamespace, QuotaNamespace, PluginsNamespace {}
 
 /** Every Leg C method name (`<namespace>/<method>`). */
 export type LegCMethod = keyof LegCNamespaces
@@ -558,6 +602,9 @@ export const IMPLEMENTED_METHODS: readonly LegCMethod[] = [
   'assets/get',
   'workflow/get',
   'workflow/put',
+  'cache/get',
+  'cache/reorder',
+  'cache/delete',
   'workspace/draft.get',
   'workspace/draft.put',
   'workspace/undo',

@@ -27,10 +27,15 @@ export interface NodeSlotSchema {
   /** Whether a link into this input slot is optional (functional nodes). */
   optional?: boolean
   /**
-   * Whether this INPUT slot accepts several simultaneous links (variadic).
-   * Every linked value resolves in link-creation order and the family adapter
-   * composes the ordered list (TEXT slots join with `\n\n`). Single-link slots
-   * instead retire the old edge when a new one connects (replace-on-connect).
+   * Whether this slot carries SEVERAL values.
+   * INPUT: accepts several simultaneous links (variadic). Every linked value
+   * resolves in link-creation order and the family adapter composes the
+   * ordered list (TEXT slots join with `\n\n`). Single-link slots instead
+   * retire the old edge when a new one connects (replace-on-connect).
+   * OUTPUT: the slot's artifact is an ordered LIST (the Cache node replays
+   * every stored card through its variadic `media` slot); downstream input
+   * resolution splices the list elements into the consumer's ordered value
+   * list, so one edge can deliver many artifacts.
    */
   variadic?: boolean
 }
@@ -405,7 +410,7 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
   },
   {
     classType: 'MediaConcat',
-    displayName: 'Montage',
+    displayName: 'Effect',
     description: 'Concatenate linked media of the same base type in slot order (clips into a reel, audio into a track).',
     category: 'movie/combiner',
     family: 'combiner',
@@ -428,6 +433,25 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
     outputs: [],
     widgets: [],
     outputNode: true,
+  },
+  {
+    classType: 'Cache',
+    displayName: 'Cache',
+    description:
+      'Record every arriving upstream artifact as a persistent card (accumulated across runs, editable in the node editor); replay all cards downstream in card order.',
+    category: 'movie/combiner',
+    family: 'combiner',
+    modality: 'video',
+    // Same single drop-zone look as the Video Generator: one merged, variadic
+    // wildcard input that accepts an edge from EVERY node with an output slot
+    // (Save Output has none, so it is excluded by construction).
+    mergeInputs: true,
+    inputs: [{ name: 'in', type: '*', optional: true, variadic: true }],
+    // Variadic OUTPUT: the slot's artifact is the ordered list of every stored
+    // card's pieces; downstream resolution splices the list (see the Cache
+    // branch in the combiner adapter).
+    outputs: [{ name: 'media', type: '*', variadic: true }],
+    widgets: [],
   },
 ]
 

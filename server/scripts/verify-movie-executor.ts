@@ -40,6 +40,8 @@ import {
   FUNCTIONAL_NODES,
   MOVIE_NODES,
   isExecMessage,
+  type CacheCard,
+  type CachePiece,
   type ExecMessage,
   type PromptGraph,
 } from '../../protocol/src/index.ts'
@@ -149,7 +151,7 @@ function offlineChecks(): void {
   const missingFunctional = FUNCTIONAL_NODES
     .map((node): string => node.classType)
     .filter((classType): boolean => !(classType in catalog))
-  check('registry advertises all eleven functional class types', missingFunctional.length === 0, missingFunctional.length === 0 ? '11 classes' : `missing: ${missingFunctional.join(', ')}`)
+  check('registry advertises all twelve functional class types', missingFunctional.length === 0, missingFunctional.length === 0 ? '12 classes' : `missing: ${missingFunctional.join(', ')}`)
 
   // Phase-5 D1: handler registry resolves functional classes; legacy steps stay
   // on the fallback path (no registered handler).
@@ -442,6 +444,102 @@ async function availabilityChecks(): Promise<void> {
     'image model pin: a video weight never captures the image selector',
     videoWeight === '' || templateByModelFile(pinnedTemplates, videoWeight) === undefined,
     videoWeight,
+  )
+
+  // ── Cache node (Utilities): arrival cards, monotonic seq across runs, a
+  //    multi-piece card from an upstream Cache replay, delete/reorder reflected
+  //    in the replayed output order, and variadic array-splicing into MediaConcat
+  //    — all offline against a fake card store (no room, no host). ──
+  process.stdout.write('\n— offline: Cache node card semantics —\n')
+  const cacheHandler = handlerFor('Cache')
+  const cacheStore: CacheCard[] = []
+  let cacheSeq = 0
+  const cacheSeam = {
+    read: (): CacheCard[] => cacheStore,
+    append: (arrivals: { sourceName: string; pieces: CachePiece[] }[]): CacheCard[] => {
+      for (const arrival of arrivals) {
+        cacheSeq += 1
+        cacheStore.push({ seq: cacheSeq, sourceName: arrival.sourceName, arrivedAt: 0, pieces: arrival.pieces })
+      }
+      return cacheStore
+    },
+  }
+  const titleOf = (id: string): string => id
+  const replayOf = (out: { outputs?: unknown[] } | undefined): string =>
+    Array.isArray(out?.outputs?.[0]) ? (out?.outputs?.[0] as string[]).join(',') : ''
+
+  // Run 1: node "A" arrives once → card seq 1, replayed as its single piece.
+  const run1 = await cacheHandler?.run(handlerCtx(PERMISSIVE_AVAILABILITY, {
+    inputs: { in: ['A', 0] },
+    resolve: (): unknown => 'hello',
+    linkSourceType: (): string | undefined => 'TEXT',
+    nodeTitle: titleOf,
+    cache: cacheSeam,
+  }))
+  check(
+    'Cache run 1 appends one card (seq 1, source A) and replays its single piece',
+    cacheStore.length === 1 && cacheStore[0]!.seq === 1 && cacheStore[0]!.sourceName === 'A' && replayOf(run1) === 'hello',
+    JSON.stringify({ seqs: cacheStore.map((c): number => c.seq), out: run1?.outputs?.[0] }),
+  )
+
+  // Run 2: node "B" arrives → seq 2 (monotonic across runs); replay holds both.
+  const run2 = await cacheHandler?.run(handlerCtx(PERMISSIVE_AVAILABILITY, {
+    inputs: { in: ['B', 0] },
+    resolve: (): unknown => 'world',
+    nodeTitle: titleOf,
+    cache: cacheSeam,
+  }))
+  check(
+    'Cache run 2 appends seq 2 (monotonic across runs) and replays both cards in order',
+    cacheStore.length === 2 && cacheStore[1]!.seq === 2 && replayOf(run2) === 'hello,world',
+    JSON.stringify(run2?.outputs?.[0]),
+  )
+
+  // Multi-piece card: an upstream Cache replay arrives as an ARRAY → ONE card, N pieces.
+  await cacheHandler?.run(handlerCtx(PERMISSIVE_AVAILABILITY, {
+    inputs: { in: ['C', 0] },
+    resolve: (): unknown => ['p1', 'p2', 'p3'],
+    nodeTitle: titleOf,
+    cache: cacheSeam,
+  }))
+  const multi = cacheStore[cacheStore.length - 1]!
+  check(
+    'Cache folds an upstream list arrival into ONE multi-piece card (seq keeps incrementing)',
+    multi.seq === 3 && multi.pieces.length === 3 && multi.pieces.map((piece): string => piece.artifact).join(',') === 'p1,p2,p3',
+    JSON.stringify({ seq: multi.seq, pieces: multi.pieces.length }),
+  )
+
+  // Delete card seq 2 (a host editor action); the next no-arrival run replays
+  // only the surviving cards, in order, and the seq counter is never reused.
+  const deleteIdx = cacheStore.findIndex((card): boolean => card.seq === 2)
+  if (deleteIdx >= 0) cacheStore.splice(deleteIdx, 1)
+  const runAfterDelete = await cacheHandler?.run(handlerCtx(PERMISSIVE_AVAILABILITY, { inputs: {}, cache: cacheSeam }))
+  check(
+    'Cache delete removes the card from the replayed output',
+    cacheStore.length === 2 && replayOf(runAfterDelete) === 'hello,p1,p2,p3',
+    JSON.stringify(runAfterDelete?.outputs?.[0]),
+  )
+
+  // Reorder (editor shuffle-drag): reverse the CARD order; the replay follows
+  // the new card order (a multi-piece card keeps its internal piece order).
+  cacheStore.reverse()
+  const runAfterReorder = await cacheHandler?.run(handlerCtx(PERMISSIVE_AVAILABILITY, { inputs: {}, cache: cacheSeam }))
+  check(
+    'Cache reorder is reflected in the replayed output order',
+    replayOf(runAfterReorder) === 'p1,p2,p3,hello',
+    JSON.stringify(runAfterReorder?.outputs?.[0]),
+  )
+
+  // Variadic-output splicing: an array-valued Cache replay fed into MediaConcat
+  // (Effect) splices element-wise into the concat parts list, ahead of slot b.
+  const concatOut = await handlerFor('MediaConcat')?.run(handlerCtx(PERMISSIVE_AVAILABILITY, {
+    inputs: { a: ['cacheNode', 0], b: ['tailNode', 0] },
+    resolve: (id: string): unknown => (id === 'cacheNode' ? ['x', 'y'] : 'z'),
+  }))
+  check(
+    'MediaConcat splices an array-valued Cache replay into its ordered parts',
+    concatOut?.artifact === '[concat 3 media part(s)] x + y + z',
+    concatOut?.artifact ?? 'none',
   )
 }
 

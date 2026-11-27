@@ -13,6 +13,7 @@ import { useVueFlowBridge } from "@/composables/useVueFlowBridge";
 import { useChatSplitWidth } from "@/composables/useChatSplitWidth";
 import VueFlowCanvas from "@/canvas/VueFlowCanvas.vue";
 import NodeCascade, { type CascadeSelection } from "@/canvas/NodeCascade.vue";
+import CacheCards from "@/pages/studio/CacheCards.vue";
 import { expandTemplate } from "@/canvas/expandTemplate";
 import { DEFAULT_GROUP_COLOR, GROUP_COLOR_KEYS, groupColor } from "@/canvas/groupOverlay";
 import { useWorkflowStore } from "@/composables/useWorkflowStore";
@@ -417,6 +418,16 @@ const editorClassType = computed(() => {
   const data = bridge.flow.findNode(String(id))?.data as MovieNodeData | undefined;
   return data?.classType ?? "";
 });
+
+/** True when the edited node is a Cache: the editor swaps its body for the
+ *  card list (CacheCards) and hides the widget / References / output sections. */
+const editorIsCache = computed(() => editorClassType.value === "Cache");
+
+/** Resolve an `mxc://` piece artifact for CacheCards via the authenticated
+ *  Synapse media download (the same resolver the generated-media view uses). */
+function resolveCacheMedia(uri: string): Promise<string> {
+  return fetchMediaBlobUrl(uri, auth.accessToken);
+}
 
 /** The edited node's schema. `schemaFor` spans BOTH catalogs, so functional
  *  nodes resolve too (the legacy `nodeSchemaForId` knows only the six steps). */
@@ -1891,6 +1902,18 @@ function goLogin() {
               @update:model-value="setDraftDescription" />
           </div>
 
+          <!-- Cache node (Utilities → Cache): the body is the persistent card list.
+               Cards accumulate across runs; the host can drag-reorder and delete
+               them, and clicking a card expands its pieces (text/image/audio/video). -->
+          <CacheCards
+            v-if="editorIsCache"
+            class="fieldGroup"
+            :room-id="roomIdRef"
+            :node-id="editingNodeId === null ? '' : String(editingNodeId)"
+            :readonly="editorReadonly"
+            :status="selectedStatus"
+            :resolve-media="resolveCacheMedia" />
+
           <!-- Row 4a: a MEDIA source node's content (D5/D12) — upload / paste /
                pick-from-chat / market, a preview, and Open-in-viewer. The single
                modality widget holds the resolved URL; the card stub reads it. -->
@@ -2022,7 +2045,7 @@ function goLogin() {
                One chip per incoming edge, stacked top-to-bottom in link-creation
                order and labeled with the SOURCE NODE's name; removal happens on
                the canvas by deleting the edge (don't duplicate the control). -->
-          <div v-if="editorRefChips !== null" class="fieldGroup">
+          <div v-if="editorRefChips !== null && !editorIsCache" class="fieldGroup">
             <div class="outputLabel">References</div>
             <div v-if="editorRefChips.length > 0" class="refList">
               <el-tag
@@ -2072,7 +2095,7 @@ function goLogin() {
           </div>
 
           <!-- Row 5: the produced output — read-only; re-run to change it. -->
-          <div class="outputBlock">
+          <div v-if="!editorIsCache" class="outputBlock">
             <div class="outputLabel">
               {{ translate("最近产物输出") }}
               <el-button

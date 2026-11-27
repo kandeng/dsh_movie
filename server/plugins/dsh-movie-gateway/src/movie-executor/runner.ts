@@ -21,10 +21,11 @@
  * @module dsh-movie-gateway/movie-executor/runner
  */
 
-import type { ExecMessage, PromptGraph, PromptGraphNode } from '@dsh-movie/protocol'
+import type { CacheCard, ExecMessage, PromptGraph, PromptGraphNode } from '@dsh-movie/protocol'
 import type { JobHooks, JobId, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MediaProvider } from './media-provider.ts'
-import { handlerFor, modalityOf, outputSlotSchema, type NodeHandler, type NodeHandlerContext } from './registry.ts'
+import type { CacheArrival } from '../workspace-store.ts'
+import { displayNameOf, handlerFor, modalityOf, outputSlotSchema, type NodeHandler, type NodeHandlerContext } from './registry.ts'
 import { isModelUnavailable } from './errors.ts'
 import type { ModelAvailability } from './model-catalog.ts'
 import type { EchoKind, RoomNotifier } from './room-notifier.ts'
@@ -82,6 +83,19 @@ export interface SkillExecutor {
   (node: PromptGraphNode): Promise<{ section: string; notes: string[] }>
 }
 
+/**
+ * The Cache node's persistent card-list seam (the {@link WorkspaceStore} cache
+ * subset). The runner binds it per node into `NodeHandlerContext.cache` when the
+ * run carries both a store and a room; room-less offline runs skip it and the
+ * Cache adapter degrades to ephemeral cards.
+ */
+export interface CacheCardStore {
+  /** Read a Cache node's stored cards, in card order. */
+  getCacheCards(roomId: string, nodeId: string): CacheCard[]
+  /** Append this run's arrivals (seq assigned by the store); returns all cards. */
+  appendCacheCards(roomId: string, nodeId: string, arrivals: CacheArrival[]): CacheCard[]
+}
+
 /** Everything the runner needs to schedule and drive one prompt job. */
 export interface RunPromptDeps {
   /** The background-job registry (`ctx.jobs`), controller already attached. */
@@ -109,6 +123,8 @@ export interface RunPromptDeps {
   availability: ModelAvailability
   /** The room this run was triggered from; empty/undefined → no room notices. */
   roomId?: string | undefined
+  /** The Cache node's persistent card store; absent → ephemeral cache cards. */
+  cache?: CacheCardStore | undefined
   /** The `customer_service` room notifier (D15 notice + D8 artifact echo). */
   notifier?: RoomNotifier | undefined
   /** Diagnostics sink. */
@@ -164,6 +180,11 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
         const executed: string[] = []
         /** Per-run output table: `nodeId -> slotIndex -> artifact` (D4). */
         const outputsByNode = new Map<string, unknown[]>()
+        // Cache card persistence is room-scoped: capture both once so the
+        // per-node ctx closures see narrowed consts (no non-null assertions).
+        const cacheStore = deps.cache
+        const cacheRoom = deps.roomId
+        const cacheEnabled = cacheStore !== undefined && cacheRoom !== undefined && cacheRoom !== ''
         let currentId = ''
         let currentType = ''
         let currentInputs: Record<string, unknown> = {}
@@ -232,6 +253,21 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
                 availability: deps.availability,
                 ...(deps.stepText === undefined ? {} : { text: deps.stepText }),
                 media: deps.mediaProvider,
+                // Cache node seams: the card store bound to this room + node, and
+                // the human name resolver for card labels («sourceName» «seq»).
+                ...(cacheEnabled ? {
+                  cache: {
+                    read: (): CacheCard[] => cacheStore.getCacheCards(cacheRoom, id),
+                    append: (arrivals: CacheArrival[]): CacheCard[] => cacheStore.appendCacheCards(cacheRoom, id, arrivals),
+                  },
+                } : {}),
+                nodeTitle: (sourceId: string): string => {
+                  const sourceNode = graph[sourceId]
+                  const title = sourceNode?._meta?.title
+                  if (title !== undefined && title !== '') return title
+                  const sourceType = sourceNode?.class_type
+                  return (sourceType === undefined ? undefined : displayNameOf(sourceType)) ?? sourceId
+                },
                 // P8-M4: sampling progress rides the existing `progress` lifecycle
                 // message; cancellation aborts the provider's remote job.
                 progress: (percent: number): void => {

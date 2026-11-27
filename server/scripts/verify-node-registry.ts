@@ -8,15 +8,15 @@
  * protocol constants. Pure registry checks — no host required.
  *
  * Asserts:
- *  - FUNCTIONAL_NODES: exactly 11 entries, each with family + modality, no
+ *  - FUNCTIONAL_NODES: exactly 12 entries, each with family + modality, no
  *    step, covering the role × modality grid (4 sources / 4 generators /
- *    3 combiners);
+ *    4 combiners);
  *  - MOVIE_NODES: the six legacy step nodes keep step 1..6, are all
  *    `deprecated: true`, and carry no family/modality;
  *  - slot system: SUBTYPE_OF is acyclic with base values in MEDIA_SLOT_TYPES,
  *    and slotCompatible honours subtyping, wildcard, direction rules, and the
  *    mixed-modality REF supertype;
- *  - buildObjectInfo over the merged registry advertises all 17 class types,
+ *  - buildObjectInfo over the merged registry advertises all 18 class types,
  *    routes optional inputs to `input.optional`, and flags deprecated nodes;
  *  - templates: every class type is known, link endpoints exist, slot indices
  *    are in range, widget overrides match schema widgets, every link is
@@ -54,9 +54,9 @@ function check(label: string, ok: boolean, detail = ''): void {
 const ALL_NODES: readonly MovieNodeSchema[] = [...MOVIE_NODES, ...FUNCTIONAL_NODES]
 const byClassType = new Map<string, MovieNodeSchema>(ALL_NODES.map((node): [string, MovieNodeSchema] => [node.classType, node]))
 
-// ── 1. functional catalog: the 11-class role × modality grid (D3) ──
+// ── 1. functional catalog: the 12-class role × modality grid (D3) ──
 
-check('FUNCTIONAL_NODES has exactly 11 entries', FUNCTIONAL_NODES.length === 11, `got ${FUNCTIONAL_NODES.length}`)
+check('FUNCTIONAL_NODES has exactly 12 entries', FUNCTIONAL_NODES.length === 12, `got ${FUNCTIONAL_NODES.length}`)
 check(
   'every functional node declares family + modality and no step',
   FUNCTIONAL_NODES.every((node): boolean => node.family !== undefined && node.modality !== undefined && node.step === undefined),
@@ -66,7 +66,7 @@ check(
   new Set(ALL_NODES.map((node): string => node.classType)).size === ALL_NODES.length,
 )
 
-const GRID: Readonly<Record<string, number>> = { source: 4, generator: 4, combiner: 3 }
+const GRID: Readonly<Record<string, number>> = { source: 4, generator: 4, combiner: 4 }
 for (const [family, expected] of Object.entries(GRID)) {
   const members = FUNCTIONAL_NODES.filter((node): boolean => node.family === family)
   check(`family "${family}" has ${expected} classes`, members.length === expected, `got ${members.length}`)
@@ -124,7 +124,7 @@ check(`slotCompatible: wildcard source ${ANY_SLOT_TYPE} → ${REF_SLOT_TYPE}`, s
 // ── 4. object_info projection (D1/D2) ──
 
 const info = buildObjectInfo(ALL_NODES)
-check('object_info advertises all 17 class types', Object.keys(info).length === ALL_NODES.length, `got ${Object.keys(info).length}`)
+check('object_info advertises all 18 class types', Object.keys(info).length === ALL_NODES.length, `got ${Object.keys(info).length}`)
 check('object_info flags exactly the six legacy nodes deprecated', Object.entries(info).filter(([, entry]): boolean => entry.deprecated).length === 6)
 check(
   'object_info routes optional inputs to input.optional',
@@ -248,6 +248,27 @@ check(
     && video.inputs[0]!.variadic === true,
   (video?.inputs ?? []).map((slot): string => `${slot.name}:${slot.type}`).join(','),
 )
+
+// Cache (Utilities): a combiner with ONE variadic `*` input drop zone and ONE
+// variadic `media` output that replays all stored cards downstream, no widgets.
+const cache = byClassType.get('Cache')
+check(
+  'Cache declares exactly one variadic `*` input named `in`',
+  cache?.inputs.length === 1
+    && cache.inputs[0]!.name === 'in'
+    && cache.inputs[0]!.type === ANY_SLOT_TYPE
+    && cache.inputs[0]!.variadic === true,
+  (cache?.inputs ?? []).map((slot): string => `${slot.name}:${slot.type}`).join(','),
+)
+check(
+  'Cache declares exactly one variadic `*` output named `media`',
+  cache?.outputs?.length === 1
+    && cache.outputs[0]!.name === 'media'
+    && cache.outputs[0]!.type === ANY_SLOT_TYPE
+    && cache.outputs[0]!.variadic === true,
+  (cache?.outputs ?? []).map((slot): string => `${slot.name}:${slot.type}:${slot.variadic === true ? 'variadic' : 'single'}`).join(','),
+)
+check('Cache is a widget-less combiner that merges inputs', cache?.widgets.length === 0 && cache?.family === 'combiner' && cache?.mergeInputs === true)
 
 const legacyGraph: WorkflowGraph = {
   last_node_id: 3,

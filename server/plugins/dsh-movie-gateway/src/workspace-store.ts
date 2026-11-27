@@ -11,6 +11,7 @@
  *  - `draft.json`           - the host's uncommitted working copy (when present).
  *  - `draft-state.json`     - `{ undo: string[], redo: string[] }` snapshot names.
  *  - `snapshots/<name>.json`- draft undo/redo snapshots (capped).
+ *  - `cache.json`           - Cache-node card lists (`nodeId -> { seq, cards }`).
  *
  * The model is host-exclusive: only the room `host` writes (the gateway gates
  * every mutating call on `roomRole === 'host'`). A commit appends an immutable
@@ -28,7 +29,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { MatrixUserId, WorkflowGraph, WorkflowRecord } from '@dsh-movie/protocol'
-import type { CommitMeta, DraftState } from '@dsh-movie/protocol'
+import type { CacheCard, CachePiece, CommitMeta, DraftState } from '@dsh-movie/protocol'
 // Schema migrations run at EVERY graph read/write boundary below: rooms saved
 // before a catalog slot change (e.g. the Video Generator's unified REF slot)
 // converge onto the live schema in-flight, while immutable history files on
@@ -52,6 +53,19 @@ function emptyGraph(): WorkflowGraph {
 interface DraftIndex {
   undo: string[]
   redo: string[]
+}
+
+/** One Cache-node arrival BEFORE sequencing (the executor's raw delivery). */
+export interface CacheArrival {
+  /** The source node's canvas title at arrival time. */
+  sourceName: string
+  /** The delivered artifact(s), in delivery order. */
+  pieces: CachePiece[]
+}
+
+/** The persisted `cache.json` shape: one card list per Cache node. */
+interface CacheFile {
+  [nodeId: string]: { seq: number; cards: CacheCard[] }
 }
 
 /** The host-owned, file-backed workspace store. */
@@ -107,6 +121,28 @@ export interface WorkspaceStore {
    * guard, same as {@link writeSkill}). Crash-tolerant temp-then-rename write.
    */
   writeArtifact(roomId: string, relPath: string, bytes: Uint8Array): boolean
+
+  /* --- Cache-node card lists (`cache.json` sidecar, one list per node) --- */
+
+  /** Read a Cache node's cards in stored order (empty when absent). */
+  getCacheCards(roomId: string, nodeId: string): CacheCard[]
+  /**
+   * Append raw arrivals as new cards, assigning the next monotonic seq numbers
+   * (never reused after deletes). Called by the executor at run time.
+   * @returns the full card list after the append.
+   */
+  appendCacheCards(roomId: string, nodeId: string, arrivals: CacheArrival[]): CacheCard[]
+  /**
+   * Reorder cards by an explicit seq list; seqs missing from `order` keep
+   * their relative order and stay at the end (defensive against stale clients).
+   * @returns the full card list after the reorder.
+   */
+  reorderCacheCards(roomId: string, nodeId: string, order: number[]): CacheCard[]
+  /**
+   * Delete one card by seq (no-op when unknown).
+   * @returns the full card list after the delete.
+   */
+  deleteCacheCard(roomId: string, nodeId: string, seq: number): CacheCard[]
 }
 
 /** Turn a room id into a stable, filesystem-safe directory name. */
@@ -254,6 +290,23 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
     writeJson(join(roomDir(roomId), 'draft-state.json'), index)
   }
 
+  /** Read one Cache node's `{ seq, cards }` entry, degrading to an empty list. */
+  function readCacheEntry(roomId: string, nodeId: string): { seq: number; cards: CacheCard[] } {
+    const file = readJson<CacheFile>(join(roomDir(roomId), 'cache.json')) ?? {}
+    const entry = file[nodeId]
+    if (entry === undefined || !Array.isArray(entry.cards)) return { seq: 0, cards: [] }
+    // The stored seq never regresses below the highest card actually present.
+    const maxSeq = entry.cards.reduce((max, card): number => Math.max(max, card.seq), 0)
+    return { seq: Math.max(entry.seq ?? 0, maxSeq), cards: entry.cards }
+  }
+
+  /** Persist one Cache node's entry back into the room's `cache.json`. */
+  function writeCacheEntry(roomId: string, nodeId: string, entry: { seq: number; cards: CacheCard[] }): void {
+    const file = readJson<CacheFile>(join(roomDir(roomId), 'cache.json')) ?? {}
+    file[nodeId] = entry
+    writeJson(join(roomDir(roomId), 'cache.json'), file)
+  }
+
   function buildDraftState(roomId: string): DraftState {
     const head = readHead(roomId)
     const draft = readDraftGraph(roomId)
@@ -398,6 +451,51 @@ export function createWorkspaceStore(root: string): WorkspaceStore {
       writeFileSync(tmp, bytes)
       renameSync(tmp, target)
       return true
+    },
+
+    /* --- Cache-node card lists --- */
+
+    getCacheCards(roomId: string, nodeId: string): CacheCard[] {
+      return readCacheEntry(roomId, nodeId).cards
+    },
+
+    appendCacheCards(roomId: string, nodeId: string, arrivals: CacheArrival[]): CacheCard[] {
+      if (arrivals.length === 0) return readCacheEntry(roomId, nodeId).cards
+      const entry = readCacheEntry(roomId, nodeId)
+      const now = Date.now()
+      for (const arrival of arrivals) {
+        entry.seq += 1
+        entry.cards.push({ seq: entry.seq, sourceName: arrival.sourceName, arrivedAt: now, pieces: arrival.pieces })
+      }
+      writeCacheEntry(roomId, nodeId, entry)
+      return entry.cards
+    },
+
+    reorderCacheCards(roomId: string, nodeId: string, order: number[]): CacheCard[] {
+      const entry = readCacheEntry(roomId, nodeId)
+      const bySeq = new Map(entry.cards.map((card): [number, CacheCard] => [card.seq, card]))
+      const reordered: CacheCard[] = []
+      for (const seq of order) {
+        const card = bySeq.get(seq)
+        if (card !== undefined) {
+          reordered.push(card)
+          bySeq.delete(seq)
+        }
+      }
+      // Seqs the client did not mention keep their stored relative order.
+      for (const card of entry.cards) {
+        if (bySeq.has(card.seq)) reordered.push(card)
+      }
+      entry.cards = reordered
+      writeCacheEntry(roomId, nodeId, entry)
+      return entry.cards
+    },
+
+    deleteCacheCard(roomId: string, nodeId: string, seq: number): CacheCard[] {
+      const entry = readCacheEntry(roomId, nodeId)
+      entry.cards = entry.cards.filter((card): boolean => card.seq !== seq)
+      writeCacheEntry(roomId, nodeId, entry)
+      return entry.cards
     },
   }
 }
