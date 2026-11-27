@@ -701,8 +701,17 @@ function setDraftDescription(value: string): void {
 //    pick-mode, and — on return — pastes the downloaded SKILL.md body into the
 //    node's primary text widget and records the additive `importedSkills` ref. ──
 
+/** Node types whose editor hides the whole skill-import group (button AND the
+ *  chip/empty-hint panel below it): the generators' craft comes from their
+ *  linked references + pinned model, not imported craft skills. Already-imported
+ *  refs stay in `properties.importedSkills` and keep applying at run time. */
+const SKILL_IMPORT_HIDDEN: readonly string[] = ["ImageGenerator", "TextGenerator"];
+
 /** True when the edited node's schema opts into skill imports (D7/D11). */
-const editorCanImport = computed(() => selectedSchema.value?.supportsSkillImport === true);
+const editorCanImport = computed(() =>
+  selectedSchema.value?.supportsSkillImport === true &&
+  !SKILL_IMPORT_HIDDEN.includes(editorClassType.value),
+);
 
 /** The primary text widget to paste a skill body into ("" when the node has none). */
 const editorImportWidget = computed<string>(() => {
@@ -842,10 +851,15 @@ const editorModelLabel = computed<string>(() => {
 /** Widgets the editor hides per class type: the Image Generator's `mode` is
  *  auto-derived at run time from the linked reference (image linked ⇒
  *  image_to_image), and its `variant` is superseded by the model selector row
- *  (the pinned checkpoint picks the validated bundle). Both stay in the schema
- *  so saved graphs keep their positional widget values. */
+ *  (the pinned checkpoint picks the validated bundle). The Text Generator's
+ *  `prompt` is hidden under the same don't-duplicate philosophy: the instruction
+ *  rides the linked `context` slot (a Text Input node), so an editor field would
+ *  be a second, competing source. All hidden widgets stay in the schema, so
+ *  saved graphs keep their positional values and any stored text still applies
+ *  at run time. */
 const HIDDEN_PARAM_WIDGETS: Record<string, readonly string[]> = {
   ImageGenerator: ["mode", "variant"],
+  TextGenerator: ["prompt"],
 };
 
 /**
@@ -1732,10 +1746,12 @@ function onTextFile(event: Event): void {
   reader.readAsText(file);
 }
 
-/** One incoming-edge reference chip (Toonflow's refList, edge-derived). */
+/** One incoming-edge reference chip (Toonflow's refList, edge-derived). The
+ *  label is the SOURCE NODE's name (not the slot category — don't duplicate
+ *  information the canvas edge already shows), and the order is link-creation
+ *  order (ComfyUI link ids are monotonic), rendered top-to-bottom. */
 interface RefChip {
   linkId: number;
-  slot: string;
   label: string;
 }
 
@@ -1749,22 +1765,13 @@ const editorRefChips = computed<RefChip[] | null>(() => {
     .filter((edge) => edge.target === String(id))
     .map((edge): RefChip => {
       const source = bridge.flow.findNode(edge.source)?.data as MovieNodeData | undefined;
-      const slotIndex = Number(edge.targetHandle?.split("-")[1] ?? -1);
       return {
         linkId: Number((edge.data as { linkId?: unknown } | undefined)?.linkId ?? 0),
-        slot: schema.inputs[slotIndex]?.name ?? `in ${String(slotIndex)}`,
         label: source?.title ?? source?.classType ?? edge.source,
       };
-    });
+    })
+    .sort((left, right): number => left.linkId - right.linkId);
 });
-
-/** Chip close = remove the underlying edge (Toonflow's removeReference). */
-function removeRefChip(linkId: number): void {
-  if (editorReadonly.value || !Number.isFinite(linkId) || linkId <= 0) return;
-  void bridge.request("edge.remove", { id: linkId }).catch(() => {
-    ElMessage.error("Failed to remove the reference link");
-  });
-}
 
 function goLogin() {
   void router.push({ path: "/account", query: { login: "1", redirect: "/studio" } });
@@ -2008,22 +2015,21 @@ function goLogin() {
             </div>
           </div>
 
-          <!-- EXP(textinput-toonflow): reference chips for nodes with input slots
-               (TextInput's `ref`). One chip per incoming edge; close removes the
-               edge, mirroring Toonflow's removeReference. -->
+          <!-- EXP(textinput-toonflow): reference chips for nodes with input slots.
+               One chip per incoming edge, stacked top-to-bottom in link-creation
+               order and labeled with the SOURCE NODE's name; removal happens on
+               the canvas by deleting the edge (don't duplicate the control). -->
           <div v-if="editorRefChips !== null" class="fieldGroup">
             <div class="outputLabel">References</div>
-            <div v-if="editorRefChips.length > 0" class="skillChips">
+            <div v-if="editorRefChips.length > 0" class="refList">
               <el-tag
                 v-for="chip in editorRefChips"
                 :key="chip.linkId"
-                class="skillChip"
+                class="refChip"
                 size="small"
-                type="info"
-                effect="plain"
-                :closable="!editorReadonly"
-                @close="removeRefChip(chip.linkId)">
-                {{ chip.slot }} ← {{ chip.label }}
+                type="primary"
+                effect="plain">
+                {{ chip.label }}
               </el-tag>
             </div>
             <p v-else class="contentHint">No wired reference — connect a TEXT output into the ref port.</p>
@@ -3212,6 +3218,25 @@ function goLogin() {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* References stack top-to-bottom in link-creation order (one row per edge). */
+.refList {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.refChip {
+  max-width: 100%;
+  // Same skin as the selected-model chip: plain-primary gives the blue ring
+  // (primary-light-5) and blue text at the small-tag font size; the fill is
+  // forced transparent so the chip reads as an outline, exactly like the
+  // model chip above it. The rounder corner radius from the previous pass stays.
+  --el-tag-border-radius: var(--ui-radius-large);
+  --el-tag-bg-color: transparent;
+  --el-tag-font-size: var(--el-font-size-extra-small);
 }
 
 .skillChip {
