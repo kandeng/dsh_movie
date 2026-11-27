@@ -13,7 +13,7 @@
  *    entry is a valid `LegCMethod` (compile-time via the typed constant);
  *  - `methodFromApiPath` resolves the new namespace paths;
  *  - MOVIE_NODES still holds exactly the six deprecated legacy classes and
- *    FUNCTIONAL_NODES still holds 15 entries (no deletions, D11);
+ *    FUNCTIONAL_NODES still holds 11 entries (no deletions, D11);
  *  - `supportsSkillImport` is flagged on exactly TextInput + the four
  *    generators + the six legacy classes (11), and on nothing else;
  *  - `buildObjectInfo` output is unchanged by the new schema field (it is not
@@ -94,7 +94,7 @@ check(
   'every legacy class stays deprecated with step 1..6',
   MOVIE_NODES.every((node, index): boolean => node.deprecated === true && node.step === index + 1),
 )
-check('FUNCTIONAL_NODES still holds 15 entries', FUNCTIONAL_NODES.length === 15, `got ${FUNCTIONAL_NODES.length}`)
+check('FUNCTIONAL_NODES still holds 11 entries', FUNCTIONAL_NODES.length === 11, `got ${FUNCTIONAL_NODES.length}`)
 
 // ── 3. supportsSkillImport flags (D7: Text Input + generators + legacy six) ──
 
@@ -119,7 +119,7 @@ check(
   `got [${flagged.join(', ')}]`,
 )
 check(
-  'reviewers/combiners/other sources do NOT support skill import',
+  'combiners/other sources do NOT support skill import',
   ALL.filter((node): boolean => node.supportsSkillImport !== true)
     .every((node): boolean => !EXPECTED_IMPORTERS.has(node.classType)),
 )
@@ -127,7 +127,7 @@ check(
 // ── 4. object_info is unaffected by the new schema field ──
 
 const info = buildObjectInfo(ALL)
-check('buildObjectInfo advertises all 21 class types', Object.keys(info).length === 21, `got ${Object.keys(info).length}`)
+check('buildObjectInfo advertises all 17 class types', Object.keys(info).length === 17, `got ${Object.keys(info).length}`)
 check(
   'supportsSkillImport never leaks into object_info entries',
   Object.values(info).every((entry): boolean => !JSON.stringify(entry).includes('supportsSkillImport')),

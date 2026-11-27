@@ -1,7 +1,7 @@
 /**
  * Built-in node handlers for the functional catalog (Phase-5 D4, P5-M1).
  *
- * One adapter per family (source / generator / reviewer / combiner), registered
+ * One adapter per family (source / generator / combiner), registered
  * for every functional `class_type` through the D1 handler-registry contract at
  * module activation. Each adapter is a thin composition of the existing seams:
  *
@@ -20,10 +20,6 @@
  *                  available modality calls the media seam (`ctx.media`) — video
  *                  rides Bailian "Happyhorse" (`video-provider.ts`); the canned
  *                  fallback remains only as an offline/dev affordance.
- *  - `reviewer`  → the review seam (`ctx.review`); canned PASS verdict when
- *                  absent. Output 0 is the VERDICT, output 1 forwards the
- *                  reviewed artifact unchanged (D5 — no loops, fail never
- *                  retries automatically).
  *  - `combiner`  → pure functions, no model call: `TextMerge` concatenates in
  *                  slot order, `MediaConcat` forwards slot-ordered references,
  *                  `SaveOutput` passes the media through as the run output.
@@ -245,21 +241,6 @@ function generatorHandler(schema: MovieNodeSchema): NodeHandler {
   }
 }
 
-/** Build the handler for one reviewer class (verdict + passthrough, D5). */
-function reviewerHandler(schema: MovieNodeSchema): NodeHandler {
-  const inputSlot = schema.inputs[0]!
-  return {
-    async run(ctx: NodeHandlerContext): Promise<NodeHandlerOutput> {
-      const reviewed = resolveValue(ctx, ctx.inputs[inputSlot.name])
-      const criteria = display(ctx.inputs['criteria'])
-      const verdict = ctx.review === undefined
-        ? `[canned verdict] PASS — reviewer seam not configured; criteria: ${criteria === '' ? '(none)' : criteria}`
-        : await ctx.review(schema.classType, reviewed, criteria)
-      return { outputs: [verdict, reviewed], artifact: display(verdict), media: ctx.review === undefined ? 'canned' : 'llm' }
-    },
-  }
-}
-
 /** Build the handler for one combiner class (pure function, no model call). */
 function combinerHandler(schema: MovieNodeSchema): NodeHandler {
   return {
@@ -286,13 +267,12 @@ function handlerForSchema(schema: MovieNodeSchema): NodeHandler {
   switch (schema.family) {
     case 'source': return sourceHandler(schema)
     case 'generator': return generatorHandler(schema)
-    case 'reviewer': return reviewerHandler(schema)
     case 'combiner': return combinerHandler(schema)
     default: throw new Error(`functional node ${schema.classType} has no family`)
   }
 }
 
-/** The built-in handlers for all fifteen functional class types. */
+/** The built-in handlers for all eleven functional class types. */
 export const BUILTIN_NODE_HANDLERS: Readonly<Record<string, NodeHandler>> = Object.fromEntries(
   FUNCTIONAL_NODES.map((schema): [string, NodeHandler] => [schema.classType, handlerForSchema(schema)]),
 )

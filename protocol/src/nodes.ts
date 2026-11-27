@@ -54,7 +54,7 @@ export interface NodeWidgetSchema {
 }
 
 /** The role a functional node plays in a graph (Phase-5 D3). */
-export type NodeFamily = 'source' | 'generator' | 'reviewer' | 'combiner'
+export type NodeFamily = 'source' | 'generator' | 'combiner'
 
 /** The media kind a functional node consumes/produces (Phase-5 D3). */
 export type NodeModality = 'text' | 'image' | 'video' | 'audio'
@@ -388,63 +388,6 @@ export const FUNCTIONAL_NODES: readonly MovieNodeSchema[] = [
       { name: 'model', type: 'STRING', default: '' },
     ],
   },
-  // ── reviewers: one required reviewed input, verdict + forwarded artifact out ──
-  {
-    classType: 'TextReviewer',
-    displayName: 'Text Reviewer',
-    description: 'Judge linked text against the criteria widget; emits a VERDICT and forwards the text on pass.',
-    category: 'movie/reviewer',
-    family: 'reviewer',
-    modality: 'text',
-    inputs: [{ name: 'text', type: 'TEXT' }],
-    outputs: [
-      { name: 'verdict', type: 'VERDICT' },
-      { name: 'text', type: 'TEXT' },
-    ],
-    widgets: [{ name: 'criteria', type: 'STRING', multiline: true, default: '' }],
-  },
-  {
-    classType: 'ImageReviewer',
-    displayName: 'Image Reviewer',
-    description: 'Judge a linked image against the criteria widget; emits a VERDICT and forwards the image on pass.',
-    category: 'movie/reviewer',
-    family: 'reviewer',
-    modality: 'image',
-    inputs: [{ name: 'image', type: 'IMAGE' }],
-    outputs: [
-      { name: 'verdict', type: 'VERDICT' },
-      { name: 'image', type: 'IMAGE' },
-    ],
-    widgets: [{ name: 'criteria', type: 'STRING', multiline: true, default: '' }],
-  },
-  {
-    classType: 'VideoReviewer',
-    displayName: 'Video Reviewer',
-    description: 'Judge a linked video clip against the criteria widget; emits a VERDICT and forwards the clip on pass.',
-    category: 'movie/reviewer',
-    family: 'reviewer',
-    modality: 'video',
-    inputs: [{ name: 'video', type: 'VIDEO' }],
-    outputs: [
-      { name: 'verdict', type: 'VERDICT' },
-      { name: 'video', type: 'VIDEO' },
-    ],
-    widgets: [{ name: 'criteria', type: 'STRING', multiline: true, default: '' }],
-  },
-  {
-    classType: 'AudioReviewer',
-    displayName: 'Audio Reviewer',
-    description: 'Judge linked audio against the criteria widget; emits a VERDICT and forwards the audio on pass.',
-    category: 'movie/reviewer',
-    family: 'reviewer',
-    modality: 'audio',
-    inputs: [{ name: 'audio', type: 'AUDIO' }],
-    outputs: [
-      { name: 'verdict', type: 'VERDICT' },
-      { name: 'audio', type: 'AUDIO' },
-    ],
-    widgets: [{ name: 'criteria', type: 'STRING', multiline: true, default: '' }],
-  },
   // ── combiners: deterministic, no model call ──
   {
     classType: 'TextMerge',
@@ -497,7 +440,7 @@ export const ANY_SLOT_TYPE = '*'
 /**
  * Mixed-modality reference supertype: a slot declaring `REF` accepts any
  * TEXT-family or IMAGE-family link (subtypes flow up: SCRIPT, SHOT_PLAN,
- * VERDICT, ASSET, STORYBOARD), letting ONE variadic input serve as a combined
+ * ASSET, STORYBOARD), letting ONE variadic input serve as a combined
  * prompt + reference-image port (the Video Generator's unified `in` slot).
  * Deliberately NOT an entry in {@link SUBTYPE_OF}: that table is
  * single-parent, and re-parenting TEXT/IMAGE under REF would reroute
@@ -508,15 +451,14 @@ export const ANY_SLOT_TYPE = '*'
 export const REF_SLOT_TYPE = 'REF'
 
 /**
- * Subtype assignability table (Phase-5 D2): legacy step artifact types (and the
- * reviewer verdict) are subtypes of their base media type. A link is compatible
+ * Subtype assignability table (Phase-5 D2): legacy step artifact types are
+ * subtypes of their base media type. A link is compatible
  * when the source type equals the target type or is a subtype of it (never the
  * reverse), or when either side is {@link ANY_SLOT_TYPE}.
  */
 export const SUBTYPE_OF: Readonly<Record<string, string>> = {
   SCRIPT: 'TEXT',
   SHOT_PLAN: 'TEXT',
-  VERDICT: 'TEXT',
   ASSET: 'IMAGE',
   STORYBOARD: 'IMAGE',
   CLIP: 'VIDEO',

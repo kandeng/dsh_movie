@@ -11,10 +11,10 @@ export interface CascadeSelection {
 <script setup lang="ts">
 /**
  * Add-node cascade (Phase-5 D12): the two-level family → class palette that
- * replaces the flat six-step dropdown, plus a fifth **Templates** branch (D6)
+ * replaces the flat six-step dropdown, plus a fourth **Templates** branch (D6)
  * holding the pre-wired step/pipeline macros.
  *
- * Level 1 = the four functional families (`source`, `generator`, `reviewer`,
+ * Level 1 = the three functional families (`source`, `generator`,
  * `combiner`) + `Templates`; level 2 = the class types of the picked family, or
  * the templates. Picking a leaf emits either `{ classType }` (drop one node) or
  * `{ templateId }` (expand a macro); the caller decides the drop position and
@@ -53,11 +53,10 @@ interface Branch {
   templates: TemplateEntry[];
 }
 
-const FAMILY_ORDER: NodeFamily[] = ["source", "generator", "reviewer", "combiner"];
+const FAMILY_ORDER: NodeFamily[] = ["source", "generator", "combiner"];
 const FAMILY_LABEL: Record<NodeFamily, string> = {
   source: "输入源",
   generator: "生成器",
-  reviewer: "审校器",
   combiner: "组合器",
 };
 

@@ -48,7 +48,7 @@ export type { MovieGateway, MovieGatewayInfo } from './types.ts'
  * runtime. The credentials seam (and `llm-pi-ai`'s `apiKeyEnv: BAILIAN_API_KEY`)
  * sources the key from `server/.env`, but DSH does NOT inject that file into
  * `process.env`, so a host launched without the variable exported would read an
- * empty key and silently disable the text/review seams, the D15 text
+ * empty key and silently disable the text seam, the D15 text
  * availability and the D7 intent miner. Prefer the live environment, then fall
  * back to parsing `server/.env`.
  *
@@ -202,7 +202,7 @@ export function apply(ctx: Context, config: Config): void {
       bailianKey === '' ? 'missing' : 'set',
       subagents === undefined ? 'missing' : 'present',
     )
-    // The real text/review seams activate only with BOTH the subagent runtime and
+    // The real text seam activates only with BOTH the subagent runtime and
     // a Bailian key; without either the adapters fall back to their honest canned
     // text (mirroring the director's key-free degrade), so the key-free verifier
     // stays deterministic and D15 text availability reflects reality.
@@ -294,7 +294,6 @@ export function apply(ctx: Context, config: Config): void {
         mediaProvider: routingMediaProvider,
         availability,
         ...(llmText === undefined ? {} : { stepText: (classType: string, inputs: Record<string, unknown>): Promise<string> => llmText.text(classType, inputs) }),
-        ...(llmText === undefined ? {} : { review: (classType: string, artifact: unknown, criteria: string): Promise<string> => llmText.review(classType, artifact, criteria) }),
         ...(matrixChat === undefined ? {} : { matrixChat }),
         ...(movieMarket === undefined ? {} : { movieMarket }),
         // P8-M5/P8-M7: pre-run health gate. Uses the cheap cached probe (a

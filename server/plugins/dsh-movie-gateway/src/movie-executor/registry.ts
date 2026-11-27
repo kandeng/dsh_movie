@@ -2,7 +2,7 @@
  * Leg B executor node registry (Phase-3 P3-M4 §6, Phase-5 D1/D4).
  *
  * Builds the ComfyUI `/object_info` catalog the executor validates and schedules
- * prompts against: the six deprecated movie step nodes plus the fifteen
+ * prompts against: the six deprecated movie step nodes plus the eleven
  * functional nodes from the shared protocol registry (via {@link buildObjectInfo}),
  * merged over the small canned demo nodes from `fixtures.ts`
  * (`MovieTextToImage`, `MovieImageToVideo`, `MovieSaveOutput`) so the existing
@@ -35,7 +35,7 @@ import type { ModelAvailability } from './model-catalog.ts'
 type ObjectInfoMap = Record<string, unknown>
 
 /**
- * Build the merged `/object_info` map: the six legacy step nodes + the fifteen
+ * Build the merged `/object_info` map: the six legacy step nodes + the eleven
  * functional nodes plus the canned bridge demo nodes. Protocol nodes win on any
  * class_type collision.
  * @returns a `class_type -> object_info entry` record.
@@ -147,9 +147,7 @@ export interface NodeHandlerContext {
   availability: ModelAvailability
   /** Real LLM text seam (generalizes the legacy `StepTextGenerator`). */
   text?: ((classType: string, inputs: Record<string, unknown>) => Promise<string>) | undefined
-  /** Real reviewer seam: judges one artifact against criteria. */
-  review?: ((classType: string, artifact: unknown, criteria: string) => Promise<string>) | undefined
-  /** Media-artifact seam for generator/reviewer modality adapters (Phase 8: full provider contract). */
+  /** Media-artifact seam for generator modality adapters (Phase 8: full provider contract). */
   media?: MediaProvider | undefined
   /** Phase 8 P8-M4: sampling progress (0..100) forwarded to the Leg B lifecycle. */
   progress?: ((percent: number) => void) | undefined

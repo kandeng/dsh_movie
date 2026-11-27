@@ -80,14 +80,8 @@ export interface VueFlowBridge extends CanvasBridge {
   /** Remove the group at `index`. */
   removeGroup: (index: number) => void;
   /**
-   * Paint (or clear, with `undefined`) a reviewer verdict line onto a node
-   * (Phase-5 D5). View-only like {@link CanvasBridge.setNodeStatus}: it is
-   * suppressed from `graphChanged` so it never dirties/autosaves the graph.
-   */
-  setNodeVerdict: (id: number, verdict: string | undefined) => void;
-  /**
-   * Write a node's name/description (Phase-6 D11). Unlike the status/verdict
-   * paints these ARE canonical node data, so the write schedules a
+   * Write a node's name/description (Phase-6 D11). Unlike the status paint,
+   * these ARE canonical node data, so the write schedules a
    * `graphChanged` (host autosave → room sync) like any other edit.
    */
   setNodeMeta: (
@@ -287,14 +281,6 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
     flow.updateNodeData(String(id), { status } as Partial<MovieNodeData>);
     const payload: ExecPaintedPayload = { id, status };
     for (const handler of execPaintedHandlers) handler(payload);
-  }
-
-  /** Paint (or clear) a reviewer verdict line onto a node (Phase-5 D5). */
-  function paintVerdict(id: number, verdict: string | undefined): void {
-    // Verdict is view-only (never serialized), so suppress the watch tick like
-    // `paintStatus` to avoid dirtying/autosaving the graph.
-    suppressUntil = Math.max(suppressUntil, Date.now() + STATUS_SUPPRESS_MS);
-    flow.updateNodeData(String(id), { verdict } as Partial<MovieNodeData>);
   }
 
   /** Write node name/description/content provenance (Phase-6 D5/D11) — canonical, so it syncs. */
@@ -578,7 +564,6 @@ export function useVueFlowBridge(options: UseVueFlowBridgeOptions = {}): VueFlow
       return data?.graph ?? null;
     },
     setNodeStatus: (id: number, status: NodeRunStatus): void => sendCommand("node.setStatus", { id, status }),
-    setNodeVerdict: (id: number, verdict: string | undefined): void => paintVerdict(id, verdict),
     setNodeMeta,
     setReadonly: (value: boolean): void => sendCommand("setReadonly", { readonly: value }),
     viewFit: (ids?: number[]): void => sendCommand("view.fit", ids !== undefined ? { ids } : {}),

@@ -79,7 +79,6 @@ import { cannedMediaProvider, type MediaProvider } from './movie-executor/media-
 import { createRoomNotifier, type RoomPoster } from './movie-executor/room-notifier.ts'
 import { applyOpsToGraph } from './movie-executor/apply-ops.ts'
 import { availabilityFromInventory, type ModelAvailability } from './movie-executor/model-catalog.ts'
-import type { ReviewFn } from './movie-executor/llm-text.ts'
 import { downloadSkillToRoom, resolveNodeSkills, executeSkillToRoom, executeNodeSkills } from './skill-import.ts'
 import type { JobId, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { MovieGatewayInfo } from './types.ts'
@@ -139,11 +138,6 @@ export interface GatewayServerDeps {
    * text steps fall back to the canned provider.
    */
   stepText?: StepTextGenerator | undefined
-  /**
-   * Optional real reviewer seam (D5) for functional `*Reviewer` nodes, wired to
-   * the Bailian LLM. When absent, reviewers fall back to a canned PASS verdict.
-   */
-  review?: ReviewFn | undefined
   /**
    * Optional D15 model-availability gate. When absent the gateway derives a
    * conservative gate (text only when {@link GatewayServerDeps.stepText} is
@@ -449,7 +443,7 @@ const MAX_REPLANS = 2
  * @returns the running gateway handle.
  */
 export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
-  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, review, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage, movieMarket, beforeRun } = deps
+  const { port, identity, logger, staticDir, bridgeExtensionFile, canvasAgent, jobs, mediaProvider, stepText, availability, matrixChat, director, workspaceRoot, intentMiner, onRoomMessage, movieMarket, beforeRun } = deps
   const execClients = new Set<WebSocket>()
   // P8-M6: cancel-on-disconnect. Bind each `/ws` exec client to the backend jobs
   // it submitted (ComfyUI-style `clientId`). When the client goes away its live
@@ -1730,7 +1724,6 @@ export function startGatewayServer(deps: GatewayServerDeps): GatewayHandle {
           broadcast: broadcastExec,
           mediaProvider: mediaProvider ?? cannedMediaProvider,
           ...(stepText === undefined ? {} : { stepText }),
-          ...(review === undefined ? {} : { review }),
           ...(resolveSkills === undefined ? {} : { resolveSkills }),
           ...(executeSkills === undefined ? {} : { executeSkills }),
           availability: executorAvailability,

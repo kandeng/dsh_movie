@@ -115,29 +115,6 @@ watch(execStatus.statusById, (byId) => {
   for (const [id, status] of byId) bridge.setNodeStatus(id, status);
 });
 
-// Paint the reviewer verdict line (Phase-5 D5) from each node's executed output.
-// Only reviewer-family nodes render it (MovieNode.vue gates on `family`), so the
-// verdict is resolved against the live graph and passed through as view-only data.
-watch(execStatus.outputById, (byId) => {
-  const graph = currentGraph.value;
-  for (const [id, output] of byId) bridge.setNodeVerdict(id, reviewerVerdict(graph, id, output));
-});
-
-/**
- * Extract a reviewer node's verdict string from its executed output (D5).
- * A reviewer's artifact IS the verdict (`PASS …` / `FAIL …`); non-reviewer nodes
- * and unresolved ids yield `undefined` so no verdict line is painted.
- */
-function reviewerVerdict(graph: WorkflowGraph | null, id: number, output: unknown): string | undefined {
-  if (graph === null) return undefined;
-  // `schemaFor` spans both catalogs, so functional reviewers resolve too (the
-  // legacy `nodeSchemaForId` knows only the six deprecated movie steps).
-  const classType = graph.nodes.find((node) => node.id === id)?.type ?? "";
-  if (schemaFor(classType)?.family !== "reviewer") return undefined;
-  const artifact = (output as { artifact?: unknown } | undefined)?.artifact;
-  return typeof artifact === "string" && artifact !== "" ? artifact : undefined;
-}
-
 // ── P3-M5：主机独占协作（design doc §4）。roomRole 解析 auth/role 并订阅唯一的
 //    workflow/watch mux（实时收敛 + 角色变更）；workspace 承载主机草稿自动保存
 //    （workspace/draft.put，防抖）、撤销/重做、提交、历史与回滚，并对非主机观众强制
@@ -1048,7 +1025,7 @@ function reloadDemo() {
 
 /** Nominal MovieNode footprint used to center a fresh drop: the card width is
  *  fixed at 220px in MovieNode.vue; the Phase-6 three-row card (title bar +
- *  name + 48px stub) settles around 120px, verdict line aside. */
+ *  name + 48px stub) settles around 120px. */
 const NODE_W = 220;
 const NODE_H_EST = 120;
 
@@ -1968,7 +1945,7 @@ function goLogin() {
             <p class="contentHint">{{ translate("也可直接把聊天里复制的图片粘贴到此处") }}</p>
           </div>
 
-          <!-- Row 4b: every OTHER node's widgets (text source + generator/reviewer/
+          <!-- Row 4b: every OTHER node's widgets (text source + generator/
                combiner parameters) are edited HERE — the card has no input DOM (D1).
                A text source additionally offers the full-height focus editor (D2). -->
           <div v-else-if="editorParamWidgets.length > 0" class="fieldGroup">

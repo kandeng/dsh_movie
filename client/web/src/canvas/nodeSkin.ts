@@ -53,7 +53,6 @@ const MODALITY_ICON: Readonly<Record<string, SkinIcon>> = {
 const FAMILY_ACCENT: Readonly<Record<string, string>> = {
   source: "#13c2c2",
   generator: "#409eff",
-  reviewer: "#fa8c16",
   combiner: "#722ed1",
 };
 

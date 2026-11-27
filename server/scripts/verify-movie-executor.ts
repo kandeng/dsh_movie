@@ -7,7 +7,7 @@
  *     prompt validator, and topological sort that back the rewired
  *     `POST /prompt`:
  *     - `registry` advertises all six {@link MOVIE_NODES} class types plus the
- *       fifteen functional class types (Phase-5 D3);
+ *       eleven functional class types (Phase-5 D3);
  *     - `validatePromptGraph` accepts the demo graph, rejects an unknown
  *       `class_type`, a link to a missing node, an out-of-range slot, and —
  *       new in Phase-5 D2 — a link whose source/target slot types are
@@ -19,10 +19,8 @@
  *       family adapter, and leaves legacy step types on the fallback path;
  *     - the D15 availability gate fails an unbacked-modality generator with a
  *       `ModelUnavailableError`, the room notifier posts the customer_service
- *       notice (and degrades log-only without a poster/room), and the text +
- *       reviewer seams run through injected fakes;
- *     - new in Phase-5 D5 — a reviewer FAIL verdict is returned as data
- *       (verdict + forwarded artifact), never thrown, so it cannot block a run;
+ *       notice (and degrades log-only without a poster/room), and the text
+ *       seam runs through injected fakes;
  *     - `topoSort` orders a linked chain 1->6 regardless of insertion order and
  *       detects a cycle.
  *
@@ -32,8 +30,7 @@
  *     that drives the `/ws` execution lifecycle across all node ids in
  *     topological order (executing -> progress -> executed ->
  *     execution_success) — for both the legacy six-step chain and the
- *     functional join/fork graphs, plus a reviewer-branch graph proving a
- *     reviewer never blocks an unrelated branch (D5).
+ *     functional join/fork graphs.
  *
  * Run from the `server/` directory:
  *   node scripts/verify-movie-executor.ts
@@ -108,25 +105,7 @@ function forkPrompt(): PromptGraph {
   return {
     '1': { class_type: 'TextInput', inputs: { text: 'a logline' } },
     '2': { class_type: 'TextGenerator', inputs: { context: ['1', 0], prompt: 'write the script' } },
-    '3': { class_type: 'TextReviewer', inputs: { text: ['1', 0], criteria: 'must mention the sea' } },
-  }
-}
-
-/**
- * Phase-5 D5 branch isolation: a reviewer on one branch alongside an unrelated
- * two-node generator branch. The source (1) feeds both a TextReviewer (2) and a
- * TextGenerator (3); (3) feeds a second TextGenerator (4). Nodes 3→4 never
- * depend on node 2, so whatever verdict the reviewer emits (PASS or FAIL) it is
- * data — the run must still execute 3 and 4 and reach `execution_success`. All
- * text nodes, so it stays green offline (LLM seam when a key is present, canned
- * otherwise).
- */
-function reviewBranchPrompt(): PromptGraph {
-  return {
-    '1': { class_type: 'TextInput', inputs: { text: 'a logline about the sea' } },
-    '2': { class_type: 'TextReviewer', inputs: { text: ['1', 0], criteria: 'must mention the sea' } },
-    '3': { class_type: 'TextGenerator', inputs: { context: ['1', 0], prompt: 'expand the logline' } },
-    '4': { class_type: 'TextGenerator', inputs: { context: ['3', 0], prompt: 'polish the expansion' } },
+    '3': { class_type: 'TextGenerator', inputs: { context: ['1', 0], prompt: 'write the shot list' } },
   }
 }
 
@@ -170,7 +149,7 @@ function offlineChecks(): void {
   const missingFunctional = FUNCTIONAL_NODES
     .map((node): string => node.classType)
     .filter((classType): boolean => !(classType in catalog))
-  check('registry advertises all fifteen functional class types', missingFunctional.length === 0, missingFunctional.length === 0 ? '15 classes' : `missing: ${missingFunctional.join(', ')}`)
+  check('registry advertises all eleven functional class types', missingFunctional.length === 0, missingFunctional.length === 0 ? '11 classes' : `missing: ${missingFunctional.join(', ')}`)
 
   // Phase-5 D1: handler registry resolves functional classes; legacy steps stay
   // on the fallback path (no registered handler).
@@ -213,7 +192,6 @@ function offlineChecks(): void {
   // Phase-5 D2: link type compatibility.
   check('validate accepts the functional join graph', validatePromptGraph(joinPrompt()).ok)
   check('validate accepts the functional fork graph', validatePromptGraph(forkPrompt()).ok)
-  check('validate accepts the reviewer-branch graph', validatePromptGraph(reviewBranchPrompt()).ok)
   const mismatch = validatePromptGraph(mismatchPrompt())
   check(
     'validate rejects an AUDIO → IMAGE type mismatch (D2)',
@@ -222,7 +200,7 @@ function offlineChecks(): void {
   )
   const subtypeLink = validatePromptGraph({
     '1': { class_type: 'MovieScript', inputs: {} },
-    '2': { class_type: 'TextReviewer', inputs: { text: ['1', 0] } },
+    '2': { class_type: 'TextGenerator', inputs: { context: ['1', 0] } },
   })
   check('validate accepts a legacy SCRIPT → TEXT subtype link (R2)', subtypeLink.ok)
 
@@ -238,12 +216,6 @@ function offlineChecks(): void {
     'topoSort orders the fork graph source-first',
     forkSorted.ok && forkSorted.order[0] === '1',
     forkSorted.ok ? forkSorted.order.join(' -> ') : `cycle: ${forkSorted.cycle.join(', ')}`,
-  )
-  const branchSorted = topoSort(reviewBranchPrompt())
-  check(
-    'topoSort orders the reviewer branch ahead of its unrelated tail (1 first, 4 last)',
-    branchSorted.ok && branchSorted.order[0] === '1' && branchSorted.order[branchSorted.order.length - 1] === '4',
-    branchSorted.ok ? branchSorted.order.join(' -> ') : `cycle: ${branchSorted.cycle.join(', ')}`,
   )
 
   // Topo: the reverse-inserted chain still sorts to 1..6.
@@ -278,7 +250,7 @@ const fakeMedia = {
 /**
  * Phase-5 P5-M2 offline checks: the D15 model-availability gate, its typed
  * error, the room notifier (customer_service notice + D8 echo), and the
- * generator/text/reviewer adapter seams — all deterministic, no host/LLM.
+ * generator/text adapter seams — all deterministic, no host/LLM.
  */
 async function availabilityChecks(): Promise<void> {
   process.stdout.write('\n— offline: D15 availability gate + room notifier + adapter seams —\n')
@@ -471,41 +443,6 @@ async function availabilityChecks(): Promise<void> {
     videoWeight === '' || templateByModelFile(pinnedTemplates, videoWeight) === undefined,
     videoWeight,
   )
-
-  // The reviewer seam: verdict (output 0) + passthrough of the reviewed artifact.
-  const reviewOut = await handlerFor('TextReviewer')?.run(handlerCtx(bailianOnly, {
-    inputs: { text: ['1', 0], criteria: 'must mention the sea' },
-    resolve: (): unknown => 'the sea',
-    review: async (classType: string, artifact: unknown): Promise<string> => `PASS ${classType} ${String(artifact)}`,
-  }))
-  check(
-    'reviewer routes through the injected review seam (verdict + passthrough)',
-    typeof reviewOut?.artifact === 'string' && reviewOut.artifact.startsWith('PASS')
-      && reviewOut.media === 'llm' && reviewOut.outputs[1] === 'the sea',
-    reviewOut?.artifact ?? 'none',
-  )
-
-  // D5: a FAIL verdict is DATA, not an error. The reviewer returns the verdict
-  // (output 0) and forwards the reviewed artifact (output 1); it never throws,
-  // so the runner's topo loop continues to unrelated branches (a fail surfaces
-  // the verdict instead of blocking the run).
-  let failVerdict = ''
-  let failForwarded: unknown
-  let failThrew = false
-  try {
-    const failOut = await handlerFor('TextReviewer')?.run(handlerCtx(bailianOnly, {
-      inputs: { text: ['1', 0], criteria: 'must mention the sea' },
-      resolve: (): unknown => 'a story about the mountains',
-      review: async (classType: string, artifact: unknown): Promise<string> => `FAIL ${classType}: "${String(artifact)}" never mentions the sea`,
-    }))
-    failVerdict = typeof failOut?.artifact === 'string' ? failOut.artifact : ''
-    failForwarded = failOut?.outputs[1]
-  } catch { failThrew = true }
-  check(
-    'D5: a reviewer FAIL verdict is returned as data (verdict + forwarded artifact), never thrown',
-    !failThrew && failVerdict.startsWith('FAIL') && failForwarded === 'a story about the mountains',
-    failThrew ? 'threw' : failVerdict || 'none',
-  )
 }
 
 /** Read a lifecycle frame's `prompt_id` (absent on the global `status` frame). */
@@ -653,7 +590,7 @@ async function liveChecks(): Promise<void> {
     check('Leg B /ws lifecycle completed', false, String(error))
   }
 
-  // Phase-5: the functional fork graph (all text/reviewer nodes) runs in topo
+  // Phase-5: the functional fork graph (all text nodes) runs in topo
   // order through the family adapters (D4) and fans out from one source. Text
   // nodes are never gated by D15 — they ride the LLM seam when a key is present
   // and fall back to honest canned text otherwise — so this stays green offline.
@@ -678,36 +615,6 @@ async function liveChecks(): Promise<void> {
     } catch (error) {
       check(`Leg B ${label}-graph lifecycle completed`, false, String(error))
     }
-  }
-
-  // Phase-5 D5: a reviewer on one branch never blocks an unrelated branch. Node
-  // 2 reviews the source; nodes 3→4 are an independent generator tail. Whatever
-  // the verdict (PASS offline-canned, or a real LLM verdict with a key), the
-  // reviewer emits it as an executed artifact and 3→4 still run to
-  // `execution_success` — a fail is data, not a run-aborting error.
-  try {
-    const messages = await collectLifecycle(reviewBranchPrompt())
-    const executedNodes = messages
-      .filter((message): boolean => message.type === 'executed')
-      .map((message): string | null => (message.type === 'executed' ? message.data.node : null))
-      .filter((node): node is string => typeof node === 'string')
-    const reviewerFrame = messages.find(
-      (message): message is Extract<ExecMessage, { type: 'executed' }> => message.type === 'executed' && message.data.node === '2',
-    )
-    const verdict = reviewerFrame === undefined ? '' : String((reviewerFrame.data.output as { artifact?: unknown }).artifact ?? '')
-    check(
-      'D5: the reviewer branch and the unrelated generator branch (3→4) both complete',
-      executedNodes.includes('2') && executedNodes.includes('3') && executedNodes.includes('4')
-        && messages.some((message): boolean => message.type === 'execution_success'),
-      `executed: ${executedNodes.join(' -> ') || 'none'}`,
-    )
-    check(
-      'D5: the reviewer node surfaces its verdict as the executed artifact',
-      verdict !== '',
-      verdict.slice(0, 64) || 'none',
-    )
-  } catch (error) {
-    check('Leg B reviewer-branch lifecycle completed', false, String(error))
   }
 
   // Phase-5 D15: an image generator has no backing model on the Bailian-only

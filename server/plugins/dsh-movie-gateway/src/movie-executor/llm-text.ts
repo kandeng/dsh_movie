@@ -1,16 +1,13 @@
 /**
- * Phase-5 D4/M2 real Bailian text + reviewer seams for the Leg B executor.
+ * Phase-5 D4/M2 real Bailian text seam for the Leg B executor.
  *
  * Generalizes the director's six-step text path (`movie-team/director.ts`) and
- * the canvas planner's turn loop (`canvas-agent.ts`) into the two model seams the
+ * the canvas planner's turn loop (`canvas-agent.ts`) into the model seam the
  * functional adapters consume:
  *  - {@link LlmTextAgent.text} — the `generator/text` seam: one Bailian LLM turn
  *    (`qwen3.8-max` via `ctx.agents` + `ctx.agentDefaultModel`) that writes the
  *    text a `TextGenerator` node describes, folding its resolved upstream
  *    sections + prompt widget into the instruction.
- *  - {@link LlmTextAgent.review} — the `reviewer` seam (D5): one LLM turn that
- *    judges an artifact against the node's criteria and returns a PASS/FAIL
- *    verdict with brief notes.
  *
  * The Leg B `/prompt` surface is room-agnostic, so a single shared executor agent
  * is lazily created and every turn is serialized behind one queue — concurrent
@@ -39,7 +36,7 @@ export interface LlmTextLogger {
   warn(message: string, ...args: unknown[]): void
 }
 
-/** The host services the text/review seams drive; injected once at activation. */
+/** The host services the text seam drives; injected once at activation. */
 export interface LlmTextDeps {
   /** Core Agent registry (`ctx.agents`). */
   agents: Context['agents']
@@ -60,9 +57,6 @@ export interface LlmTextDeps {
   /** Diagnostics sink. */
   logger: LlmTextLogger
 }
-
-/** The reviewer seam signature (D5): judge one artifact against criteria. */
-export type ReviewFn = (classType: string, artifact: unknown, criteria: string) => Promise<string>
 
 /** The stable session id for the single shared executor text agent. */
 function executorSession(): SessionId {
@@ -174,20 +168,6 @@ export function buildTextPrompt(classType: string, inputs: Record<string, unknow
   return lines.join('\n').trim()
 }
 
-/** Compose the judge prompt for one reviewer node (D5). */
-function buildReviewPrompt(classType: string, artifact: unknown, criteria: string): string {
-  const body = display(artifact)
-  return [
-    `You are the dsh_movie "${classType}" reviewer. Judge the artifact against the criteria.`,
-    'Reply with ONLY the verdict: begin with PASS or FAIL, then one or two brief sentences of notes.',
-    '',
-    `CRITERIA: ${criteria === '' ? '(none specified — judge general quality)' : criteria}`,
-    '',
-    'ARTIFACT:',
-    body === '' ? '(empty)' : body,
-  ].join('\n')
-}
-
 /**
  * Compose the D7 intent-router prompt: a CHEAP classification turn that decides
  * whether one room utterance asks to edit the canvas graph, and if so distills it
@@ -265,7 +245,7 @@ function finalAssistantText(session: Session, firstSeq: number): string {
 
 /**
  * The shared executor LLM agent: one lazily-created Bailian agent driving
- * serialized text-generation and reviewer turns for the Leg B `/prompt` path.
+ * serialized text-generation turns for the Leg B `/prompt` path.
  */
 export class LlmTextAgent {
   /** Per-model agent cache keyed by model id ('' = the default-model agent). */
@@ -312,17 +292,6 @@ export class LlmTextAgent {
       }
       return this.runTurn(prompt, `text:${classType}`, model, images)
     })
-  }
-
-  /**
-   * Judge one artifact against criteria for a `reviewer` node (D5).
-   * @param classType - the reviewer class.
-   * @param artifact - the artifact under review.
-   * @param criteria - the review-criteria widget text.
-   * @returns the verdict (PASS/FAIL + notes).
-   */
-  review(classType: string, artifact: unknown, criteria: string): Promise<string> {
-    return this.enqueue((): Promise<string> => this.runTurn(buildReviewPrompt(classType, artifact, criteria), `review:${classType}`))
   }
 
   /**

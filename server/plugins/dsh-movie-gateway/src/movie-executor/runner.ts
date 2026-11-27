@@ -27,7 +27,6 @@ import type { MediaProvider } from './media-provider.ts'
 import { handlerFor, modalityOf, outputSlotSchema, type NodeHandler, type NodeHandlerContext } from './registry.ts'
 import { isModelUnavailable } from './errors.ts'
 import type { ModelAvailability } from './model-catalog.ts'
-import type { ReviewFn } from './llm-text.ts'
 import type { EchoKind, RoomNotifier } from './room-notifier.ts'
 
 /** Register the `movie-exec` producer kind with the jobs subsystem. */
@@ -93,8 +92,6 @@ export interface RunPromptDeps {
   mediaProvider: MediaProvider
   /** Real text generator for the text steps; canned fallback when absent. */
   stepText?: StepTextGenerator | undefined
-  /** Real reviewer seam (D5); canned verdict when absent. */
-  review?: ReviewFn | undefined
   /**
    * Optional Phase-7 D7 mode-2 skill resolver. When present, each node's
    * imported skills are resolved (re-fetching any missing file) before it runs.
@@ -234,7 +231,6 @@ export function startPromptJob(deps: RunPromptDeps, graph: PromptGraph, order: r
                 },
                 availability: deps.availability,
                 ...(deps.stepText === undefined ? {} : { text: deps.stepText }),
-                ...(deps.review === undefined ? {} : { review: deps.review }),
                 media: deps.mediaProvider,
                 // P8-M4: sampling progress rides the existing `progress` lifecycle
                 // message; cancellation aborts the provider's remote job.

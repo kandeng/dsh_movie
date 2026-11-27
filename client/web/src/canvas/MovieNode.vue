@@ -10,8 +10,7 @@
  *      (user description, else the first paragraph of the text payload).
  *
  * Running status is carried by the border color plus one corner dot (D13) —
- * no status word. The reviewer verdict line stays: a verdict is output data,
- * not status. Everything else the old card rendered (editable widgets, the
+ * no status word. Everything else the old card rendered (editable widgets, the
  * full port name/type lists, schema blurb, modality chip, family pill, step
  * badge) is gone: decoration without meaning, and editing moved to the editor
  * card. The ONE port residue that came back is each slot's NAME as a tiny
@@ -43,7 +42,6 @@ const data = computed<MovieNodeData>(() => props.data ?? ({} as MovieNodeData));
 const schema = computed(() => schemaFor(data.value.classType));
 const widgets = computed(() => data.value.widgets ?? []);
 const status = computed(() => data.value.status ?? "idle");
-const family = computed(() => schema.value?.family);
 const modality = computed(() => schema.value?.modality);
 
 /** Row 1: the localized node type (English protocol names are i18n keys). */
@@ -56,22 +54,6 @@ const nodeName = computed(() => data.value.title ?? typeLabel.value);
 const skin = computed(() => nodeSkin(data.value.classType));
 const typeIcon = computed(() => skin.value.icon);
 const accent = computed(() => skin.value.accent);
-
-/**
- * Reviewer verdict line (Phase-5 D5). The Leg B `executed` output for a
- * reviewer carries the verdict as its artifact; the Studio paints it onto the
- * node data (view-only). PASS/FAIL is inferred from the text so the line can be
- * colored — a FAIL verdict is DATA, never a thrown error, so the node still
- * shows `success` while the verdict line reads FAIL.
- */
-const verdict = computed(() => data.value.verdict ?? "");
-const verdictState = computed<"pass" | "fail" | "">(() => {
-  const text = verdict.value.toUpperCase();
-  if (text === "") return "";
-  if (text.includes("FAIL")) return "fail";
-  if (text.includes("PASS")) return "pass";
-  return "";
-});
 
 /** Handle ids that currently have an edge attached (dot vs dashed glyph). */
 const connectedHandles = computed(() => {
@@ -194,12 +176,6 @@ const mediaName = computed(() => {
         <p v-else-if="modality === 'text' && stubText" class="stubText nodrag">{{ stubText }}</p>
         <div v-else class="stubEmpty" aria-hidden="true">
           <component :is="typeIcon" :size="14" />
-        </div>
-
-        <!-- Reviewer verdict line (D5): output data, kept per D13. -->
-        <div v-if="family === 'reviewer' && verdict" class="verdictRow" :class="`verdict-${verdictState}`">
-          <span class="verdictBadge">{{ verdictState === "fail" ? "FAIL" : verdictState === "pass" ? "PASS" : "VERDICT" }}</span>
-          <span class="verdictText" :title="verdict">{{ verdict }}</span>
         </div>
       </div>
 
@@ -426,49 +402,6 @@ const mediaName = computed(() => {
 
 .contentCard {
   padding-bottom: 8px;
-}
-
-.verdictRow {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin: 6px 8px 0;
-  padding: 4px 6px;
-  border: 1px solid var(--el-border-color-light);
-  border-left: 3px solid var(--el-text-color-placeholder);
-  border-radius: var(--el-border-radius-small, 4px);
-  background: var(--el-fill-color-light);
-
-  &.verdict-pass { border-left-color: var(--el-color-success); }
-  &.verdict-fail { border-left-color: var(--el-color-danger); }
-}
-
-.verdictBadge {
-  flex: 0 0 auto;
-  padding: 0 5px;
-  border-radius: 4px;
-  background: var(--el-text-color-placeholder);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 16px;
-  letter-spacing: 0.04em;
-
-  .verdict-pass & { background: var(--el-color-success); }
-  .verdict-fail & { background: var(--el-color-danger); }
-}
-
-.verdictText {
-  flex: 1;
-  min-width: 0;
-  color: var(--el-text-color-regular);
-  font-size: 11px;
-  line-height: 16px;
-  // Two-line clamp: the verdict can be a long reviewer note.
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 .status-running .contentCard,

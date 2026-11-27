@@ -8,15 +8,15 @@
  * protocol constants. Pure registry checks — no host required.
  *
  * Asserts:
- *  - FUNCTIONAL_NODES: exactly 15 entries, each with family + modality, no
+ *  - FUNCTIONAL_NODES: exactly 11 entries, each with family + modality, no
  *    step, covering the role × modality grid (4 sources / 4 generators /
- *    4 reviewers / 3 combiners);
+ *    3 combiners);
  *  - MOVIE_NODES: the six legacy step nodes keep step 1..6, are all
  *    `deprecated: true`, and carry no family/modality;
  *  - slot system: SUBTYPE_OF is acyclic with base values in MEDIA_SLOT_TYPES,
  *    and slotCompatible honours subtyping, wildcard, direction rules, and the
  *    mixed-modality REF supertype;
- *  - buildObjectInfo over the merged registry advertises all 21 class types,
+ *  - buildObjectInfo over the merged registry advertises all 17 class types,
  *    routes optional inputs to `input.optional`, and flags deprecated nodes;
  *  - templates: every class type is known, link endpoints exist, slot indices
  *    are in range, widget overrides match schema widgets, every link is
@@ -54,9 +54,9 @@ function check(label: string, ok: boolean, detail = ''): void {
 const ALL_NODES: readonly MovieNodeSchema[] = [...MOVIE_NODES, ...FUNCTIONAL_NODES]
 const byClassType = new Map<string, MovieNodeSchema>(ALL_NODES.map((node): [string, MovieNodeSchema] => [node.classType, node]))
 
-// ── 1. functional catalog: the 15-class role × modality grid (D3) ──
+// ── 1. functional catalog: the 11-class role × modality grid (D3) ──
 
-check('FUNCTIONAL_NODES has exactly 15 entries', FUNCTIONAL_NODES.length === 15, `got ${FUNCTIONAL_NODES.length}`)
+check('FUNCTIONAL_NODES has exactly 11 entries', FUNCTIONAL_NODES.length === 11, `got ${FUNCTIONAL_NODES.length}`)
 check(
   'every functional node declares family + modality and no step',
   FUNCTIONAL_NODES.every((node): boolean => node.family !== undefined && node.modality !== undefined && node.step === undefined),
@@ -66,27 +66,17 @@ check(
   new Set(ALL_NODES.map((node): string => node.classType)).size === ALL_NODES.length,
 )
 
-const GRID: Readonly<Record<string, number>> = { source: 4, generator: 4, reviewer: 4, combiner: 3 }
+const GRID: Readonly<Record<string, number>> = { source: 4, generator: 4, combiner: 3 }
 for (const [family, expected] of Object.entries(GRID)) {
   const members = FUNCTIONAL_NODES.filter((node): boolean => node.family === family)
   check(`family "${family}" has ${expected} classes`, members.length === expected, `got ${members.length}`)
 }
 const MODALITIES = ['text', 'image', 'video', 'audio'] as const
-for (const family of ['source', 'generator', 'reviewer'] as const) {
+for (const family of ['source', 'generator'] as const) {
   for (const modality of MODALITIES) {
     const hit = FUNCTIONAL_NODES.some((node): boolean => node.family === family && node.modality === modality)
     check(`grid cell ${family}/${modality} exists`, hit)
   }
-}
-
-// Reviewers: one required typed input, verdict + forwarded artifact out (D3).
-for (const modality of MODALITIES) {
-  const reviewer = FUNCTIONAL_NODES.find((node): boolean => node.family === 'reviewer' && node.modality === modality)
-  const ok = reviewer !== undefined
-    && reviewer.inputs.length === 1 && reviewer.inputs[0]!.optional !== true
-    && reviewer.outputs.length === 2 && reviewer.outputs[0]!.type === 'VERDICT'
-    && reviewer.outputs[1]!.type === reviewer.inputs[0]!.type
-  check(`reviewer/${modality} shape (1 required in, verdict + passthrough out)`, ok)
 }
 
 // ── 2. legacy step nodes: deprecated but still executable aliases (D1) ──
@@ -134,7 +124,7 @@ check(`slotCompatible: wildcard source ${ANY_SLOT_TYPE} → ${REF_SLOT_TYPE}`, s
 // ── 4. object_info projection (D1/D2) ──
 
 const info = buildObjectInfo(ALL_NODES)
-check('object_info advertises all 21 class types', Object.keys(info).length === ALL_NODES.length, `got ${Object.keys(info).length}`)
+check('object_info advertises all 17 class types', Object.keys(info).length === ALL_NODES.length, `got ${Object.keys(info).length}`)
 check('object_info flags exactly the six legacy nodes deprecated', Object.entries(info).filter(([, entry]): boolean => entry.deprecated).length === 6)
 check(
   'object_info routes optional inputs to input.optional',
@@ -156,8 +146,8 @@ check(
 )
 check(
   'object_info keeps required inputs in input.required',
-  Object.keys(info['TextReviewer']!.input.required).join(',') === 'criteria,text'
-    && Object.keys(info['TextReviewer']!.input.optional).length === 0,
+  Object.keys(info['SaveOutput']!.input.required).join(',') === 'media'
+    && Object.keys(info['SaveOutput']!.input.optional).length === 0,
 )
 check('object_info marks SaveOutput as output node', info['SaveOutput']!.output_node && info['SaveOutput']!.is_output_node)
 
